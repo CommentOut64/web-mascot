@@ -1,0 +1,116 @@
+{
+  "_readme": [
+    "动画自定义配置（网页版默认档）—— 保存后刷新页面，或控制台执行 __mascotConfig.reload() 立即生效。",
+    "字段说明见 web-mascot/ANIMATION_CONFIG.md；下面 _example 不会被读取，需要时复制到 defaults / mascots 里。",
+    "",
+    "allowBehaviors    只允许出现这些行为（缺省 = 全部允许）。名字取自 behaviors.xml 的 <Behavior Name>。",
+    "denyBehaviors     永不出现这些行为，优先级高于 allowBehaviors。",
+    "behaviorWeights   行为权重，覆盖 XML 的 Frequency。0 = 禁用；给 Frequency=\"0\" 的行为赋正值可打开它",
+    "                  （引擎强制行为除外：Fall / Dragged / Thrown）。",
+    "actionDurations   动作持续 tick 数（1 tick = 40ms）。名字取自 actions.xml 的 <Action Name>。",
+    "                  可写 [最小, 最大] 或单个数字；也会限制 Run/Walk 这类本来由目标决定时长的动作。",
+    "durationScale     全局时长倍率（0.05–20），只作用于 XML 自带的 Duration。1 = 不改动 pack 节奏。",
+    "scale             宠物绘制大小倍率（0.2–4，1 = pack 原生 128px）。引擎内部按「1 虚拟单位 = 1 贴图像素」",
+    "                  工作（同 libshijima 的 environment::set_scale），只在渲染与鼠标输入两处换算，",
+    "                  所以 pack 里写死的像素常量（top+64、width-128、Velocity、Offset Y=1、热点坐标）在任何大小下都成立。",
+    "                  素材只有 128px：1.25 尚可、1.5 起明显发虚，缩小反而更锐利。网页通用建议 1.25。",
+    "forcedSwitchTicks 静止超过 N tick 就换行为（网页不显得呆）。正在走/跑/爬时不会被打断。",
+    "maxBehaviorTicks  单个行为硬上限 N tick，超时即换（掉落/拖拽除外）。用于刹住 40 秒级的爬墙与漫长爬行。",
+    "interactionCooldownTicks  刚互动完（抱/互扔）之后，这类需要伙伴的行为从候选池里拿掉 N tick。",
+    "                  没有它时，两只抱完还贴在一起，下一次抽取立刻又连上，会连续抱个不停（实测间隔 0.1 秒）。",
+    "maxTravelPx       水平游走目标的最大距离（px）。只夹紧「游走型」目标；",
+    "                  恰好指向边界的目标（走过去爬墙那种）保持原样，否则会破坏后续动作。",
+    "partnerWeights    需要伙伴的行为（抱/扔/等抱/注意掉落）专用权重：alone = 单只时、withPartner = 场上有伙伴时、",
+    "                  reachable = 另一只同高度且在扫描半径内（此刻扫描就能连上）时。",
+    "                  这类行为在 XML 里权重高达 1000–3000（桌面多宠物场景），且两家 pack 命名不同",
+    "                  （Neuron 叫 HugEvil、Eviling 叫 HugNeuro），所以引擎是按动作类型识别、用这几个数字赋值，",
+    "                  不依赖名字。若某行为名在 behaviorWeights 里另有指定，则以 behaviorWeights 为准。",
+    "scanDistancePx   「找伙伴」的搜索半径（px），默认 256（libshijima 为桌面选的）。网页更宽，",
+    "                  调大才能让两只宠物互相发现；太大会让远处的宠物也被吸引过去。",
+    "zone              宠物活动矩形 { left, right, top, bottom }，会成为它的工作区（地板/墙/天花板都跟着变）。",
+    "                  取值：像素数字、\"40%\"、或 left|right|top|bottom|center。缺省 = 整个视口。",
+    "spawn             启动位置：vertical = top|floor（默认 top，从上方落下）、x = 水平位置（像素/百分比/关键字）、",
+    "                  topOffset = top 模式起始高度、staggerPx = 每多一只宠物额外错开的距离（避免叠在一起）。",
+    "reducedMotion     当系统开启「减少动态效果」时，叠加在 defaults 上的一组选项（宿主自行决定内容）。",
+    "respectReducedMotion 设为 false 则忽略系统偏好。",
+    "",
+    "本档的取值取向：默认是「网页宠物」而不是桌面宠物——站立静止不超过 10 秒（forcedSwitchTicks 250），",
+    "任何单个行为不超过 15 秒（maxBehaviorTicks 375），游走不超过 240px（maxTravelPx），",
+    "互动行为用 partnerWeights 分档（单只 40、有伙伴 1200），并有 520px 的搜索半径，两只宠物会主动靠近互抱。",
+    "实测预期：位移时间占比 ~35%、最长静止 ≤10s、每分钟真实位移事件 4 次上下、画面变化 ~100 次/分。"
+  ],
+  "_example": {
+    "mascots": {
+      "Neuron": {
+        "zone": { "left": "8%", "right": "92%" },
+        "actionDurations": { "Sit": [200, 400] },
+        "scale": 1.25,
+        "spawn": { "vertical": "floor", "x": "25%" }
+      },
+      "Eviling": {
+        "behaviorWeights": { "SitDown": 40, "RunAlongWorkAreaFloor": 400 },
+        "spawn": { "x": "75%" }
+      }
+    }
+  },
+  "version": 1,
+  "respectReducedMotion": true,
+  "defaults": {
+    "denyBehaviors": ["ChaseMouse"],
+    "forcedSwitchTicks": 750,
+    "maxBehaviorTicks": 900,
+    "maxTravelPx": 240,
+    "interactionCooldownTicks": 500,
+    "scale": 1.25,
+    "partnerWeights": { "alone": 40, "withPartner": 150, "reachable": 1800 },
+    "scanDistancePx": 520,
+    "actionDurations": {
+      "HoldOntoWall": 120,
+      "HoldOntoCeiling": 120,
+      "ClimbWall": 150,
+      "ClimbCeiling": 150,
+      "ClimbAlongWall": 200,
+      "ClimbAlongCeiling": 200,
+      "ClimbHalfwayAlongWall": 200,
+      "CrawlAlongWorkAreaFloor": 300
+    },
+    "spawn": {
+      "vertical": "top",
+      "x": "center",
+      "topOffset": 100,
+      "staggerPx": 180
+    },
+    "behaviorWeights": {
+      "CrawlAlongWorkAreaFloor": 30,
+      "SitAndFaceMouse": 40,
+      "NoticeFallingTutel": 200,
+      "HurlEvil": 600,
+      "FallFromWall": 400,
+      "ClimbHalfwayAlongWall": 60,
+      "ClimbAlongWall": 60,
+      "HoldOntoWall": 60,
+      "FallFromCeiling": 300,
+      "ClimbAlongCeiling": 60,
+      "HoldOntoCeiling": 60,
+      "GrabWorkAreaBottomLeftWall": 50,
+      "GrabWorkAreaBottomRightWall": 50,
+      "RunAndGrabBottomLeftWall": 50,
+      "RunAndGrabBottomRightWall": 50
+    }
+  },
+  "reducedMotion": {
+    "forcedSwitchTicks": 400,
+    "maxBehaviorTicks": 600,
+    "maxTravelPx": 140,
+    "denyBehaviors": [
+      "ChaseMouse",
+      "RunAlongWorkAreaFloor",
+      "RunAndGrabBottomLeftWall",
+      "RunAndGrabBottomRightWall",
+      "JumpFromLeftWall",
+      "JumpFromRightWall",
+      "ClimbAlongCeiling"
+    ]
+  },
+  "mascots": {}
+}

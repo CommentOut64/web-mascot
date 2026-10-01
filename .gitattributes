@@ -1,0 +1,16 @@
+# 仓库内统一按 LF 存储与检出，避免依赖机器级的 core.autocrlf 设置。
+* text=auto eol=lf
+
+# 二进制资源不做行尾转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.mp3 binary
+*.zip binary

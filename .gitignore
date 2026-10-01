@@ -1,0 +1,39 @@
+# ---------- 依赖 ----------
+node_modules/
+.pnpm-store/
+
+# ---------- 构建产物 ----------
+dist/
+dist-ssr/
+*.local
+.vite/
+coverage/
+*.tsbuildinfo
+
+# ---------- 运行时日志 ----------
+# 宠物运行产生的分目录日志、录制文件
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------- 环境变量 ----------
+.env
+.env.*
+!.env.example
+
+# ---------- 第三方源码检出 ----------
+# NeurolingsCE-Qt 是上游仓库的独立克隆
+# （remote: https://github.com/qingchenyouforcc/NeurolingsCE-Qt.git），
+# 由该仓库自行维护，不纳入本仓库版本管理。
+external/
+
+# ---------- 编辑器与系统文件 ----------
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
