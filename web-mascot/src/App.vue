@@ -8,6 +8,18 @@
     </div>
   </div>
 
+  <div class="scroll-content">
+    <h1>Scroll Test Page</h1>
+    <p>向下滚动网页来测试宠物的滚动反馈！</p>
+    <p v-for="i in 100" :key="i">
+      这是第 {{ i }} 段测试文本。尝试在这里上下滚动，你可以观察到：<br/>
+      1. 向下滚动时，宠物会掉落（进入 Fall 状态）。<br/>
+      2. 向上滚动时，宠物会趴在地上（进入 LieDown 状态）。<br/>
+      3. 停止滚动后，趴着的宠物会重新站起来。<br/>
+      4. 如果宠物在墙上或半空中，你也能看到相应的平滑处理！
+    </p>
+  </div>
+
   <div ref="petContainer" id="web-mascot-root"></div>
 </template>
 
@@ -44,7 +56,7 @@ function clearPets() {
 
 <style scoped>
 .test-panel {
-  position: absolute;
+  position: fixed;
   top: 20px;
   right: 20px;
   background: white;
@@ -72,5 +84,25 @@ button {
   height: 100vh;
   pointer-events: none; /* Let clicks pass through to background */
   z-index: 9999;
+}
+.scroll-content {
+  padding: 40px;
+  max-width: 800px;
+  margin: 0 auto;
+  font-family: sans-serif;
+  color: #444;
+}
+.scroll-content h1 {
+  font-size: 2em;
+  margin-bottom: 1em;
+}
+.scroll-content p {
+  margin-bottom: 2em;
+  line-height: 1.8;
+  font-size: 1.1em;
+  background-color: #fff;
+  padding: 15px;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
 }
 </style>

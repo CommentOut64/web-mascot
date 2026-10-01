@@ -188,6 +188,10 @@ export class MascotEngine {
   private observedPath = "";
   private observedImage = "";
   private clampReported = false;
+  private eventsAbortController = new AbortController();
+  private resizeTimer = 0;
+  private isScrolling = false;
+  private scrollDebounceTimer = 0;
   /** Set for the tick on which an Offset action moved the anchor on purpose. */
   private offsetJumped = false;
   /** How long the current behaviour has been running, for the hard cap. */
@@ -419,7 +423,7 @@ export class MascotEngine {
     if (this.visible === visible) return;
     this.visible = visible;
     if (visible) {
-      this.resumeLoop();
+      if (!document.hidden) this.resumeLoop();
       return;
     }
     cancelAnimationFrame(this.loopId);
@@ -447,6 +451,9 @@ export class MascotEngine {
     cancelAnimationFrame(this.loopId);
     this.intersectionObserver?.disconnect();
     this.intersectionObserver = null;
+    this.eventsAbortController.abort();
+    window.clearTimeout(this.resizeTimer);
+    window.clearTimeout(this.scrollDebounceTimer);
     this.emit({ kind: "despawn", detail: "destroy()" });
     MascotEngine.liveEngines.delete(this);
     if (this.elRoot.parentNode) this.elRoot.parentNode.removeChild(this.elRoot);
@@ -579,6 +586,8 @@ export class MascotEngine {
   }
 
   private bindEvents() {
+    const signal = this.eventsAbortController.signal;
+
     this.elRoot.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
       // libshijima animation::handle_dragging(): a press inside a hotspot runs that
@@ -612,7 +621,8 @@ export class MascotEngine {
       // interaction it is in.
       this.interaction.finalize();
       this.setBehavior("Dragged", "drag-start");
-    });
+    }, { signal });
+
     window.addEventListener("mousemove", (e) => {
       this.cursorX = e.clientX;
       this.cursorY = e.clientY;
@@ -622,19 +632,169 @@ export class MascotEngine {
       if (this.isDragging) return;
       // libshijima's UI asks for the hotspot under the cursor to give feedback.
       this.elRoot.style.cursor = this.hotspotUnderCursor(e.clientX, e.clientY) ? "pointer" : "grab";
-    });
+    }, { signal });
+
     window.addEventListener("mouseup", () => {
       if (!this.isDragging) return;
       this.isDragging = false;
       this.elRoot.style.cursor = "grab";
       this.setBehavior("Thrown", "drag-release");
-    });
+    }, { signal });
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        if (this.isDragging) {
+          this.isDragging = false;
+          this.elRoot.style.cursor = "grab";
+          this.setBehavior("Thrown", "drag-release");
+        }
+        window.clearTimeout(this.scrollDebounceTimer);
+        this.isScrolling = false;
+        cancelAnimationFrame(this.loopId);
+        this.emit({
+          kind: "milestone",
+          name: "paused",
+          detail: "tab hidden",
+          x: this.x,
+          y: this.y,
+          leaf: this.leafLabel(),
+        });
+      } else {
+        this.lastScrollY = window.scrollY;
+        if (this.visible) {
+          this.emit({
+            kind: "milestone",
+            name: "resumed",
+            detail: "tab visible",
+            x: this.x,
+            y: this.y,
+            leaf: this.leafLabel(),
+          });
+          this.resumeLoop();
+        }
+      }
+    }, { signal });
+
+    window.addEventListener("resize", () => {
+      window.clearTimeout(this.resizeTimer);
+      this.resizeTimer = window.setTimeout(() => {
+        const borderBefore = this.currentBorderAt(undefined);
+        
+        this.partnerCache.clear();
+        this.travelCache.clear();
+        this.borderStartCache.clear();
+        this.behaviorUsability.clear();
+        
+        this.clampToWorkArea();
+        
+        const area = this.area();
+        for (const frame of this.actionStack) {
+          if (frame.resolved) {
+            if (typeof frame.resolved.TargetX === "number") {
+               frame.resolved.TargetX = Math.max(area.left, Math.min(area.right, frame.resolved.TargetX));
+            }
+            if (typeof frame.resolved.TargetY === "number") {
+               frame.resolved.TargetY = Math.max(area.top, Math.min(area.bottom, frame.resolved.TargetY));
+            }
+          }
+        }
+
+        const borderAfter = this.currentBorderAt(undefined);
+        if (borderBefore && !borderAfter && !/Jump|Fall|Thrown|Dragged/i.test(this.currentBehavior?.name || "")) {
+           this.setBehavior("Fall", "resize-border-lost");
+        }
+      }, 200);
+    }, { signal });
+
     window.addEventListener("scroll", () => {
       const delta = (window.scrollY - this.lastScrollY) / this.spriteScale;
       this.lastScrollY = window.scrollY;
+      
+      if (this.isDragging || delta === 0) return;
+      this.isScrolling = true;
+
+      const borderBefore = this.currentBorderAt(undefined);
+
       this.y -= delta;
-      if (!this.isDragging && delta !== 0) this.setBehavior("Fall", "scroll");
-    });
+      
+      const area = this.area();
+      let targetOutOfBounds = false;
+      for (const frame of this.actionStack) {
+        if (frame.resolved && typeof frame.resolved.TargetY === "number") {
+          frame.resolved.TargetY -= delta;
+          if (frame.resolved.TargetY < area.top || frame.resolved.TargetY > area.bottom) {
+             targetOutOfBounds = true;
+          }
+        }
+      }
+      this.clampToWorkArea();
+      
+      const isAtCeiling = this.y <= area.top + 1;
+      const isAtFloor = this.y >= area.bottom - 1;
+
+      // 1. 若原本在天花板上：页面滚动无论上下，立即脱离天花板下落
+      if (borderBefore === "Ceiling") {
+        this.y = area.top + 2;
+        if (this.currentBehavior?.name !== "Fall") {
+          this.setBehavior("Fall", "scroll-ceiling-drop");
+        }
+      }
+      // 2. 向上滚动（delta < 0）：宠物被推向地面
+      else if (delta < 0) {
+        if (isAtFloor) {
+          // 只要处于或接触地面，必定进入/保持趴地状态（无论此前是地面动作还是下落/落地弹跳）
+          if (this.currentBehavior?.name !== "LieDown") {
+            this.setBehavior("LieDown", "scroll-up-liedown");
+          }
+        } else if (borderBefore === "Wall") {
+          if (this.x <= area.left + 1) this.x += 2;
+          else if (this.x >= area.right - 1) this.x -= 2;
+          if (this.currentBehavior?.name !== "Fall") {
+            this.setBehavior("Fall", "scroll-hit-floor");
+          }
+        }
+      }
+      // 3. 向下滚动（delta > 0）：宠物被推向顶部或脱离地面
+      else if (delta > 0) {
+        if (borderBefore === "Wall") {
+          if (isAtCeiling) {
+            if (this.x <= area.left + 1) this.x += 2;
+            else if (this.x >= area.right - 1) this.x -= 2;
+            this.y = area.top + 2;
+            if (this.currentBehavior?.name !== "Fall") this.setBehavior("Fall", "scroll-hit-ceiling");
+          }
+        } else if (targetOutOfBounds) {
+          if (this.currentBehavior?.name !== "Fall") {
+            if (this.x <= area.left + 1) this.x += 2;
+            else if (this.x >= area.right - 1) this.x -= 2;
+            this.setBehavior("Fall", "scroll-target-lost");
+          }
+        } else if (this.currentBehavior?.name === "Fall") {
+          // 下落中接触顶部：保持下落状态，消除向上动量
+          if (isAtCeiling) {
+            this.vy = 0;
+          }
+        } else {
+          // 在地面时向下滚动：脱离地面掉落
+          if (isAtCeiling) {
+            this.y = area.top + 2;
+          }
+          if (this.currentBehavior?.name !== "Fall") {
+            this.setBehavior("Fall", "scroll-down-fall");
+          }
+        }
+      }
+
+      // 滚动停止后恢复
+      window.clearTimeout(this.scrollDebounceTimer);
+      this.scrollDebounceTimer = window.setTimeout(() => {
+        this.isScrolling = false;
+        if (!this.isDragging && this.currentBehavior?.name === "LieDown") {
+          this.setBehavior("StandUp", "scroll-stop");
+        }
+      }, 250);
+
+    }, { signal });
   }
 
   /**
@@ -1668,7 +1828,7 @@ export class MascotEngine {
     const candidates: Array<["Floor" | "Wall" | "Ceiling", boolean]> = [
       ["Floor", environment.floor.isOn(point)],
       ["Wall", environment.wall.isOn(point)],
-      ["Ceiling", environment.ceiling.isOn(point)],
+      ["Ceiling", !this.isScrolling && environment.ceiling.isOn(point)],
     ];
     for (const [name, on] of candidates) {
       if (on && name !== lost) return name;
@@ -1897,13 +2057,22 @@ export class MascotEngine {
       const point = { x: this.x, y: this.y };
       const onFloor = environment.floor.isOn(point);
       const onCeiling = environment.ceiling.isOn(point);
-      const onEdge = onFloor || onCeiling || environment.workArea.isOn(point);
+      const onWall = environment.wall.isOn(point);
+      const onTop = onCeiling || this.borderIsOn("top", point, this.area());
+
+      // 页面滚动时或自由下落时碰触顶部，绝不能算作着陆，始终保持掉落状态
+      if (onTop && (this.isScrolling || this.currentBehavior?.name === "Fall")) {
+        if (this.vy < 0) this.vy = 0;
+      }
+
+      const landingOnCeiling = !this.isScrolling && this.currentBehavior?.name !== "Fall" && onCeiling;
+      const onEdge = onFloor || onWall || landingOnCeiling;
       if (onEdge) {
         this.vx = this.vy = 0;
         this.emit({
           kind: "milestone",
           name: "land",
-          detail: `fall ended at ${onFloor ? "floor" : onCeiling ? "ceiling" : "wall"}`,
+          detail: `fall ended at ${onFloor ? "floor" : landingOnCeiling ? "ceiling" : "wall"}`,
           x: this.x,
           y: this.y,
           leaf: this.leafLabel(),
@@ -2086,6 +2255,10 @@ export class MascotEngine {
     // pool of ~250), became a ~1% draw. Behaviours with no border requirement, and
     // those that move the mascot first (`Offset`), stay available.
     const standingOn = this.currentBorderAt(undefined);
+    if (this.isScrolling && (standingOn === "Ceiling" || this.y <= this.area().top + 1)) {
+      this.setBehavior("Fall", "scroll-no-ceiling");
+      return;
+    }
     if (standingOn) {
       const runnable = pool.filter((candidate) => {
         const start = this.firstBorderOf(candidate.name);
