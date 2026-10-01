@@ -66,7 +66,23 @@ export type EngineEvent =
       y: number;
     }
   | { kind: "image"; image: string; leaf: string; x: number; y: number }
-  | { kind: "milestone"; name: string; detail: string; x: number; y: number; leaf: string }
+  | {
+      kind: "milestone";
+      name: string;
+      detail: string;
+      x: number;
+      y: number;
+      leaf: string;
+      /** Interaction milestones: who advertised / scanned / arrived. */
+      affordance?: string;
+      side?: "server" | "client";
+      /** The behaviour the interaction will hand over to, when known. */
+      behavior?: string;
+      /** The peer's anchor, in page pixels, for `interaction-arrived`. */
+      target?: [number, number];
+      /** Scan distance to the nearest live broadcast. */
+      distance?: number;
+    }
   | {
       kind: "suspect";
       name: string;
@@ -423,7 +439,21 @@ export class MascotEngine {
     if (this.visible === visible) return;
     this.visible = visible;
     if (visible) {
-      if (!document.hidden) this.resumeLoop();
+      // Only the viewport pause resumes here: a resume forced by the tab becoming
+      // visible is reported by the visibilitychange handler, which owns that
+      // reason. Without this the viewport pause had no matching recovery, so a
+      // log could not tell "still frozen" from "resumed while nobody looked".
+      if (!document.hidden) {
+        this.emit({
+          kind: "milestone",
+          name: "resumed",
+          detail: "container back in viewport",
+          x: this.x,
+          y: this.y,
+          leaf: this.leafLabel(),
+        });
+        this.resumeLoop();
+      }
       return;
     }
     cancelAnimationFrame(this.loopId);
@@ -1107,9 +1137,10 @@ export class MascotEngine {
     if (typeof affordance !== "string" || affordance.trim() === "") return;
     const label = `${frame.node.name ?? frame.node.className ?? "?"}|${frame.node.type}`;
     if (this.isScanMove(frame.node)) {
-      const scan = MascotEngine.broadcasts.probe(affordance.trim(), { x: this.x, y: this.y });
+      const probe = affordance.trim();
+      const scan = MascotEngine.broadcasts.probe(probe, { x: this.x, y: this.y });
       frame.client = MascotEngine.broadcasts.tryConnect(
-        affordance.trim(),
+        probe,
         { x: this.x, y: this.y },
         this.varString(frame, "Behavior"),
         this.varString(frame, "TargetBehavior"),
@@ -1119,6 +1150,10 @@ export class MascotEngine {
         kind: "milestone",
         name: frame.client ? "broadcast-connect" : "broadcast-scan",
         detail: `affordance=${affordance} live=${scan.live} nearest=${scan.nearest === null ? "-" : this.toPage(scan.nearest).toFixed(0)}px found=${!!frame.client}`,
+        affordance: probe,
+        side: "client",
+        behavior: this.varString(frame, "Behavior"),
+        distance: scan.nearest === null ? undefined : this.toPage(scan.nearest),
         x: this.x,
         y: this.y,
         leaf: label,
@@ -1133,6 +1168,9 @@ export class MascotEngine {
       kind: "milestone",
       name: "broadcast-start",
       detail: `affordance=${affordance}`,
+      affordance: affordance.trim(),
+      side: "server",
+      behavior: this.varString(frame, "Behavior"),
       x: this.x,
       y: this.y,
       leaf: label,
@@ -2035,6 +2073,8 @@ export class MascotEngine {
           kind: "milestone",
           name: "interaction-arrived",
           detail: `partner=(${this.toPage(target.x).toFixed(1)},${this.toPage(target.y).toFixed(1)}) behavior=${next || "-"}`,
+          behavior: next || undefined,
+          target: [this.toPage(target.x), this.toPage(target.y)],
           x: this.x,
           y: this.y,
           leaf: this.leafLabel(),

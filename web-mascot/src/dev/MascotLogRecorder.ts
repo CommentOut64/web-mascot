@@ -2,19 +2,84 @@ import { MascotEngine } from "../core/MascotEngine";
 import type { EngineEvent } from "../core/MascotEngine";
 
 /**
- * Permanent mascot observation log.
+ * Mascot observation log — minimal form.
  *
- * Every mascot gets its own file, so two mascots released one after another end
- * up in two logs. One browser session (one page load / frontend start) maps to
- * one directory:
+ * One browser session maps to one directory, one pet to one file:
  *
  *     <repo>/logs/<session>/pet-1-Neuron.log
  *     <repo>/logs/<session>/pet-2-Eviling.log
- *     <repo>/logs/<session>/pet-_index.log     session header + JS errors
+ *     <repo>/logs/<session>/pet-_index.log    session header + visibility + JS errors
+ *
+ * The engine emits a rich, flat event stream (action stack frames, decoded
+ * frames, diagnostics, milestones). This recorder is deliberately a *filter*:
+ * it keeps only the events that are needed to reconstruct where a mascot went,
+ * what it was doing, and how the recording was interrupted. Everything the
+ * filter drops is either a restatement of an event that is still kept, or
+ * per-frame noise that the trajectory can be rebuilt without.
+ *
+ * Per pet, the whole motion history is four primary record kinds (always JSON
+ * lines with a `t` in seconds and a `k`); fields are only what the kind cannot
+ * imply:
+ *
+ *   {"t":3.3,"k":"spawn","mascot":"Neuron","x":501,"y":100}
+ *   {"t":20.5,"k":"behavior","from":"AskForHugs","to":"Fall","reason":"scroll-down-fall","x":501,"y":155}
+ *   {"t":21,"k":"move","x":501,"y":293.55}
+ *   {"t":17,"k":"stop","x":708.99,"y":755,"behavior":"WalkRightAndSit"}
+ *   {"t":17.7,"k":"pose","img":"shime11.png","x":708.99,"y":755}
+ *   {"t":154,"k":"heartbeat","x":950,"y":900,"behavior":"Stand"}
+ *
+ * Mascots can also act on each other through affordance broadcasts. Those records
+ * use `k:"peer"` and are the only ones that describe two pets at once, so they
+ * carry the affordance name (the shared key that pairs the two logs) and, for a
+ * scanner, the target behaviour it is about to hand over to. Fields the engine
+ * does not have at that moment are simply absent:
+ *
+ *   {"t":13.96,"k":"peer","event":"offer","side":"server","affordance":"CuddleNeuro","x":499.5,"y":795}
+ *   {"t":15.45,"k":"peer","event":"connect","affordance":"CuddleNeuro","behavior":"IHugYou","distance":180,"x":679.5,"y":795}
+ *   {"t":16.17,"k":"peer","event":"arrive","behavior":"IHugYou","target":[499.5,795],"x":499.5,"y":795}
+ *   {"t":42.4,"k":"peer","event":"scan-miss","affordance":"CuddleEvil","behavior":"IHugYou","x":1.25,"y":795}
+ *
+ * The two sides of one handshake are joined by `affordance` + `t`: one pet's
+ * `offer` is the other pet's `connect`, and the resulting behaviour switches show
+ * up as ordinary `behavior` records with `reason:"interaction-server"` /
+ * `"interaction-client"`. A `scan-miss` is the one diagnostic kept, collapsed to
+ * consecutive-identical form, because "this affordance has no partner" is a real
+ * behavioural fact (it explains why a scan behaviour runs and nothing happens).
+ * An `offer` only carries `behavior` when the advertising action declares one.
+ *
+ * Freezes are recorded per pet as `k:"lifecycle"`, so a gap in the timeline is
+ * explained rather than ambiguous. The engine freezes for three reasons (tab
+ * hidden, container scrolled out of the viewport, and a tab-hide during a drag),
+ * and every freeze has a matching resume:
+ *
+ *   {"t":11.8,"k":"lifecycle","event":"freeze","reason":"hidden","x":501,"y":755}
+ *   {"t":26.2,"k":"lifecycle","event":"resume","reason":"visible","x":501,"y":755}
+ *   {"t":40.1,"k":"lifecycle","event":"freeze","reason":"viewport","x":501,"y":755}
+ *   {"t":44.6,"k":"lifecycle","event":"resume","reason":"visible","x":501,"y":755}
+ *
+ * While a pet is frozen nothing can move or switch behaviour, so `t` jumping
+ * across a freeze/resume pair is the only correct reading of that gap. The
+ * session index additionally carries one tab-level `visibility` record for the
+ * whole page; this per-pet form is kept because the viewport reason is invisible
+ * to the index and because the index does not say which pet was affected.
+ *
+ * A segment is therefore `behavior` + zero or more `move` + one `stop`, and the
+ * path is the polyline of their (x, y). A `stop` is suppressed when the segment
+ * it would close was just opened, or when the pet never actually moved, because
+ * the surrounding `behavior` records already mark that boundary. `switch` (pacer /
+ * cap) records explain why one segment ended and the next began when no behaviour
+ * *name* changed, and `pose` records the frame the pet shows while standing still —
+ * deliberately not while it moves, where `move` already describes the segment.
+ *
+ * `spawn` / `despawn` / `suspect` are kept verbatim: they are rare and each one
+ * marks a real discontinuity (a new mascot, an end, or a single-tick jump).
+ *
+ * No record repeats itself in prose: an earlier revision carried a redundant
+ * `msg`/`note` restating the structured fields, which roughly halved the payload
+ * for no information a parser could not already read off the fields.
  *
  * Design constraints for a 30+ minute unattended recording:
- *   - records are produced only on state change (plus a slow heartbeat), never
- *     per animation frame;
+ *   - records are produced only on state change, never per animation frame;
  *   - the client buffer is bounded and flushed on a timer, so memory cannot grow;
  *   - a failed write is re-queued up to a cap and then the recorder disables
  *     itself instead of spinning;
@@ -24,15 +89,24 @@ import type { EngineEvent } from "../core/MascotEngine";
  */
 
 const ENDPOINT = "/__mascot-log";
-const FLUSH_INTERVAL_MS = 1000;
 const MAX_BUFFER_LINES = 256;
 const MAX_REQUEUE_LINES = 4096;
-/** Position sample cadence while the mascot is on the move. */
-const POS_INTERVAL_MS = 5000;
-/** Position sample cadence while it is standing still (proof of life). */
-const HEARTBEAT_MS = 15000;
-/** Ignore movement smaller than this for the position samples. */
-const POS_MIN_DELTA = 4;
+/** Coarse scan of every live pet. Movement detail comes from the sampler below. */
+const SAMPLE_INTERVAL_MS = 1000;
+/** Log a `move` point once the pet has travelled this far inside a segment. */
+const MOVE_MIN_PX = 32;
+/** ...or once this much time passed with the pet still walking (slow crawls). */
+const MOVE_MAX_GAP_MS = 3000;
+/** Never emit two `move` points closer together than this. */
+const MOVE_MIN_MS = 500;
+/** Ignore drift smaller than this when deciding whether the pet is moving. */
+const STILL_EPSILON_PX = 2;
+/** No movement for this long closes the segment with a `stop`. */
+const STOP_IDLE_MS = 1500;
+/** A segment that never moved this far is not worth closing with a `stop`. */
+const STOP_MIN_PX = 8;
+/** Proof of life only after this much complete silence. */
+const HEARTBEAT_MS = 120000;
 const MAX_PING_ATTEMPTS = 6;
 const PING_RETRY_MS = 500;
 const INDEX_PET = "_index";
@@ -40,31 +114,70 @@ const INDEX_PET = "_index";
 const session = new Date().toISOString().replace(/[:.]/g, "-");
 const startedAt = performance.now();
 const buffers = new Map<string, string[]>();
-const lastSample = new Map<string, { x: number; y: number; at: number }>();
-const episodes = new Map<string, Episode>();
+const trackers = new Map<string, MoveTracker>();
 
 let enabled = false;
 let disabled = false;
 let failures = 0;
 let started = false;
 
-interface Episode {
-  leaf: string;
-  samples: number;
-  xMin: number;
-  xMax: number;
-  yMin: number;
-  yMax: number;
-  travelled: number;
+/** Everything needed to turn the per-second scan into a compact trajectory. */
+interface MoveTracker {
+  /** Last point written to the log, and when. */
   x: number;
   y: number;
+  at: number;
+  /** Last observed point, even if it was below the logging threshold. */
+  seenX: number;
+  seenY: number;
+  /** When the pet last moved more than STILL_EPSILON_PX. */
+  movingSince: number;
+  /** Distance accumulated since the last written point. */
+  travelled: number;
+  /** The tick has been closed by a `stop`. */
+  stopped: boolean;
+  /** The pet moved during the last scan, so pose frames would be redundant. */
+  moving: boolean;
+  /** When anything was last written for this pet. */
+  lastLogAt: number;
+  /** When the last behaviour segment started, so a `stop` can be suppressed. */
+  lastBehaviorAt: number;
+  /** Signature of the last peer/switch event, to collapse repeated scans. */
+  lastEvent: string;
+  /** Pose already reported, so a static pose is written once. */
+  pose: string;
 }
 
 const round = (value: number) => Math.round(value * 100) / 100;
 const elapsed = () => (performance.now() - startedAt) / 1000;
 
+function tracker(pet: string, x: number, y: number): MoveTracker {
+  let state = trackers.get(pet);
+  if (!state) {
+    state = {
+      x,
+      y,
+      at: 0,
+      seenX: x,
+      seenY: y,
+      movingSince: 0,
+      travelled: 0,
+      stopped: true,
+      moving: false,
+      lastLogAt: 0,
+      lastBehaviorAt: 0,
+      lastEvent: "",
+      pose: "",
+    };
+    trackers.set(pet, state);
+  }
+  return state;
+}
+
 function push(pet: string, record: Record<string, unknown>) {
   if (!enabled || disabled) return;
+  const state = trackers.get(pet);
+  if (state) state.lastLogAt = performance.now();
   const line = JSON.stringify(record);
   let buffer = buffers.get(pet);
   if (!buffer) {
@@ -117,200 +230,274 @@ function disable(reason: string) {
   console.warn(`[mascot-log] recorder disabled: ${reason}`);
 }
 
-function episodeRecord(pet: string, episode: Episode, endX: number, endY: number) {
-  // Sequence/Select frames never own a pose, so they would only add noise.
-  if (episode.samples === 0) return;
-  const x = [round(episode.xMin), round(episode.xMax)];
-  const y = [round(episode.yMin), round(episode.yMax)];
-  push(pet, {
-    t: round(elapsed()),
-    k: "episode",
-    leaf: episode.leaf,
-    samples: episode.samples,
-    x,
-    y,
-    travelled: round(episode.travelled),
-    endedAt: [round(endX), round(endY)],
-    msg:
-      `episode ${episode.leaf}: samples=${episode.samples} x=${x[0]}..${x[1]} y=${y[0]}..${y[1]}` +
-      ` travelled=${round(episode.travelled)} endedAt=(${round(endX)},${round(endY)})`,
-  });
-}
-
-/** Coarse movement bookkeeping per action, emitted when the action ends. */
-function trackEpisode(pet: string, leaf: string, x: number, y: number) {
-  if (!leaf || leaf === "-") return;
-  const current = episodes.get(pet);
-  if (!current || current.leaf !== leaf) {
-    if (current) episodeRecord(pet, current, x, y);
-    episodes.set(pet, {
-      leaf,
-      samples: 0,
-      xMin: x,
-      xMax: x,
-      yMin: y,
-      yMax: y,
-      travelled: 0,
-      x,
-      y,
-    });
-    return;
-  }
-  current.samples++;
-  current.travelled += Math.hypot(x - current.x, y - current.y);
-  current.x = x;
-  current.y = y;
-  current.xMin = Math.min(current.xMin, x);
-  current.xMax = Math.max(current.xMax, x);
-  current.yMin = Math.min(current.yMin, y);
-  current.yMax = Math.max(current.yMax, y);
-}
-
-const targetText = (targetX: number | null, targetY: number | null) => {
-  const parts: string[] = [];
-  if (targetX !== null) parts.push(`X=${round(targetX)}`);
-  if (targetY !== null) parts.push(`Y=${round(targetY)}`);
-  return parts.length ? parts.join(",") : "none";
-};
-
 function observe(engine: MascotEngine, event: EngineEvent) {
   if (!enabled || disabled) return;
   const pet = engine.label;
   const t = round(elapsed());
+  const where = engine.position();
+  const x = round(where.x);
+  const y = round(where.y);
   switch (event.kind) {
     case "spawn": {
       const snapshot = engine.snapshot();
-      // Positions in the log are page pixels; the engine works in virtual units.
-      const where = engine.position();
-      const animation = MascotEngine.getAnimationConfig();
+      const now = performance.now();
+      trackers.set(pet, {
+        x: where.x,
+        y: where.y,
+        at: now,
+        seenX: where.x,
+        seenY: where.y,
+        movingSince: now,
+        travelled: 0,
+        stopped: true,
+        moving: false,
+        lastLogAt: now,
+        lastBehaviorAt: now,
+        lastEvent: "",
+        pose: `${snapshot.behavior}|${snapshot.image}`,
+      });
       push(pet, {
         t,
         k: "spawn",
         mascot: snapshot.mascot,
-        x: round(where.x),
-        y: round(where.y),
-        detail: event.detail,
-        config: animation.describe(snapshot.mascot),
-        msg:
-          `spawn ${snapshot.mascot} at (${round(where.x)},${round(where.y)}) ${event.detail}` +
-          ` | animation config: ${animation.describe(snapshot.mascot)}`,
+        x,
+        y,
       });
-      for (const line of animation.details(snapshot.mascot)) {
-        push(pet, { t, k: "config", detail: line, msg: `animation config ${line}` });
-      }
       break;
     }
     case "despawn":
-      push(pet, { t, k: "despawn", detail: event.detail, msg: `despawn ${event.detail}` });
+      push(pet, { t, k: "despawn", x, y });
       break;
-    case "behavior":
+    case "behavior": {
+      // A new segment: the previous one is implicitly closed here.
+      const now = performance.now();
+      const state = tracker(pet, where.x, where.y);
+      state.x = where.x;
+      state.y = where.y;
+      state.at = now;
+      state.seenX = where.x;
+      state.seenY = where.y;
+      state.travelled = 0;
+      state.stopped = false;
+      state.moving = false;
+      state.movingSince = now;
+      state.lastBehaviorAt = now;
+      state.pose = `${event.to}|${engine.snapshot().image}`;
       push(pet, {
         t,
         k: "behavior",
-        from: event.from,
+        from: event.from || "",
         to: event.to,
         reason: event.reason,
-        x: round(event.x),
-        y: round(event.y),
-        leaf: event.leaf,
-        msg:
-          `behavior ${event.from || "(none)"} -> ${event.to} [${event.reason}]` +
-          ` @(${round(event.x)},${round(event.y)}) leaf=${event.leaf}`,
+        x,
+        y,
       });
-      trackEpisode(pet, event.leaf, event.x, event.y);
       break;
-    case "stack":
+    }
+    case "image": {
+      // Pose frames are only interesting while the pet stands still. While it
+      // moves, the `move` records already describe the segment, and emitting a
+      // pose per frame would double the log for no extra information.
+      const state = tracker(pet, where.x, where.y);
+      if (state.moving) break;
+      const signature = `${engine.snapshot().behavior}|${event.image}`;
+      if (signature === state.pose) break;
+      state.pose = signature;
       push(pet, {
         t,
-        k: "stack",
-        path: event.path,
-        leaf: event.leaf,
-        type: event.nodeType,
-        cls: event.className,
-        border: event.border,
-        target: targetText(event.targetX, event.targetY),
+        k: "pose",
         img: event.image,
-        lookRight: event.lookRight,
-        x: round(event.x),
-        y: round(event.y),
-        msg:
-          `action ${event.path} [${event.nodeType}${event.className ? " " + event.className : ""}` +
-          `${event.border ? " BorderType=" + event.border : ""}] target=${targetText(event.targetX, event.targetY)}` +
-          ` img=${event.image} lookRight=${event.lookRight} @(${round(event.x)},${round(event.y)})`,
+        x,
+        y,
       });
-      trackEpisode(pet, event.leaf, event.x, event.y);
       break;
-    case "image":
+    }
+    case "milestone": {
+      // Two milestone families are state, not diagnostics:
+      //   broadcast-*         a pet offers an affordance, or claims one nearby
+      //   interaction-arrived the scanner reached its partner and hands over
+      // Everything else (clamp, border-lost, target-x, offset, hotspot, ...) is a
+      // per-tick diagnostic the trajectory does not need.
+      const track = tracker(pet, where.x, where.y);
+      // The engine freezes for three different reasons, and the session index only
+      // sees the tab-level one (and only once for the whole page). Per pet, record
+      // both the freeze and its recovery, with the reason, so a log can tell a
+      // frozen mascot from an idle one and a viewport freeze from a tab freeze.
+      if (event.name === "paused" || event.name === "resumed") {
+        const freeze = event.name === "paused";
+        // Each side reports its own reason, so a viewport freeze pairs with a
+        // viewport resume and a tab-hide freeze with a visible resume.
+        const viewport = event.detail.startsWith("container");
+        const reason = freeze ? (viewport ? "viewport" : "hidden") : viewport ? "viewport" : "visible";
+        push(pet, {
+          t,
+          k: "lifecycle",
+          event: freeze ? "freeze" : "resume",
+          reason,
+          x,
+          y,
+        });
+        track.lastEvent = "";
+        break;
+      }
+      if (event.name === "broadcast-connect" || event.name === "interaction-arrived") {
+        push(pet, {
+          t,
+          k: "peer",
+          event: event.name === "broadcast-connect" ? "connect" : "arrive",
+          affordance: event.affordance || undefined,
+          behavior: event.behavior || undefined,
+          distance:
+            typeof event.distance === "number" && Number.isFinite(event.distance)
+              ? round(event.distance)
+              : undefined,
+          target: event.target ? [round(event.target[0]), round(event.target[1])] : undefined,
+          x,
+          y,
+        });
+        // A completed handshake resets the miss collapse: the same affordance going
+        // unanswered again after a real interaction is new information.
+        track.lastEvent = "";
+        break;
+      }
+      if (event.name === "broadcast-start") {
+        push(pet, {
+          t,
+          k: "peer",
+          event: "offer",
+          side: "server",
+          affordance: event.affordance || undefined,
+          behavior: event.behavior || undefined,
+          x,
+          y,
+        });
+        track.lastEvent = "";
+        break;
+      }
+      if (event.name === "broadcast-scan") {
+        // A scan that found nobody only matters for the affordances nobody offers;
+        // the engine re-scans while walking, so consecutive identical misses are
+        // collapsed into one record.
+        const signature = `scan:${event.affordance ?? ""}`;
+        if (track.lastEvent === signature) break;
+        track.lastEvent = signature;
+        push(pet, {
+          t,
+          k: "peer",
+          event: "scan-miss",
+          affordance: event.affordance || undefined,
+          behavior: event.behavior || undefined,
+          x,
+          y,
+        });
+        break;
+      }
+      if (event.name !== "forced-switch" && event.name !== "behavior-cap") break;
+      const signature = `switch:${event.name}`;
+      if (track.lastEvent === signature) break;
+      track.lastEvent = signature;
       push(pet, {
         t,
-        k: "image",
-        img: event.image,
-        leaf: event.leaf,
-        x: round(event.x),
-        y: round(event.y),
-        msg: `frame ${event.image} leaf=${event.leaf} @(${round(event.x)},${round(event.y)})`,
+        k: "switch",
+        reason: event.name,
+        from: engine.snapshot().behavior,
+        x,
+        y,
       });
-      trackEpisode(pet, event.leaf, event.x, event.y);
       break;
-    case "milestone":
-      push(pet, {
-        t,
-        k: "milestone",
-        name: event.name,
-        detail: event.detail,
-        x: round(event.x),
-        y: round(event.y),
-        leaf: event.leaf,
-        msg: `${event.name} ${event.detail} @(${round(event.x)},${round(event.y)}) leaf=${event.leaf}`,
-      });
-      trackEpisode(pet, event.leaf, event.x, event.y);
-      break;
-    case "suspect":
+    }
+    case "suspect": {
       push(pet, {
         t,
         k: "suspect",
-        name: event.name,
-        detail: event.detail,
         step: round(event.step),
-        dx: round(event.dx),
-        dy: round(event.dy),
         from: [round(event.px), round(event.py)],
         to: [round(event.x), round(event.y)],
-        leaf: event.leaf,
-        msg:
-          `SUSPECT ${event.name} ${event.detail} (${round(event.px)},${round(event.py)}) ->` +
-          ` (${round(event.x)},${round(event.y)}) leaf=${event.leaf}`,
+        x,
+        y,
       });
-      trackEpisode(pet, event.leaf, event.x, event.y);
+      break;
+    }
+    default:
       break;
   }
 }
 
+/**
+ * Per-second scan. This is where the trajectory is written: while a pet moves it
+ * accumulates distance from the last written point and emits one `move` record as
+ * soon as the segment is long enough; when it falls still for a moment the
+ * segment is closed with a `stop`; and after minutes of silence a single
+ * `heartbeat` proves the mascot and its loop are still alive.
+ */
 function sampleOnTimer() {
   if (!enabled || disabled) return;
   const now = performance.now();
   for (const engine of MascotEngine.getInstances()) {
     const pet = engine.label;
     const snapshot = engine.snapshot();
-    const previous = lastSample.get(pet);
-    const moved = !previous || Math.hypot(snapshot.x - previous.x, snapshot.y - previous.y) >= POS_MIN_DELTA;
-    const interval = moved ? POS_INTERVAL_MS : HEARTBEAT_MS;
-    if (!previous || now - previous.at >= interval) {
-      lastSample.set(pet, { x: snapshot.x, y: snapshot.y, at: now });
+    const state = tracker(pet, snapshot.x, snapshot.y);
+    const step = Math.hypot(snapshot.x - state.seenX, snapshot.y - state.seenY);
+    if (step > STILL_EPSILON_PX) {
+      state.seenX = snapshot.x;
+      state.seenY = snapshot.y;
+      state.movingSince = now;
+      state.stopped = false;
+      state.moving = true;
+    } else {
+      state.moving = false;
+    }
+    state.travelled += step;
+    const rest = now - state.movingSince;
+    const t = round(elapsed());
+    if (rest <= STOP_IDLE_MS) {
+      // Moving: write a point once enough distance or time has accumulated.
+      const gap = now - state.at;
+      if (state.travelled >= MOVE_MIN_PX || (gap >= MOVE_MAX_GAP_MS && state.travelled >= STILL_EPSILON_PX)) {
+        if (gap < MOVE_MIN_MS) continue;
+        push(pet, {
+          t,
+          k: "move",
+          x: round(snapshot.x),
+          y: round(snapshot.y),
+        });
+        state.x = snapshot.x;
+        state.y = snapshot.y;
+        state.at = now;
+        state.travelled = 0;
+      }
+      continue;
+    }
+    // At rest: close the segment once, then keep quiet. A segment is only worth
+    // closing if the pet actually went somewhere — a static behaviour (LieDown,
+    // HoldOntoWall) that was entered and left without moving has nothing to
+    // report, and the behaviour records already bound it.
+    if (!state.stopped) {
+      state.stopped = true;
+      state.moving = false;
+      if (now - state.lastBehaviorAt < STOP_IDLE_MS) continue;
+      if (Math.hypot(snapshot.x - state.x, snapshot.y - state.y) < STOP_MIN_PX) continue;
       push(pet, {
-        t: round(elapsed()),
-        k: moved ? "pos" : "heartbeat",
+        t,
+        k: "stop",
         x: round(snapshot.x),
         y: round(snapshot.y),
         behavior: snapshot.behavior,
-        leaf: snapshot.leaf,
-        img: snapshot.image,
-        depth: snapshot.stackDepth,
-        msg:
-          `${moved ? "pos" : "heartbeat"} @(${round(snapshot.x)},${round(snapshot.y)})` +
-          ` behavior=${snapshot.behavior} leaf=${snapshot.leaf} img=${snapshot.image}`,
       });
-      trackEpisode(pet, snapshot.leaf, snapshot.x, snapshot.y);
+      state.x = snapshot.x;
+      state.y = snapshot.y;
+      state.at = now;
+      state.travelled = 0;
+      continue;
+    }
+    if (now - state.lastLogAt >= HEARTBEAT_MS) {
+      push(pet, {
+        t,
+        k: "heartbeat",
+        x: round(snapshot.x),
+        y: round(snapshot.y),
+        behavior: snapshot.behavior,
+      });
     }
   }
   flushAll(false);
@@ -319,7 +506,6 @@ function sampleOnTimer() {
 function enable(directory: string) {
   if (enabled || disabled) return;
   enabled = true;
-  const animation = MascotEngine.getAnimationConfig();
   push(INDEX_PET, {
     t: 0,
     k: "session",
@@ -327,13 +513,9 @@ function enable(directory: string) {
     dir: directory,
     viewport: `${window.innerWidth}x${window.innerHeight}`,
     dpr: window.devicePixelRatio,
-    visibility: document.visibilityState,
     ua: navigator.userAgent,
     href: location.href,
-    animationConfig: animation.describe("(defaults)"),
-    msg:
-      `session start dir=${directory} viewport=${window.innerWidth}x${window.innerHeight}` +
-      ` | animation config: ${animation.describe("(defaults)")}`,
+    started: new Date().toISOString(),
   });
 }
 
@@ -383,12 +565,13 @@ function installLifecycle() {
   window.addEventListener("beforeunload", () => flushAll(true));
   document.addEventListener("visibilitychange", () => {
     // A hidden tab stops requestAnimationFrame, so these markers explain the
-    // gaps in a per-mascot log.
+    // gaps in a per-mascot log. While frozen the mascot does not move and does
+    // not switch behaviour, so keeping this record only in the session index
+    // avoids per-pet duplication.
     push(INDEX_PET, {
       t: round(elapsed()),
       k: "visibility",
       state: document.visibilityState,
-      msg: `visibility ${document.visibilityState}`,
     });
     if (document.visibilityState === "hidden") flushAll(true);
   });
@@ -397,8 +580,7 @@ function installLifecycle() {
       t: round(elapsed()),
       k: "error",
       detail: event.message,
-      source: `${event.filename}:${event.lineno}`,
-      msg: `error ${event.message} @${event.filename}:${event.lineno}`,
+      src: `${event.filename}:${event.lineno}`,
     });
   });
   window.addEventListener("unhandledrejection", (event) => {
@@ -406,7 +588,6 @@ function installLifecycle() {
       t: round(elapsed()),
       k: "rejection",
       detail: String(event.reason),
-      msg: `unhandledrejection ${String(event.reason)}`,
     });
   });
 }
@@ -416,6 +597,6 @@ export function startMascotLogRecorder() {
   started = true;
   MascotEngine.addObserver(observe);
   installLifecycle();
-  window.setInterval(sampleOnTimer, FLUSH_INTERVAL_MS);
+  window.setInterval(sampleOnTimer, SAMPLE_INTERVAL_MS);
   startWhenVisible();
 }
