@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>web-mascot 零配置宿主（验证用）</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 0;
+        padding: 24px;
+        min-height: 200vh;
+      }
+      #anchor {
+        border: 2px dashed #888;
+        padding: 12px;
+        width: 260px;
+      }
+      #status {
+        font-family: ui-monospace, monospace;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>零配置宿主</h1>
+    <p>
+      这个页面 <strong>完全不调用 <code>configure()</code></strong>，也不告诉引擎资源在哪。
+      精灵必须从包自身推导出的地址加载，否则全部 404。
+    </p>
+    <div id="anchor">锚点：宠物属于这里</div>
+    <p id="status">loading…</p>
+    <script type="module" src="/zero-config.js"></script>
+  </body>
+</html>

@@ -1,33 +1,54 @@
 import { MascotEngine } from "./core/MascotEngine";
+import type { RuntimeOptions } from "./core/MascotEngine";
+import { defaultPackBaseUrl } from "./core/Assets";
 
 /**
  * Public entry point of the web-mascot library.
  *
  * A host page imports this module and mounts one or more mascots into its own
- * DOM. Nothing here assumes the page is served from its root: the pack base URL
- * is configuration, not a constant, so the same build works from a CDN, a
- * sub-path, or an npm package whose `mascot_pack/` the host serves itself.
+ * DOM. Nothing here assumes the page is served from its root, and nothing has to
+ * be configured to get started: the pack assets are addressed relative to this
+ * module, so `dist/mascot_pack/` works from a CDN, a sub-path, or a bundler that
+ * hashed the entry name.
  *
- *     import { configure, createMascot } from "web-mascot";
+ *     import { createMascot } from "web-mascot";
  *
- *     configure({ packBaseUrl: new URL("./mascot_pack", import.meta.url).href });
- *     const neuron = await createMascot({ container, pack: "Neuron" });
+ *     const neuron = await createMascot({ container: document.body, pack: "Neuron" });
  *     // later
  *     neuron.destroy();
  *
+ * `configure()` is therefore optional — it exists to *override* the derived
+ * defaults (packs on a CDN, an animation config file, runtime tuning, logging).
+ *
  * The observation log is deliberately *not* part of this entry point. It is a
- * development tool that writes to a Vite middleware endpoint, so it lives in the
- * `web-mascot/devtools` entry; see `src/devtools.ts`.
+ * development tool that writes through a Vite middleware endpoint, so it lives in
+ * the `web-mascot/devtools` entry; see `src/devtools.ts`.
  */
+
+/** The asset base URL derived from this module's own location. */
+export const PACK_BASE_URL = defaultPackBaseUrl(import.meta.url);
+
+// Make the derived URL the engine's default immediately, so a host that never
+// calls `configure()` still gets working sprite URLs. This is an override of the
+// engine's classic `/mascot_pack` fallback, not a user configuration: a later
+// `configure({ assets })` still wins, because each mascot snapshots the value when
+// it is constructed.
+MascotEngine.configure({ packBaseUrl: PACK_BASE_URL });
 
 /** Where the engine reads the packs and the editable configuration file from. */
 export interface MascotConfig {
   /** Base URL that contains one directory per pack, without a trailing slash.
-   *  Each mascot reads `<packBaseUrl>/<pack>/img...`. */
-  packBaseUrl?: string;
+   *  Each mascot reads `<assets>/<pack>/img...`.
+   *
+   *  Omit it and the engine uses `PACK_BASE_URL`, derived from the installed
+   *  package, so no configuration is needed for the common case. Set it when the
+   *  packs are relocated (a CDN, a rewritten asset path, a data URL). */
+  assets?: string;
   /** URL of the animation configuration JSON. Omit it and no file is fetched, so
    *  the packs keep their own settings. */
   animationConfigUrl?: string;
+  /** Simulation tuning. See `RuntimeOptions`; omitted fields keep their defaults. */
+  runtime?: RuntimeOptions;
 }
 
 export interface MascotOptions {
@@ -35,26 +56,46 @@ export interface MascotOptions {
    *  viewport — this element decides *where in the document the mascot belongs*,
    *  and the engine pauses it while that element is scrolled out of view. */
   container: HTMLElement;
-  /** Pack directory name, e.g. `"Neuron"`. `spriteUrl` reads `<pack>/img/<pose>`. */
+  /** Pack directory name, e.g. `"Neuron"`. `spriteUrl` reads `<assets>/<pack>/img/<pose>`. */
   pack: string;
 }
 
 let hasConfigured = false;
 
 /**
- * Point the engine at its assets and its configuration file. Call it before the
- * first mascot is created; the configuration file is fetched once and cached for
- * the page, so a later change only takes effect through the devtools console
- * helpers or `MascotEngine.reloadAnimationConfig()`.
+ * Override the derived defaults. Entirely optional: calling nothing gives a
+ * working mascot with the pack's own animation settings.
+ *
+ * The assets URL is snapshotted when each mascot is constructed, so changing it
+ * later never leaves one mascot reading from a different pack root. Runtime tuning
+ * is *not* snapshotted — it is read per tick, so a later change affects mascots
+ * that are already on the page.
  */
 export function configure(options: MascotConfig): void {
   hasConfigured = true;
-  MascotEngine.configure(options);
+  if (options.assets) {
+    MascotEngine.configure({ packBaseUrl: options.assets, animationConfigUrl: options.animationConfigUrl });
+  } else if (options.animationConfigUrl) {
+    MascotEngine.configure({ animationConfigUrl: options.animationConfigUrl });
+  }
+  if (options.runtime) MascotEngine.setRuntimeOptions(options.runtime);
 }
 
-/** True once the host has pointed the engine at its own assets. */
+/** True once the host has explicitly configured something. Diagnostic only: a
+ *  `false` here does not mean the engine is unconfigured, only that the derived
+ *  defaults are in use. */
 export function isConfigured(): boolean {
   return hasConfigured;
+}
+
+/** The asset base URL actually in effect (derived, or overridden). */
+export function assetBaseUrl(): string {
+  return MascotEngine.getPackBaseUrl();
+}
+
+/** The runtime tuning actually in effect. */
+export function runtimeOptions(): Required<RuntimeOptions> {
+  return MascotEngine.getRuntimeOptions();
 }
 
 /** One mounted mascot. `destroy()` releases its DOM, timers and observers. */
@@ -104,8 +145,10 @@ export async function createMascot(options: MascotOptions): Promise<Mascot> {
 }
 
 export { MascotEngine } from "./core/MascotEngine";
+export type { RuntimeOptions } from "./core/MascotEngine";
 export { AnimationConfig } from "./core/AnimationConfig";
 export { BroadcastManager } from "./core/Broadcast";
+export { DEFAULT_PACK_BASE_URL, resolveAssetBase } from "./core/Assets";
 export type { EngineEvent, EngineObserver } from "./core/MascotEngine";
 export type { Pose, ActionNode, Behavior } from "./core/types";
 export type { Hotspot } from "./core/Hotspot";

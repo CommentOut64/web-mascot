@@ -24,8 +24,10 @@ const MIME = {
   ".txt": "text/plain; charset=utf-8",
 };
 
-/** Serve `<projectRoot>/public/mascot_pack` under `PREFIX`, by hand, so the host
- *  controls the path and the content types (sprite files have no extension). */
+/**
+ * Serve `<projectRoot>/public/mascot_pack` under `PREFIX`, by hand, so the host
+ * controls the path and the content types (sprite files have no extension).
+ */
 function servePacks() {
   return {
     name: "test-host-packs",
@@ -56,10 +58,51 @@ function servePacks() {
   };
 }
 
+/**
+ * Serve the *built package's* own packs at their real published path,
+ * `/dist/mascot_pack/...`.
+ *
+ * This is what makes `zero-config.html` a real test: the derived asset URL points
+ * here, so if the derivation were wrong the sprites would 404 and the page would
+ * say so. Vite's own dev server does not serve a hashed/derived directory like
+ * this on its own, and an npm consumer would get it from the package tarball.
+ */
+function serveDistPacks() {
+  const distPackRoot = dist("mascot_pack");
+  const prefix = "/dist/mascot_pack";
+  return {
+    name: "test-host-dist-packs",
+    configureServer(server) {
+      server.middlewares.use(prefix, (req, res, next) => {
+        const rel = decodeURIComponent((req.url ?? "").split("?")[0]).replace(/^\/+/, "");
+        const file = resolve(distPackRoot, rel);
+        if (!file.startsWith(distPackRoot + sep)) {
+          res.statusCode = 403;
+          res.end();
+          return;
+        }
+        void (async () => {
+          try {
+            const info = await stat(file);
+            if (!info.isFile()) {
+              next();
+              return;
+            }
+            res.setHeader("content-type", MIME[extname(file)] ?? "application/octet-stream");
+            createReadStream(file).pipe(res);
+          } catch {
+            next();
+          }
+        })();
+      });
+    },
+  };
+}
+
 export default defineConfig({
   root: resolve(projectRoot, "test-host"),
   publicDir: false,
-  plugins: [servePacks()],
+  plugins: [servePacks(), serveDistPacks()],
   resolve: {
     alias: [
       { find: "web-mascot/devtools", replacement: dist("devtools.js") },

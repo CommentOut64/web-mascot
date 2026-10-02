@@ -6,12 +6,73 @@ import { registerMascotPage } from "./MascotPageCoordinator";
 import type { Hotspot } from "./Hotspot";
 import type { ActionNode, AnimationVariant, Behavior, BehaviorReference, MascotConfig, Pose } from "./types";
 
-const GRAVITY = 2;
-const TICK_MS = 40;
-const DEFAULT_RESISTANCE_X = 0.05;
-const DEFAULT_RESISTANCE_Y = 0.1;
-/** libshijima's stay::tick() ends at elapsed() >= Duration, default 250. */
-const DEFAULT_STAY_DURATION = 250;
+/**
+ * Runtime tuning. Every field here is a *number the simulation reads*, exposed so a
+ * host can match the engine to its page without patching the source. The defaults
+ * are what the engine shipped with, and they are calibrated against the packs'
+ * own physics — changing `gravity` or the resistances without re-checking the packs
+ * will make mascots behave unlike libshijima, which is why they are documented as
+ * "match the pack" rather than "tune freely".
+ *
+ * Deliberately *not* here: internal safety valves (`MAX_FRAME_DELTA_MS`,
+ * `MAX_BEHAVIOR_INITS_PER_TICK`, `STALL_LIMIT_TICKS`). They exist to stop a bug
+ * from locking the page, and a host that lowers them turns a cosmetic problem into
+ * a broken mascot.
+ */
+export interface RuntimeOptions {
+  /** Simulation step, in ms. 40 ms is libshijima's rate; raising it slows every
+   *  animation down proportionally and is the closest thing to a speed control. */
+  tickMs?: number;
+  /** Downward acceleration per tick. */
+  gravity?: number;
+  /** Horizontal / vertical air drag, as a per-tick multiplier below 1. */
+  resistanceX?: number;
+  resistanceY?: number;
+  /** A `Stay` action with no `Duration` of its own holds this many ticks. */
+  stayDurationTicks?: number;
+  /** Motionless ticks of a held mascot before it starts to struggle. */
+  dragResistTicks?: number;
+  /** Cursor movement that aborts the struggle, in px. */
+  dragResistAbortPx?: number;
+  /** How far the held anchor hangs from the cursor. The pack's own
+   *  `OffsetX`/`OffsetY` override these when it defines them. */
+  dragOffsetX?: number;
+  dragOffsetY?: number;
+  /** How long an advertiser holds its pose for a claimed-but-absent partner. */
+  broadcastServeTimeoutTicks?: number;
+  /** Anchor movement in one tick above which a jump is reported as a suspect. */
+  suspectStepPx?: number;
+}
+
+const RUNTIME_DEFAULTS: Required<RuntimeOptions> = {
+  tickMs: 40,
+  gravity: 2,
+  resistanceX: 0.05,
+  resistanceY: 0.1,
+  stayDurationTicks: 250,
+  dragResistTicks: 250,
+  dragResistAbortPx: 5,
+  dragOffsetX: 0,
+  dragOffsetY: 120,
+  broadcastServeTimeoutTicks: 600,
+  suspectStepPx: 24,
+};
+
+/** Live tuning; read by the simulation, so it can be changed between ticks. */
+let runtime: Required<RuntimeOptions> = { ...RUNTIME_DEFAULTS };
+
+/** Counterpart of `RuntimeOptions`, without repeating every default. */
+function mergeRuntime(options: RuntimeOptions | undefined): Required<RuntimeOptions> {
+  const merged = { ...runtime };
+  if (!options) return merged;
+  for (const key of Object.keys(RUNTIME_DEFAULTS) as (keyof RuntimeOptions)[]) {
+    const value = options[key];
+    if (typeof value === "number" && Number.isFinite(value)) merged[key] = value;
+  }
+  return merged;
+}
+
+
 /** A target-seeking action that makes no progress for this long gives up instead
  *  of walking into a border for ever (6 s at 40 ms per tick). */
 const STALL_LIMIT_TICKS = 150;
@@ -27,15 +88,15 @@ const FLEXIBLE_BORDER = "*";
 const MAX_CURSOR_STEP = 80;
 /** libshijima dragged::init(): ticks of a motionless cursor before the held mascot
  *  starts to struggle (`time_to_resist`). */
-const DRAG_RESIST_TICKS = 250;
+
 /** dragged::subtick() resets that timer once the cursor moves 5/subtick_count px. */
 const DRAG_STILL_EPSILON = 1.25;
 /** resist::tick(): this much cursor movement aborts the struggle. */
-const DRAG_RESIST_ABORT_PX = 5;
+
 /** dragged::subtick() offsets: the anchor is placed this far from the cursor
  *  (OffsetX/OffsetY, read from the action when the pack defines them). */
-const DRAG_OFFSET_X = 0;
-const DRAG_OFFSET_Y = 120;
+
+
 /** libshijima's `mascot::tick::reached_init_limit()`: a behaviour chain that keeps
  *  ending instantly must not loop for ever inside a single tick. */
 const MAX_BEHAVIOR_INITS_PER_TICK = 20;
@@ -56,10 +117,10 @@ const MAX_BEHAVIOR_INITS_PER_TICK = 20;
  * an order of magnitude of headroom while still ending well before the default
  * `forcedSwitchTicks` (750) would normally pace the mascot.
  */
-const BROADCAST_SERVE_TIMEOUT_TICKS = 600;
+
 
 /** A single-tick anchor movement larger than this is reported as a jump suspect. */
-const SUSPECT_STEP_PX = 24;
+
 /** Never simulate more than this much time in one frame. A hidden tab stops
  *  requestAnimationFrame, and replaying the whole pause in one frame would burn
  *  CPU and lurch the mascot across the screen when the tab comes back. */
@@ -165,7 +226,7 @@ export class MascotEngine {
   private static animationConfigSetExplicitly = false;
   /** Affordance registry, shared by every mascot in the page (broadcast/manager). */
   private static broadcasts = new BroadcastManager();
-  /** Kept so the reduced-motion listener is only installed once. */
+  /** Removes the reduced-motion listener again; null while none is installed. */
   private static reducedMotionWatcher: (() => void) | null = null;
   /** Default location of the editable configuration file. */
   public static readonly ANIMATION_CONFIG_URL = "/animation.config.json";
@@ -248,6 +309,14 @@ export class MascotEngine {
   private resizeTimer = 0;
   private isScrolling = false;
   private scrollDebounceTimer = 0;
+  /**
+   * One-shot timers that are not already covered by `resizeTimer` /
+   * `scrollDebounceTimer`. `init()` and `setVisible()` schedule work that can fire
+   * after `destroy()`, which used to let a torn-down mascot poke at a detached DOM
+   * node (and at `this.visible`, which no longer means anything).
+   */
+  private pendingTimers = new Set<number>();
+  private destroyed = false;
   /** Set for the tick on which an Offset action moved the anchor on purpose. */
   private offsetJumped = false;
   /** How long the current behaviour has been running, for the hard cap. */
@@ -269,7 +338,7 @@ export class MascotEngine {
   private interaction = new Interaction();
   /** Tick at which this mascot first noticed that its advertisement had been
    *  claimed, or 0 when it is not holding a pose for anybody (see
-   *  BROADCAST_SERVE_TIMEOUT_TICKS). */
+   *  runtime.broadcastServeTimeoutTicks). */
   private servingClaimSince = 0;
   /** Paused while the mascot's container is scrolled out of view. */
   private visible = true;
@@ -326,6 +395,32 @@ export class MascotEngine {
   }
 
   /**
+   * Change how the simulation is tuned. Each field is validated as a finite number
+   * and anything else is ignored, so a partially-written settings object is safe.
+   *
+   * It applies to every mascot, including the ones already on the page: the values
+   * are read per tick rather than captured at construction, which is what makes a
+   * live settings panel possible. The exceptions are positions already computed
+   * from the old values (a mascot mid-fall keeps its velocity), so a change is
+   * smooth rather than instantaneous.
+   */
+  public static setRuntimeOptions(options: RuntimeOptions): Required<RuntimeOptions> {
+    runtime = mergeRuntime(options);
+    return runtime;
+  }
+
+  /** The tuning currently in effect. */
+  public static getRuntimeOptions(): Required<RuntimeOptions> {
+    return runtime;
+  }
+
+  /** The asset base URL in effect, for diagnostics and for hosts that build their
+   *  own sprite URLs (`spriteUrl()` returns the same shape). */
+  public static getPackBaseUrl(): string {
+    return MascotEngine.packBaseUrl;
+  }
+
+  /**
    * Install a configuration from an object in the same shape as the JSON file.
    * This is the entry point a settings UI would use; it wins over the file until
    * `loadAnimationConfig()` is called again with `force`.
@@ -364,7 +459,13 @@ export class MascotEngine {
     return MascotEngine.animationConfigLoad;
   }
 
-  /** Follow the OS reduced-motion preference, now and on later changes. */
+  /**
+   * Follow the OS reduced-motion preference, now and on later changes.
+   *
+   * The disposer is kept instead of the listener because a bare listener can never
+   * be unregistered: `matchMedia` needs the very `MediaQueryList` it came from, so
+   * the old code left a page-lifetime listener behind with no way to remove it.
+   */
   private static watchReducedMotion() {
     MascotEngine.animationConfig.refreshReducedMotion();
     if (MascotEngine.reducedMotionWatcher) return;
@@ -373,7 +474,10 @@ export class MascotEngine {
       const query = window.matchMedia("(prefers-reduced-motion: reduce)");
       const listener = () => MascotEngine.animationConfig.setReducedMotion(query.matches);
       query.addEventListener("change", listener);
-      MascotEngine.reducedMotionWatcher = listener;
+      MascotEngine.reducedMotionWatcher = () => {
+        query.removeEventListener("change", listener);
+        MascotEngine.reducedMotionWatcher = null;
+      };
     } catch {
       /* the preference is still read once by refreshReducedMotion() */
     }
@@ -431,6 +535,10 @@ export class MascotEngine {
     // Customisation is read first so the very first tick already obeys it.
     await MascotEngine.loadAnimationConfig();
     this.config = await XMLParser.loadConfig(this.mascotName, this.packBaseUrl);
+    // Both awaits above are network-bound, so `destroy()` can legitimately have run
+    // in between. Continuing would re-register a dead engine and re-attach its DOM,
+    // leaving a zombie mascot that nothing can ever remove.
+    if (this.destroyed) return;
     this.applySpawnPosition();
     this.resetScrollTracking();
     this.prevX = this.x;
@@ -579,9 +687,19 @@ export class MascotEngine {
     this.setPauseReason("viewport", !visible);
     // Defence in depth: a wrong or stale observation must never freeze the mascot
     // for good, so re-check the geometry shortly afterwards.
-    window.setTimeout(() => {
+    this.later(() => {
+      if (this.destroyed) return;
       if (!this.visible && this.isOnScreen()) this.setVisible(true);
     }, 2000);
+  }
+
+  /** `setTimeout` that `destroy()` will cancel. */
+  private later(callback: () => void, ms: number): void {
+    const id = window.setTimeout(() => {
+      this.pendingTimers.delete(id);
+      callback();
+    }, ms);
+    this.pendingTimers.add(id);
   }
 
   private setPauseReason(reason: PauseReason, paused: boolean) {
@@ -609,6 +727,7 @@ export class MascotEngine {
   }
 
   private resumeLoop() {
+    if (this.destroyed) return;
     cancelAnimationFrame(this.loopId);
     this.lastTime = performance.now();
     this.accumulator = 0;
@@ -616,6 +735,8 @@ export class MascotEngine {
   }
 
   public destroy() {
+    if (this.destroyed) return;
+    this.destroyed = true;
     cancelAnimationFrame(this.loopId);
     this.unregisterPage?.();
     this.unregisterPage = null;
@@ -624,6 +745,8 @@ export class MascotEngine {
     this.eventsAbortController.abort();
     window.clearTimeout(this.resizeTimer);
     window.clearTimeout(this.scrollDebounceTimer);
+    for (const timer of this.pendingTimers) window.clearTimeout(timer);
+    this.pendingTimers.clear();
     this.emit({ kind: "despawn", detail: "destroy()" });
     MascotEngine.liveEngines.delete(this);
     if (this.elRoot.parentNode) this.elRoot.parentNode.removeChild(this.elRoot);
@@ -1308,7 +1431,7 @@ export class MascotEngine {
     // A mascot is decoration: one bad tick must not kill the animation loop and
     // leave it frozen for ever. Swallow the error, report it, and keep going.
     try {
-      while (this.accumulator >= TICK_MS) { this.tick(); this.accumulator -= TICK_MS; }
+      while (this.accumulator >= runtime.tickMs) { this.tick(); this.accumulator -= runtime.tickMs; }
       this.render();
     } catch (error) {
       this.accumulator = 0;
@@ -1361,8 +1484,8 @@ export class MascotEngine {
       // clamp to the activity area is a page-specific guard that also puts the anchor
       // exactly on a wall edge, which is what the wall grab after the release needs.
       const frame = this.actionStack[this.actionStack.length - 1];
-      const offsetX = this.varNumber(frame, "OffsetX") ?? DRAG_OFFSET_X;
-      const offsetY = this.varNumber(frame, "OffsetY") ?? DRAG_OFFSET_Y;
+      const offsetX = this.varNumber(frame, "OffsetX") ?? runtime.dragOffsetX;
+      const offsetY = this.varNumber(frame, "OffsetY") ?? runtime.dragOffsetY;
       const area = this.area();
       // The cursor comes from the DOM in screen pixels; the offsets are sprite-unit
       // quantities, so the anchor is cursorVirtual + offset (which is
@@ -1421,14 +1544,14 @@ export class MascotEngine {
       return;
     }
     // Somebody claimed an advertisement and is on its way: hold the pose until it
-    // arrives (see BROADCAST_SERVE_TIMEOUT_TICKS). Without this the advertising
+    // arrives (see runtime.broadcastServeTimeoutTicks). Without this the advertising
     // animation ends under the approaching partner and the handshake is lost.
     if (!claimed) {
       this.servingClaimSince = 0;
       return;
     }
     if (this.servingClaimSince === 0) this.servingClaimSince = this.tickCount;
-    if (this.tickCount - this.servingClaimSince >= BROADCAST_SERVE_TIMEOUT_TICKS) {
+    if (this.tickCount - this.servingClaimSince >= runtime.broadcastServeTimeoutTicks) {
       this.emit({
         kind: "milestone",
         name: "broadcast-serve-timeout",
@@ -1456,7 +1579,7 @@ export class MascotEngine {
     const server = frame?.server;
     if (!server || !server.isClaimed) return false;
     if (this.servingClaimSince === 0) return true;
-    return this.tickCount - this.servingClaimSince < BROADCAST_SERVE_TIMEOUT_TICKS;
+    return this.tickCount - this.servingClaimSince < runtime.broadcastServeTimeoutTicks;
   }
 
   /**
@@ -1479,7 +1602,7 @@ export class MascotEngine {
     // A claimed advertisement holds its pose for the approaching partner. The pacer
     // exists so the page never looks asleep, but a mascot that is waiting to be
     // hugged is not idle — and pulling it away here is exactly what drops the scan.
-    // The wait is bounded by BROADCAST_SERVE_TIMEOUT_TICKS, so this cannot last.
+    // The wait is bounded by runtime.broadcastServeTimeoutTicks, so this cannot last.
     if (this.holdingClaim(this.actionStack[this.actionStack.length - 1])) return;
     const pacer = animation.forcedSwitchTicks(this.mascotName);
     if (pacer > 0 && this.stillTicks >= pacer && !this.isTravelling()) {
@@ -1560,9 +1683,9 @@ export class MascotEngine {
       Math.abs(this.vx) + Math.abs(this.vy) +
       Math.abs(this.tickStartVX) + Math.abs(this.tickStartVY) +
       (pose ? Math.abs(pose.velocity.x) + Math.abs(pose.velocity.y) : 0);
-    const explained = this.isDragging || this.offsetJumped || step <= budget + SUSPECT_STEP_PX;
+    const explained = this.isDragging || this.offsetJumped || step <= budget + runtime.suspectStepPx;
     this.offsetJumped = false;
-    if (step > SUSPECT_STEP_PX && !explained) {
+    if (step > runtime.suspectStepPx && !explained) {
       this.emit({
         kind: "suspect",
         name: "position-jump",
@@ -1607,7 +1730,7 @@ export class MascotEngine {
       // action, and may scale the pack's own holds.
       const override = MascotEngine.animationConfig.durationTicks(this.mascotName, node.referenceName);
       if (override !== null) next.durationLimit = override;
-      else if (referenced.type === "Stay") next.durationLimit = this.scaledTicks(this.varNumber(next, "Duration") ?? DEFAULT_STAY_DURATION);
+      else if (referenced.type === "Stay") next.durationLimit = this.scaledTicks(this.varNumber(next, "Duration") ?? runtime.stayDurationTicks);
       else next.durationLimit = null;
       this.actionStack[this.actionStack.length - 1] = next;
       const initialVX = this.varNumber(next, "InitialVX");
@@ -1737,11 +1860,11 @@ export class MascotEngine {
       }
       if (Math.abs(this.cursorTickDX) >= DRAG_STILL_EPSILON) this.dragStillTicks = 0;
       else this.dragStillTicks++;
-      if (this.dragStillTicks >= DRAG_RESIST_TICKS) {
+      if (this.dragStillTicks >= runtime.dragResistTicks) {
         this.emit({
           kind: "milestone",
           name: "drag-resist",
-          detail: `held still for ${DRAG_RESIST_TICKS} ticks`,
+          detail: `held still for ${runtime.dragResistTicks} ticks`,
           x: this.x,
           y: this.y,
           leaf: this.leafLabel(),
@@ -1756,7 +1879,7 @@ export class MascotEngine {
     // if it is left alone the animation plays out and the mascot breaks free.
     // `get_cursor()` is a virtual-units quantity, so the raw screen cursor has to be
     // converted before comparing it with the anchor.
-    if (this.isResistAction(node) && Math.abs(this.toVirtual(this.cursorX, this.cursorY).x - this.x) >= DRAG_RESIST_ABORT_PX) {
+    if (this.isResistAction(node) && Math.abs(this.toVirtual(this.cursorX, this.cursorY).x - this.x) >= runtime.dragResistAbortPx) {
       // Handed back to being held: dragged::init() restarts its timer.
       this.dragStillTicks = 0;
       this.setBehavior("Dragged", "resist-abort");
@@ -1791,7 +1914,7 @@ export class MascotEngine {
     if (frame.durationLimit === null) {
       const override = MascotEngine.animationConfig.durationTicks(this.mascotName, node.name);
       if (override !== null) frame.durationLimit = override;
-      else if (node.type === "Stay") frame.durationLimit = this.scaledTicks(this.varNumber(frame, "Duration") ?? DEFAULT_STAY_DURATION);
+      else if (node.type === "Stay") frame.durationLimit = this.scaledTicks(this.varNumber(frame, "Duration") ?? runtime.stayDurationTicks);
     }
     frame.elapsed++;
     frame.poseTick++;
@@ -2318,9 +2441,9 @@ export class MascotEngine {
         this.popActionStack();
         return;
       }
-      const resistanceX = this.evaluateNumber(leaf.attributes?.RegistanceX, frame) ?? DEFAULT_RESISTANCE_X;
-      const resistanceY = this.evaluateNumber(leaf.attributes?.RegistanceY, frame) ?? DEFAULT_RESISTANCE_Y;
-      const gravity = this.evaluateNumber(leaf.attributes?.Gravity, frame) ?? GRAVITY;
+      const resistanceX = this.evaluateNumber(leaf.attributes?.RegistanceX, frame) ?? runtime.resistanceX;
+      const resistanceY = this.evaluateNumber(leaf.attributes?.RegistanceY, frame) ?? runtime.resistanceY;
+      const gravity = this.evaluateNumber(leaf.attributes?.Gravity, frame) ?? runtime.gravity;
       this.vx -= this.vx * resistanceX;
       this.vy += gravity - this.vy * resistanceY;
       this.x += this.vx;
@@ -2520,7 +2643,7 @@ export class MascotEngine {
     // kSubtickCount (= 4) times per tick, which is why its motion is smooth.
     // Interpolating the paint between ticks reproduces that here; without it the
     // mascot moves one whole tick of travel at a time and a fall reads as a jump.
-    const progress = interpolate ? Math.max(0, Math.min(1, this.accumulator / TICK_MS)) : 1;
+    const progress = interpolate ? Math.max(0, Math.min(1, this.accumulator / runtime.tickMs)) : 1;
     const x = this.prevX + (this.x - this.prevX) * progress;
     const y = this.prevY + (this.y - this.prevY) * progress;
     // Boundary one: virtual viewport units → screen pixels.
