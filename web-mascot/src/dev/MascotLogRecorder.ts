@@ -38,6 +38,14 @@ import type { EngineEvent } from "../core/MascotEngine";
  *   {"t":15.45,"k":"peer","event":"connect","affordance":"CuddleNeuro","behavior":"IHugYou","distance":180,"x":679.5,"y":795}
  *   {"t":16.17,"k":"peer","event":"arrive","behavior":"IHugYou","target":[499.5,795],"x":499.5,"y":795}
  *   {"t":42.4,"k":"peer","event":"scan-miss","affordance":"CuddleEvil","behavior":"IHugYou","x":1.25,"y":795}
+ *   {"t":43.1,"k":"peer","event":"abort","side":"client","affordance":"CuddleEvil","behavior":"IHugYou","x":640,"y":795}
+ *   {"t":43.1,"k":"peer","event":"serve-timeout","side":"server","affordance":"CuddleNeuro","x":880,"y":795}
+ *
+ * `abort` / `serve-timeout` are the two ways a *claimed* handshake fails to finish:
+ * the advertiser stopped advertising mid-approach (so the scanner's walk was
+ * dropped), or the advertiser waited out `BROADCAST_SERVE_TIMEOUT_TICKS` for a
+ * partner that never arrived. They are not collapsed, because each one is a lost
+ * interaction rather than a repeated diagnostic.
  *
  * The two sides of one handshake are joined by `affordance` + `t`: one pet's
  * `offer` is the other pet's `connect`, and the resulting behaviour switches show
@@ -48,14 +56,13 @@ import type { EngineEvent } from "../core/MascotEngine";
  * An `offer` only carries `behavior` when the advertising action declares one.
  *
  * Freezes are recorded per pet as `k:"lifecycle"`, so a gap in the timeline is
- * explained rather than ambiguous. The engine freezes for three reasons (tab
- * hidden, container scrolled out of the viewport, and a tab-hide during a drag),
- * and every freeze has a matching resume:
+ * explained rather than ambiguous. The engine freezes for tab visibility,
+ * viewport intersection, and same-origin page ownership:
  *
  *   {"t":11.8,"k":"lifecycle","event":"freeze","reason":"hidden","x":501,"y":755}
- *   {"t":26.2,"k":"lifecycle","event":"resume","reason":"visible","x":501,"y":755}
+ *   {"t":26.2,"k":"lifecycle","event":"resume","reason":"hidden","x":501,"y":755}
  *   {"t":40.1,"k":"lifecycle","event":"freeze","reason":"viewport","x":501,"y":755}
- *   {"t":44.6,"k":"lifecycle","event":"resume","reason":"visible","x":501,"y":755}
+ *   {"t":44.6,"k":"lifecycle","event":"resume","reason":"viewport","x":501,"y":755}
  *
  * While a pet is frozen nothing can move or switch behaviour, so `t` jumping
  * across a freeze/resume pair is the only correct reading of that gap. The
@@ -116,6 +123,27 @@ const startedAt = performance.now();
 const buffers = new Map<string, string[]>();
 const trackers = new Map<string, MoveTracker>();
 
+/**
+ * Where batches go, when the host supplies a destination. A sink is the supported
+ * way to collect records outside a Vite dev/preview server, where
+ * `/__mascot-log` does not exist.
+ */
+export interface MascotLogBatch {
+  session: string;
+  pet: string;
+  lines: string[];
+}
+
+export interface MascotLogSink {
+  (batch: MascotLogBatch): void;
+}
+
+let sinkCallback: MascotLogSink | null = null;
+const extraSinks: MascotLogSink[] = [];
+/** Records produced before a destination was resolved; drained by `enable()`. */
+const pending: { pet: string; line: string }[] = [];
+let droppedPending = 0;
+
 let enabled = false;
 let disabled = false;
 let failures = 0;
@@ -175,17 +203,32 @@ function tracker(pet: string, x: number, y: number): MoveTracker {
 }
 
 function push(pet: string, record: Record<string, unknown>) {
-  if (!enabled || disabled) return;
-  const state = trackers.get(pet);
-  if (state) state.lastLogAt = performance.now();
-  const line = JSON.stringify(record);
-  let buffer = buffers.get(pet);
-  if (!buffer) {
-    buffer = [];
-    buffers.set(pet, buffer);
+  if (disabled) return;
+  if (enabled) {
+    const state = trackers.get(pet);
+    if (state) state.lastLogAt = performance.now();
+    const line = JSON.stringify(record);
+    let buffer = buffers.get(pet);
+    if (!buffer) {
+      buffer = [];
+      buffers.set(pet, buffer);
+    }
+    buffer.push(line);
+    if (buffer.length >= MAX_BUFFER_LINES) void flush(pet, false);
+    return;
   }
-  buffer.push(line);
-  if (buffer.length >= MAX_BUFFER_LINES) void flush(pet, false);
+  // No destination resolved yet (the dev endpoint may still be booting, a host
+  // sink may not be set). Records from this window are the most interesting ones
+  // — a mascot's `spawn` and its first behaviour — so hold them in a bounded
+  // queue for `enable()` instead of dropping them.
+  if (pending.length < MAX_REQUEUE_LINES) pending.push({ pet, line: JSON.stringify(record) });
+  else if (droppedPending++ === 0) {
+    console.warn("[mascot-log] pre-start record queue is full; further records are dropped");
+  }
+}
+
+function allSinks(): MascotLogSink[] {
+  return sinkCallback ? [sinkCallback, ...extraSinks] : extraSinks;
 }
 
 async function flush(pet: string, beacon: boolean) {
@@ -193,6 +236,19 @@ async function flush(pet: string, beacon: boolean) {
   if (!buffer || buffer.length === 0) return;
   const lines = buffer.splice(0, buffer.length);
   const body = JSON.stringify({ session, pet, lines });
+  // Host-provided sinks win: they are how an embedded or packaged build receives
+  // records, where the dev endpoint below does not exist.
+  for (const sink of allSinks()) {
+    try {
+      sink({ session, pet, lines });
+    } catch {
+      /* a throwing sink must not spin the recorder or lose the other sinks */
+    }
+  }
+  if (sinkCallback) {
+    failures = 0;
+    return;
+  }
   if (beacon && typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
     try {
       navigator.sendBeacon(ENDPOINT, new Blob([body], { type: "application/json" }));
@@ -227,11 +283,17 @@ function disable(reason: string) {
   disabled = true;
   enabled = false;
   buffers.clear();
+  dropPending(reason);
   console.warn(`[mascot-log] recorder disabled: ${reason}`);
 }
 
 function observe(engine: MascotEngine, event: EngineEvent) {
-  if (!enabled || disabled) return;
+  // `enabled` is deliberately not checked here: before a destination is resolved
+  // `push()` queues the record for `enable()` to drain. Returning early would drop
+  // the mascot's `spawn` and first behaviour, which is exactly what a recording is
+  // most useful for. The engine does not subscribe otherwise, so it costs nothing
+  // when no recorder is attached at all.
+  if (disabled) return;
   const pet = engine.label;
   const t = round(elapsed());
   const where = engine.position();
@@ -325,10 +387,11 @@ function observe(engine: MascotEngine, event: EngineEvent) {
       // frozen mascot from an idle one and a viewport freeze from a tab freeze.
       if (event.name === "paused" || event.name === "resumed") {
         const freeze = event.name === "paused";
-        // Each side reports its own reason, so a viewport freeze pairs with a
-        // viewport resume and a tab-hide freeze with a visible resume.
-        const viewport = event.detail.startsWith("container");
-        const reason = freeze ? (viewport ? "viewport" : "hidden") : viewport ? "viewport" : "visible";
+        const reason = event.detail === "viewport"
+          ? "viewport"
+          : event.detail === "background-page"
+            ? "background-page"
+            : "hidden";
         push(pet, {
           t,
           k: "lifecycle",
@@ -357,6 +420,24 @@ function observe(engine: MascotEngine, event: EngineEvent) {
         });
         // A completed handshake resets the miss collapse: the same affordance going
         // unanswered again after a real interaction is new information.
+        track.lastEvent = "";
+        break;
+      }
+      if (event.name === "broadcast-abort" || event.name === "broadcast-serve-timeout") {
+        // Both ends of a handshake usually agree on the offer: it is either claimed
+        // and arrived, or never claimed. These two are the exceptions — a claim that
+        // died mid-approach (the advertiser went away, or its wait ran out) — so they
+        // are recorded rather than collapsed: each one is a lost interaction.
+        push(pet, {
+          t,
+          k: "peer",
+          event: event.name === "broadcast-abort" ? "abort" : "serve-timeout",
+          side: event.name === "broadcast-abort" ? "client" : "server",
+          affordance: event.affordance || undefined,
+          behavior: event.behavior || undefined,
+          x,
+          y,
+        });
         track.lastEvent = "";
         break;
       }
@@ -517,9 +598,30 @@ function enable(directory: string) {
     href: location.href,
     started: new Date().toISOString(),
   });
+  // Drain through push() so the normal path (and its tracking) is used; `enabled`
+  // is already true, so nothing re-queues and the loop cannot grow.
+  const queued = pending.splice(0, pending.length);
+  for (const item of queued) push(item.pet, JSON.parse(item.line) as Record<string, unknown>);
+  for (const pet of new Set(queued.map((item) => item.pet))) void flush(pet, false);
+}
+
+/** Records that arrived before a destination was resolved. */
+function dropPending(reason: string) {
+  if (pending.length > 0) {
+    console.warn(`[mascot-log] dropped ${pending.length} pre-start records: ${reason}`);
+  }
+  pending.length = 0;
 }
 
 async function probe(attempt = 1): Promise<void> {
+  // A host-supplied sink is a complete destination on its own. The endpoint is a
+  // Vite dev/preview middleware, so in an embedded or packaged build it does not
+  // exist: probing it first only produces 404s (and, on a host page, visible
+  // console noise) before falling back to the sink it was given all along.
+  if (allSinks().length > 0) {
+    enable("(host sink)");
+    return;
+  }
   try {
     const response = await fetch(`${ENDPOINT}/ping`, { cache: "no-store" });
     const contentType = response.headers.get("content-type") ?? "";
@@ -535,9 +637,9 @@ async function probe(attempt = 1): Promise<void> {
   }
   if (attempt < MAX_PING_ATTEMPTS) {
     window.setTimeout(() => void probe(attempt + 1), PING_RETRY_MS);
-  } else {
-    disable("log endpoint unavailable (recording is dev/preview only)");
+    return;
   }
+  disable("log endpoint unavailable (recording is dev/preview only)");
 }
 
 /**
@@ -590,6 +692,23 @@ function installLifecycle() {
       detail: String(event.reason),
     });
   });
+}
+
+/**
+ * Route every batch to a host-provided destination instead of the dev endpoint.
+ * Takes precedence over both the endpoint and any `addLogSink` mirror. Call it
+ * before `startMascotLogRecorder()`.
+ */
+export function setLogSink(sink: MascotLogSink): void {
+  sinkCallback = sink;
+}
+
+/**
+ * Mirror every batch to an additional destination without replacing the dev
+ * endpoint. Used for console fallbacks in hosts that have no dev server.
+ */
+export function addLogSink(sink: MascotLogSink): void {
+  extraSinks.push(sink);
 }
 
 export function startMascotLogRecorder() {
