@@ -42,6 +42,8 @@
 | `scale` | `number` | **宠物绘制大小**（0.2–4，1 = pack 原生 128px）。引擎内部按「1 虚拟单位 = 1 贴图像素」工作，见下文 |
 | `forcedSwitchTicks` | `number` | **节奏调节器**：原地不动超过 N tick，下一次行为必须挑一个**会移动**的；单个姿势静止超过 N tick 也会被换掉。`0`/缺省 = 不启用 |
 | `maxBehaviorTicks` | `number` | **硬上限**：单个行为最长 N tick，超时即换（掉落/拖拽除外）。用于刹住 40 s 级的爬墙与爬行 |
+| `pacerExemptBehaviors` | `string[]` | **节奏调节器的例外名单**：列出的行为不被 `forcedSwitchTicks` 打断，让长静止动画播完。注意「静止」按位置判定，速度为零的长序列（如 `SitWhileDanglingLegs`，约 400 tick）默认会被节奏调节器拦腰截断 |
+| `exitToPoolBehaviors` | `string[]` | **绕开 pack 闭链**：列出的行为结束时回到**全局抽签池**，而不是走 `<NextBehaviorList>`。内置 pack 的 `SitAndFaceMouse` 用 `Add="false"` 只能重选自己或 `SitWhileDanglingLegs`，是闭链——宠物坐下后就再也出不来 |
 | `interactionCooldownTicks` | `number` | **刚互动完的冷却**：这段时间内"需要伙伴的行为"从候选池里拿掉。缺省 `0`。没有它，两只抱完还贴在一起，下一次抽取立刻又连上（实测间隔 **0.1 秒**），会连续抱个不停 |
 | `maxTravelPx` | `number` | 水平「游走型」目标的最大距离（px）。指向边界的目标（走过去爬墙那种）不受影响，否则会破坏后续动作 |
 | `partnerWeights` | `{ alone, withPartner, reachable }` | **需要伙伴的行为**（抱/扔/等抱/注意掉落）专用权重：单只时用 `alone`，场上有伙伴时 `withPartner`，对方同高度且在扫描半径内时 `reachable`（见下文） |
@@ -61,8 +63,8 @@
 
 - 对象型字段（`behaviorWeights`、`actionDurations`、`zone`、`spawn`、`partnerWeights`）**按 key 合并**；
 - 数组与数值（`allowBehaviors`、`denyBehaviors`、`durationScale`、`forcedSwitchTicks`、
-  `maxBehaviorTicks`、`maxTravelPx`、`scanDistancePx`）**整体替换**——所以 `reducedMotion` 里写
-  `denyBehaviors` 时要自己把 `defaults` 的项一并列出。
+  `pacerExemptBehaviors`、`exitToPoolBehaviors`、`maxBehaviorTicks`、`maxTravelPx`、`scanDistancePx`）
+  **整体替换**——所以 `reducedMotion` 里写 `denyBehaviors` 时要自己把 `defaults` 的项一并列出。
 
 ### 取值范围与校验
 
@@ -80,6 +82,17 @@
   而不是每 tick 硬切——硬切会造成行为抖动、还会让 `Stand → 扫描` 这类序列永远走不完。
 - `maxBehaviorTicks`（硬上限）——解决「一个行为占住宠物太久」。它无视是否在移动，到点就换；
   但**掉落（`Fall`）与拖拽（`Dragged`）永远不被它打断**。
+- `pacerExemptBehaviors` ——节奏调节器的**例外**。它是必须的，因为「静止」按位置变化判定：
+  速度为零的长序列（`SitWhileDanglingLegs` 约 400 tick）也满足"静止"，于是会被比它短的调节器
+  拦腰截断，永远播不完。**例外只针对 `forcedSwitchTicks`**，`maxBehaviorTicks` 仍然生效，
+  所以豁免的行为不会无限持续。
+- `exitToPoolBehaviors` ——与上一条**配套**。pack 用 `<NextBehaviorList Add="false">` 串接行为，
+  其中一部分是闭链：内置 pack 的 `SitAndFaceMouse` 只能重选自己或 `SitWhileDanglingLegs`。
+  若只加例外不加这一条，宠物会在这个环里无限坐下去——「跳调节器」反而变成了「再也不动」。
+  加了它，动画播完后回全局池重新抽签。
+
+> 注意：`pacerExemptBehaviors` 与 `exitToPoolBehaviors` 是后加的字段；旧版本引擎会忽略它们，
+> 此时给长静止动画设 `forcedSwitchTicks` 会把它截断。
 
 实测：默认档 `forcedSwitchTicks: 250` + `maxBehaviorTicks: 375` 会把最长静止从 **96 s 压到 ~20 s**，
 位移时间占比 28% → **30–43%**，每分钟真实位移事件 1.8 → **4–6** 次。

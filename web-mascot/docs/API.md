@@ -138,6 +138,35 @@ function createMascot(options: MascotOptions): Promise<Mascot>
 
 **故意不暴露**的常量：`MAX_FRAME_DELTA_MS`、`MAX_BEHAVIOR_INITS_PER_TICK`、`STALL_LIMIT_TICKS`。它们是防止 bug 锁死页面的安全阀，调低会把"表现问题"变成"宠物坏掉"。
 
+### 3.6 动画配置里的节奏字段
+
+这些不在 `configure()` 里，而是写在**动画配置文件**（`animationConfigUrl` 指向的 JSON，或引擎默认请求的 `/animation.config.json`）的 `defaults` / `mascots` 中。列在这里是因为它们与 3.5 的运行参数容易混淆：**3.5 改的是引擎物理，这里改的是行为选择**。
+
+| 字段 | 说明 |
+| --- | --- |
+| `forcedSwitchTicks` | 静止超过这么多 tick 就换行为（pacer）。"静止"按**位置是否变化**判定，所以速度为零的长序列也算静止 |
+| `pacerExemptBehaviors` | 上面这条的**例外名单**。列出的行为不会被 pacer 打断，让长静止动画播完；普通 `Stay` 仍按时被推动 |
+| `maxBehaviorTicks` | 单个行为的**硬上限**，超时即换（掉落/拖拽除外）。pacer 的豁免不影响它，所以豁免的行为也不会无限持续 |
+| `exitToPoolBehaviors` | 列出的行为结束时回到**全局抽签池**，而不是走 pack 的 `<NextBehaviorList>` |
+| `behaviorWeights` | 覆盖 pack 的 `Frequency`（0 = 禁用；给 `Frequency="0"` 的行为赋正值可打开它） |
+| `interactionCooldownTicks` | 互动结束后，需要伙伴的行为移出候选池这么多 tick |
+| `maxTravelPx` | 水平游走目标的最大距离（px）。0/缺省 = 不限 |
+| `durationScale` | 全局时长倍率（0.05–20），只作用于 XML 自带的 `Duration` |
+| `actionDurations` | 按动作名覆盖持续 tick 数，可写单值或 `[min,max]` |
+
+**为什么需要后两个字段**：pack 用 `<NextBehaviorList Add="false">` 串接相关行为，而部分链是**闭链**。内置 pack 的 `SitAndFaceMouse` 只能重新选自己或 `SitWhileDanglingLegs`，宠物一旦坐下就再也出不来。所以"让长静止动画播完"必须和"播完回主池"一起用：
+
+```json
+{
+  "defaults": {
+    "forcedSwitchTicks": 200,
+    "pacerExemptBehaviors": ["SitWhileDanglingLegs"],
+    "exitToPoolBehaviors": ["SitWhileDanglingLegs"],
+    "maxBehaviorTicks": 1100
+  }
+}
+```
+
 ## 4. 开发工具入口 `web-mascot/devtools`
 
 ### 4.1 两种日志，两个开关
