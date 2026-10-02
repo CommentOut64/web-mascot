@@ -86,6 +86,29 @@ export interface MascotAnimationOptions {
   scale?: number;
   /** Nudge a standing mascot into a new behaviour after this many ticks. */
   forcedSwitchTicks?: number;
+  /**
+   * Behaviours the pacer above must not interrupt.
+   *
+   * `forcedSwitchTicks` keys off *movement*: any pose with zero velocity counts as
+   * standing still, so a long stationary animation — a sit-and-dangle sequence is
+   * ~400 ticks — gets cut off mid-way by a pacer shorter than it. Listing it here
+   * lets the whole sequence play, while a plain idle `Stay` is still nudged on time.
+   * Only the pacer is suspended; `maxBehaviorTicks` still applies, so a listed
+   * behaviour cannot run for ever.
+   */
+  pacerExemptBehaviors?: string[];
+  /**
+   * Behaviours that return to the *global* pool when they end, instead of following
+   * the pack's `<NextBehaviorList>`.
+   *
+   * The packs use that list to chain related behaviours, and some chains are closed
+   * (`Add="false"` with their own name among the targets). `SitAndFaceMouse` in the
+   * shipped packs is exactly that: it can only re-pick itself or
+   * `SitWhileDanglingLegs`, forever. A mascot that sits down therefore never leaves
+   * that pair on its own; combining a pacer exemption with this list is what lets it
+   * finish the animation *and* move on afterwards.
+   */
+  exitToPoolBehaviors?: string[];
   /** After a completed interaction (hug/hurl), partner behaviours are suppressed for
    *  this many ticks. Without it two mascots that end a hug next to each other simply
    *  connect again on the next pick and chain hugs back to back. */
@@ -284,6 +307,10 @@ function normalizeOptions(value: unknown): MascotAnimationOptions {
   if (spriteScale !== undefined) options.scale = Math.min(MAX_SPRITE_SCALE, Math.max(MIN_SPRITE_SCALE, spriteScale));
   const forced = tickCount(value.forcedSwitchTicks, 0);
   if (forced !== undefined) options.forcedSwitchTicks = forced;
+  const pacerExempt = nameList(value.pacerExemptBehaviors);
+  if (pacerExempt) options.pacerExemptBehaviors = pacerExempt;
+  const exitToPool = nameList(value.exitToPoolBehaviors);
+  if (exitToPool) options.exitToPoolBehaviors = exitToPool;
   const cooldown = tickCount(value.interactionCooldownTicks, 0);
   if (cooldown !== undefined) options.interactionCooldownTicks = Math.min(MAX_COOLDOWN_TICKS, cooldown);
   const maxBehavior = tickCount(value.maxBehaviorTicks, 0);
@@ -310,6 +337,8 @@ function mergeOptions(base: MascotAnimationOptions, override: MascotAnimationOpt
     durationScale: override.durationScale ?? base.durationScale,
     scale: override.scale ?? base.scale,
     forcedSwitchTicks: override.forcedSwitchTicks ?? base.forcedSwitchTicks,
+    pacerExemptBehaviors: override.pacerExemptBehaviors ?? base.pacerExemptBehaviors,
+    exitToPoolBehaviors: override.exitToPoolBehaviors ?? base.exitToPoolBehaviors,
     interactionCooldownTicks: override.interactionCooldownTicks ?? base.interactionCooldownTicks,
     maxBehaviorTicks: override.maxBehaviorTicks ?? base.maxBehaviorTicks,
     maxTravelPx: override.maxTravelPx ?? base.maxTravelPx,
@@ -329,6 +358,8 @@ function hasContent(options: MascotAnimationOptions): boolean {
     options.durationScale !== undefined ||
     options.scale !== undefined ||
     options.forcedSwitchTicks !== undefined ||
+    (options.pacerExemptBehaviors !== undefined && options.pacerExemptBehaviors.length > 0) ||
+    (options.exitToPoolBehaviors !== undefined && options.exitToPoolBehaviors.length > 0) ||
     options.interactionCooldownTicks !== undefined ||
     options.maxBehaviorTicks !== undefined ||
     options.maxTravelPx !== undefined ||
@@ -450,6 +481,20 @@ export class AnimationConfig {
 
   public forcedSwitchTicks(mascot: string): number {
     return this.optionsFor(mascot).forcedSwitchTicks ?? 0;
+  }
+
+  /** May the pacer interrupt this behaviour? False only for the exempted ones, so a
+   *  long stationary animation can finish while a plain idle `Stay` is still nudged. */
+  public pacerApplies(mascot: string, behavior: string | undefined): boolean {
+    if (!behavior) return true;
+    return !(this.optionsFor(mascot).pacerExemptBehaviors?.includes(behavior) ?? false);
+  }
+
+  /** Does this behaviour re-enter the global pool when it ends, bypassing the pack's
+   *  `<NextBehaviorList>`? Needed for the packs' closed chains (see the option docs). */
+  public exitsToPool(mascot: string, behavior: string | undefined): boolean {
+    if (!behavior) return false;
+    return this.optionsFor(mascot).exitToPoolBehaviors?.includes(behavior) ?? false;
   }
 
   /** Ticks during which partner behaviours stay out of the pool after an interaction. */
@@ -578,6 +623,12 @@ export class AnimationConfig {
     }
     if (options.forcedSwitchTicks) {
       lines.push(`forcedSwitchTicks: ${options.forcedSwitchTicks} (${seconds(options.forcedSwitchTicks)})`);
+    }
+    if (options.pacerExemptBehaviors?.length) {
+      lines.push(`pacerExemptBehaviors: ${options.pacerExemptBehaviors.join(", ")}`);
+    }
+    if (options.exitToPoolBehaviors?.length) {
+      lines.push(`exitToPoolBehaviors: ${options.exitToPoolBehaviors.join(", ")}`);
     }
     if (options.maxBehaviorTicks) {
       lines.push(`maxBehaviorTicks: ${options.maxBehaviorTicks} (${seconds(options.maxBehaviorTicks)})`);

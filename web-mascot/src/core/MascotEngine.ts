@@ -1605,7 +1605,15 @@ export class MascotEngine {
     // The wait is bounded by runtime.broadcastServeTimeoutTicks, so this cannot last.
     if (this.holdingClaim(this.actionStack[this.actionStack.length - 1])) return;
     const pacer = animation.forcedSwitchTicks(this.mascotName);
-    if (pacer > 0 && this.stillTicks >= pacer && !this.isTravelling()) {
+    if (
+      pacer > 0 &&
+      this.stillTicks >= pacer &&
+      !this.isTravelling() &&
+      // A behaviour may opt out of the pacer so a long *stationary* animation can
+      // finish. The check is on the behaviour, not on the mascot: a plain idle Stay
+      // still gets nudged on time.
+      animation.pacerApplies(this.mascotName, this.currentBehavior?.name)
+    ) {
       // A long stretch of stillness means the page looks asleep: the behaviour that
       // replaces this one has to be one that moves the mascot somewhere.
       if (this.anchorStillTicks >= pacer) this.wantMovement = true;
@@ -2527,6 +2535,25 @@ export class MascotEngine {
       }
     }
     this.clampToWorkArea();
+    // A mascot clinging to a *wall* faces away from it, for every running action —
+    // the guard is the action's own BorderType, so a floor/ceiling pose keeps
+    // whatever facing its behaviour chose, and `Fall`/`Dragged` (no BorderType) are
+    // left to the drag and throw code, which sets `lookRight` per tick itself.
+    //
+    // Why it cannot live in the moving branch above: the packs' wall *holds* are
+    // `Stay` actions — `HoldOntoWall` is `GrabWall`, Type="Stay" BorderType="Wall" —
+    // so they never reach it. Their pose carries no LookRight, so they used to
+    // inherit whatever the previous behaviour left behind, and the pack flips that
+    // value on the way in: `JumpFromRightWall` / `JumpFromLeftWall` end with a
+    // `Look`, which toggles when it has no `LookRight` attribute (libshijima's
+    // look::tick()). So a mascot that climbed the right wall, jumped and settled back
+    // onto the wall held its pose mirrored. Climbing itself looked right only because
+    // `ClimbWall` is Type="Move" and already re-normalised every tick.
+    const clinging = this.currentLeaf();
+    if (clinging?.borderType === "Wall") {
+      if (this.borderIsOn("left", { x: this.x, y: this.y })) this.lookRight = false;
+      if (this.borderIsOn("right", { x: this.x, y: this.y })) this.lookRight = true;
+    }
     // Guard every action that is supposed to travel, not just target-seekers: a
     // mascot pushed into a border by a pose velocity is stuck just as badly.
     if (targetX !== null || targetY !== null || translates || leaf.type === "Move") this.guardStall(frame);
@@ -2565,7 +2592,12 @@ export class MascotEngine {
     const mascot = this.mascotName;
     const candidates: BehaviorReference[] = [];
     const next = this.currentBehavior?.nextBehaviors || [];
-    for (const reference of next) {
+    // A listed behaviour ignores its `<NextBehaviorList>` and re-enters the global
+    // pool. The shipped packs chain related behaviours, and some of those chains are
+    // closed: SitAndFaceMouse lists only itself and SitWhileDanglingLegs with
+    // Add="false", so a mascot that sits down can never leave that pair by itself.
+    const forcePool = animation.exitsToPool(mascot, this.currentBehavior?.name);
+    for (const reference of forcePool ? [] : next) {
       if (!this.evaluateCondition(reference.condition)) continue;
       if (!animation.allows(mascot, reference.name)) continue;
       const behavior = this.config.behaviors.find((entry) => entry.name === reference.name);
