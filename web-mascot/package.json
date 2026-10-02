@@ -3,9 +3,30 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "description": "Embeddable browser mascot engine (NeurolingsCE-Qt web port)",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./devtools": {
+      "types": "./dist/types/devtools.d.ts",
+      "import": "./dist/devtools.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc && vite build",
+    "build:lib": "vue-tsc && vite build && tsc -p tsconfig.lib.json",
+    "dev:test-host": "vite --config vite.test-host.config.ts",
+    "types": "tsc -p tsconfig.lib.json",
     "preview": "vite preview"
   },
   "dependencies": {
