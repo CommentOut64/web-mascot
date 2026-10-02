@@ -9,8 +9,14 @@ import type {
 import type { Hotspot } from "./Hotspot";
 
 export class XMLParser {
-  static async loadConfig(mascotName: string): Promise<MascotConfig> {
-    const basePath = `/mascot_pack/${mascotName}`;
+  /**
+   * @param packBaseUrl Already-resolved base URL of the pack directory, without a
+   *   trailing slash (e.g. `https://cdn.example.com/mascots/Neuron`). The caller
+   *   owns URL resolution, so an embedded or hosted build never depends on the
+   *   page's root path.
+   */
+  static async loadConfig(mascotName: string, packBaseUrl: string): Promise<MascotConfig> {
+    const basePath = packBaseUrl.replace(/\/+$/, "");
     const [actionsXmlRes, behaviorsXmlRes] = await Promise.all([
       fetch(`${basePath}/actions.xml`),
       fetch(`${basePath}/behaviors.xml`),

@@ -32,7 +32,7 @@ const activeEngines: MascotEngine[] = [];
 // Dev convenience: `__mascotEngines[0].snapshot()` in the browser console.
 // Note: an engine's own `x`/`y` are *virtual* units (1 unit = 1 sprite pixel; see
 // `scale` in the animation config). Use `position()`, `snapshot()` or the
-// observation log for page pixels.
+// observation log for viewport pixels.
 (window as unknown as { __mascotEngines: MascotEngine[] }).__mascotEngines = activeEngines;
 
 async function spawnPet(name: string) {

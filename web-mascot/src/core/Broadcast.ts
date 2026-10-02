@@ -45,6 +45,17 @@ export class ServerState {
     return this.active && this.available;
   }
 
+  /**
+   * A scanner has claimed this advertisement and is on its way. libshijima has no
+   * such state: the advertising animation ends when it wants to, the claim is
+   * finalized with it, and the approaching scanner is dropped on its next tick.
+   * The owner of the advertisement needs to be able to see the claim so it can
+   * hold its pose until the partner arrives (see BroadcastManager).
+   */
+  public get isClaimed(): boolean {
+    return this.active && !this.available && !this.metUp;
+  }
+
   public get didMeetUp(): boolean {
     return this.metUp;
   }

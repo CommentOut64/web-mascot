@@ -2,6 +2,7 @@ import { XMLParser } from "./XMLParser";
 import { AnimationConfig } from "./AnimationConfig";
 import { BroadcastManager, ClientHandle, Interaction, ServerState } from "./Broadcast";
 import { hotspotAt } from "./Hotspot";
+import { registerMascotPage } from "./MascotPageCoordinator";
 import type { Hotspot } from "./Hotspot";
 import type { ActionNode, AnimationVariant, Behavior, BehaviorReference, MascotConfig, Pose } from "./types";
 
@@ -38,6 +39,25 @@ const DRAG_OFFSET_Y = 120;
 /** libshijima's `mascot::tick::reached_init_limit()`: a behaviour chain that keeps
  *  ending instantly must not loop for ever inside a single tick. */
 const MAX_BEHAVIOR_INITS_PER_TICK = 20;
+/**
+ * How long an advertiser holds its pose for a scanner that has already claimed its
+ * affordance but has not arrived yet.
+ *
+ * libshijima lets the advertising animation end whenever it ends: the offer is
+ * finalized with it, the claim goes with it, and the scanner — which is already
+ * walking — is dropped by the `!client.connected` guard on its next tick, with no
+ * event and no retry. On the shipped packs the advertisement is a fixed 409-tick
+ * animation (`SitAffordance`), and a scanner that claims it in the last ~50 ticks
+ * loses the hug: measured over 180 000 ticks, 3 of 46 claims (6.5%) died this way.
+ *
+ * The wait is bounded so a scanner that never arrives (killed, dragged, frozen, or
+ * simply stopped by its own behaviour cap) cannot leave the advertiser holding for
+ * ever. The shipped packs need ≤ 52 ticks from claim to arrival (p99), so this is
+ * an order of magnitude of headroom while still ending well before the default
+ * `forcedSwitchTicks` (750) would normally pace the mascot.
+ */
+const BROADCAST_SERVE_TIMEOUT_TICKS = 600;
+
 /** A single-tick anchor movement larger than this is reported as a jump suspect. */
 const SUSPECT_STEP_PX = 24;
 /** Never simulate more than this much time in one frame. A hidden tab stops
@@ -78,7 +98,7 @@ export type EngineEvent =
       side?: "server" | "client";
       /** The behaviour the interaction will hand over to, when known. */
       behavior?: string;
-      /** The peer's anchor, in page pixels, for `interaction-arrived`. */
+      /** The peer's anchor, in viewport pixels, for `interaction-arrived`. */
       target?: [number, number];
       /** Scan distance to the nearest live broadcast. */
       distance?: number;
@@ -129,6 +149,8 @@ type ActionFrame = {
 };
 
 type Area = { top: number; right: number; bottom: number; left: number };
+type Surface = "floor" | "left-wall" | "right-wall" | "ceiling";
+type PauseReason = "hidden" | "viewport" | "background-page";
 
 export class MascotEngine {
   /** Every live mascot, so `mascot.totalCount` means something to the packs. */
@@ -147,6 +169,9 @@ export class MascotEngine {
   private static reducedMotionWatcher: (() => void) | null = null;
   /** Default location of the editable configuration file. */
   public static readonly ANIMATION_CONFIG_URL = "/animation.config.json";
+  /** Default base URL of the mascot packs. A hosted or embedded build overrides
+   *  this so sprites never resolve against the host page's root path. */
+  public static readonly PACK_BASE_URL = "/mascot_pack";
 
   /** Stable per-session identity, used to name this mascot's log file. */
   public readonly id: number;
@@ -154,9 +179,14 @@ export class MascotEngine {
 
   private container: HTMLElement;
   private mascotName: string;
+  /** This pack's resolved base URL, captured at construction so `configure()`
+   *  after the fact cannot leave one mascot reading from another pack. */
+  private packBaseUrl: string;
   private config: MascotConfig | null = null;
   private elRoot: HTMLDivElement;
   private elImg: HTMLImageElement;
+  /** An Interact action with image-less hold frames must hide its old standalone frame. */
+  private interactionVisualActive = false;
   private actionStack: ActionFrame[] = [];
   private currentBehavior: Behavior | null = null;
   private behaviorUsability = new Map<string, boolean>();
@@ -180,7 +210,17 @@ export class MascotEngine {
   private lastTime = 0;
   private accumulator = 0;
   private loopId = 0;
+  private pauseReasons = new Set<PauseReason>();
+  private unregisterPage: (() => void) | null = null;
+  /** Scroll is an external intent; mascot coordinates remain viewport coordinates. */
   private lastScrollY = 0;
+  private scrollDirection: -1 | 0 | 1 = 0;
+  private scrollGestureDirection: -1 | 0 | 1 = 0;
+  /** Pending page movement, in virtual viewport units, waiting for the next tick. */
+  private pendingScrollShift = 0;
+  private scrollStopPending = false;
+  private scrollHold: "none" | "resting" = "none";
+  private lastSurface: Surface | null = null;
   private cursorX = 0;
   private cursorY = 0;
   /** Cursor movement during the last logic tick, i.e. `environment.cursor.dx/dy`.
@@ -227,6 +267,10 @@ export class MascotEngine {
    *  the action instance and live on its frame; the handshake belongs to the
    *  mascot, because its behaviour is what the partner is waiting on. */
   private interaction = new Interaction();
+  /** Tick at which this mascot first noticed that its advertisement had been
+   *  claimed, or 0 when it is not holding a pose for anybody (see
+   *  BROADCAST_SERVE_TIMEOUT_TICKS). */
+  private servingClaimSince = 0;
   /** Paused while the mascot's container is scrolled out of view. */
   private visible = true;
   private intersectionObserver: IntersectionObserver | null = null;
@@ -259,6 +303,28 @@ export class MascotEngine {
     return MascotEngine.broadcasts;
   }
 
+  /** Decided on the first load; `reloadAnimationConfig(url)` re-decides it. */
+  private static animationConfigUrl: string | null = null;
+  /** Overridden by the host so a pack can live anywhere; see `configure()`. */
+  private static packBaseUrl: string = MascotEngine.PACK_BASE_URL;
+
+  /**
+   * Point the engine at its assets. Every URL is resolved by the caller, because
+   * an embedded or published build cannot assume it is served from the page root.
+   *
+   * Call this before the first mascot is created: the animation configuration is
+   * fetched once and then cached for the page, so a later change is only picked up
+   * by `reloadAnimationConfig()`.
+   */
+  public static configure(options: { packBaseUrl?: string; animationConfigUrl?: string }): void {
+    if (options.packBaseUrl) {
+      MascotEngine.packBaseUrl = options.packBaseUrl.replace(/\/+$/, "");
+    }
+    if (options.animationConfigUrl && !MascotEngine.animationConfigUrl) {
+      MascotEngine.animationConfigUrl = options.animationConfigUrl;
+    }
+  }
+
   /**
    * Install a configuration from an object in the same shape as the JSON file.
    * This is the entry point a settings UI would use; it wins over the file until
@@ -274,19 +340,21 @@ export class MascotEngine {
    * Read the configuration file once and keep it. Missing or invalid files leave
    * the mascots on the pack's own settings, so this never breaks the app.
    */
-  public static loadAnimationConfig(url = MascotEngine.ANIMATION_CONFIG_URL): Promise<void> {
+  public static loadAnimationConfig(url?: string): Promise<void> {
+    if (url) MascotEngine.animationConfigUrl = url;
+    const target = MascotEngine.animationConfigUrl ?? MascotEngine.ANIMATION_CONFIG_URL;
     if (MascotEngine.animationConfigLoad) return MascotEngine.animationConfigLoad;
     MascotEngine.animationConfigLoad = (async () => {
       try {
         const controller = new AbortController();
         const timer = window.setTimeout(() => controller.abort(), 3000);
-        const response = await fetch(url, { cache: "no-store", signal: controller.signal });
+        const response = await fetch(target, { cache: "no-store", signal: controller.signal });
         window.clearTimeout(timer);
         const contentType = response.headers.get("content-type") ?? "";
         if (!response.ok || !contentType.includes("json")) return;
         const file: unknown = await response.json();
         if (!MascotEngine.animationConfigSetExplicitly) {
-          MascotEngine.animationConfig = new AnimationConfig(file, url);
+          MascotEngine.animationConfig = new AnimationConfig(file, target);
         }
       } catch {
         /* no configuration file, or it is unreachable: keep the pack defaults */
@@ -312,26 +380,49 @@ export class MascotEngine {
   }
 
   /** Re-read the file, discarding both the cache and any programmatic override. */
-  public static async reloadAnimationConfig(url = MascotEngine.ANIMATION_CONFIG_URL): Promise<AnimationConfig> {
+  public static async reloadAnimationConfig(url?: string): Promise<AnimationConfig> {
     MascotEngine.animationConfigLoad = null;
     MascotEngine.animationConfigSetExplicitly = false;
-    await MascotEngine.loadAnimationConfig(url);
+    if (url) MascotEngine.animationConfigUrl = url;
+    await MascotEngine.loadAnimationConfig();
     return MascotEngine.animationConfig;
   }
 
   constructor(container: HTMLElement, mascotName: string) {
     this.container = container;
     this.mascotName = mascotName;
+    this.packBaseUrl = `${MascotEngine.packBaseUrl}/${mascotName}`;
     this.id = MascotEngine.nextId++;
     this.label = `${this.id}-${mascotName}`;
     this.elRoot = document.createElement("div");
     Object.assign(this.elRoot.style, {
       position: "fixed", left: "0px", top: "0px", pointerEvents: "auto",
-      cursor: "grab", zIndex: "99999", userSelect: "none",
+      cursor: "grab", zIndex: "1", userSelect: "none", visibility: "hidden",
+      // A definite box as well: the root carries a transform and nothing else, so
+      // without this it has a zero-size hit box and is invisible to hit testing.
+      width: `${SPRITE_WIDTH}px`, height: `${SPRITE_WIDTH}px`,
     });
     this.elImg = document.createElement("img");
     this.elImg.style.position = "absolute";
+    this.elImg.style.visibility = "hidden";
     this.elImg.ondragstart = () => false;
+    // Give the sprite a *definite* size from its bitmap instead of relying on
+    // intrinsic sizing to inflate a shrink-to-fit box.
+    //
+    // `max-width: none` is essential, not cosmetic. The UA stylesheet applies
+    // `img { max-width: 100% }`, which against a shrink-to-fit `position: fixed`
+    // wrapper (one that has no width of its own) resolves to 0% in a circular
+    // way — the wrapper sizes to the images, the images clamp to the wrapper — so
+    // the sprite collapses to width 0 while its height stays correct. The engine
+    // then keeps running, keeps logging poses, and paints nothing at all.
+    this.elImg.style.maxWidth = "none";
+    this.elImg.style.maxHeight = "none";
+    this.elImg.addEventListener("load", () => {
+      this.applySpriteIntrinsicSize();
+      this.elImg.style.visibility = "visible";
+    });
+    this.elImg.style.width = `${SPRITE_WIDTH}px`;
+    this.elImg.style.height = `${SPRITE_WIDTH}px`;
     this.elRoot.appendChild(this.elImg);
     this.bindEvents();
   }
@@ -339,11 +430,11 @@ export class MascotEngine {
   public async init() {
     // Customisation is read first so the very first tick already obeys it.
     await MascotEngine.loadAnimationConfig();
-    this.config = await XMLParser.loadConfig(this.mascotName);
+    this.config = await XMLParser.loadConfig(this.mascotName, this.packBaseUrl);
     this.applySpawnPosition();
+    this.resetScrollTracking();
     this.prevX = this.x;
     this.prevY = this.y;
-    this.lastScrollY = window.scrollY;
     MascotEngine.liveEngines.add(this);
     this.container.appendChild(this.elRoot);
     this.watchVisibility();
@@ -352,14 +443,20 @@ export class MascotEngine {
     // as a flicker on every pose change.
     this.preloadSprites();
     await this.warmFirstPose();
-    this.emit({ kind: "spawn", detail: `viewport=${window.innerWidth}x${window.innerHeight}` });    this.setBehavior("Fall", "spawn");
+    // Do not expose the fixed box while the first real bitmap is still pending.
+    // This prevents the browser's empty-image placeholder from flashing at (0, 0).
+    this.elRoot.style.visibility = "visible";
+    this.emit({ kind: "spawn", detail: `viewport=${window.innerWidth}x${window.innerHeight}` });
+    this.setBehavior("Fall", "spawn");
     this.lastTime = performance.now();
-    this.loopId = requestAnimationFrame((t) => this.loop(t));
+    if (document.hidden) this.setPauseReason("hidden", true);
+    this.unregisterPage = registerMascotPage((owner) => this.setPauseReason("background-page", !owner));
+    if (this.pauseReasons.size === 0) this.loopId = requestAnimationFrame((t) => this.loop(t));
   }
 
   /** URL of a pack sprite. */
   private spriteUrl(image: string): string {
-    return `/mascot_pack/${this.mascotName}/img${image}`;
+    return `${this.packBaseUrl}/img${image}`;
   }
 
   /**
@@ -371,10 +468,14 @@ export class MascotEngine {
     const actions = this.config?.actions;
     if (!actions) return;
     const urls = new Set<string>();
+    // A `<Pose>` may carry no `Image` (the shipped packs use one as a bare delay).
+    // It has nothing to preload, and `spriteUrl("")` would request the `img`
+    // directory itself, which the dev server answers with a 500 and an error
+    // overlay on the host page.
     const collect = (node: ActionNode) => {
-      for (const pose of node.poses ?? []) urls.add(this.spriteUrl(pose.image));
+      for (const pose of node.poses ?? []) if (pose.image) urls.add(this.spriteUrl(pose.image));
       for (const animation of node.animations ?? []) {
-        for (const pose of animation.poses) urls.add(this.spriteUrl(pose.image));
+        for (const pose of animation.poses) if (pose.image) urls.add(this.spriteUrl(pose.image));
       }
       for (const child of node.children ?? []) collect(child);
     };
@@ -392,11 +493,19 @@ export class MascotEngine {
    *  Bounded by a timeout: a slow network must never delay the mascot. */
   private async warmFirstPose(): Promise<void> {
     const pose = this.currentPose() ?? this.firstPose();
-    if (!pose) return;
+    if (!pose || !pose.image) return;
     const image = new Image();
     image.src = this.spriteUrl(pose.image);
     const decode = typeof image.decode === "function" ? image.decode().catch(() => undefined) : Promise.resolve();
     await Promise.race([decode, new Promise((resolve) => window.setTimeout(resolve, 1500))]);
+    // Seed the sprite box before the first frame so the initial paint already has
+    // a real size (the warm-up image is decoded, so its bitmap size is known).
+    if (image.naturalWidth > 0) {
+      this.elImg.style.width = `${image.naturalWidth}px`;
+      this.elImg.style.height = `${image.naturalHeight}px`;
+      this.elRoot.style.width = `${image.naturalWidth}px`;
+      this.elRoot.style.height = `${image.naturalHeight}px`;
+    }
   }
 
   /** The first pose of the action a fresh mascot starts with (Fall/Bouncing). */
@@ -404,6 +513,25 @@ export class MascotEngine {
     const node = this.config?.actions["Fall"];
     const fromAnimations = node?.animations?.[0]?.poses?.[0];
     return fromAnimations ?? node?.poses?.[0];
+  }
+
+  /**
+   * Size the sprite box from the decoded bitmap. Packs may declare anything, and
+   * a zero-area box would defeat both painting and hit testing, so the previous
+   * value is kept until a real one is known (see the constructor for why the size
+   * must be definite at all).
+   */
+  private applySpriteIntrinsicSize(): void {
+    const img = this.elImg;
+    const width = img.naturalWidth || SPRITE_WIDTH;
+    const height = img.naturalHeight || SPRITE_WIDTH;
+    if (img.style.width === `${width}px` && img.style.height === `${height}px`) return;
+    img.style.width = `${width}px`;
+    img.style.height = `${height}px`;
+    // Mirror the size onto the wrapper so it has a non-zero hit box as well: the
+    // root itself only carries a transform, never its own box.
+    this.elRoot.style.width = `${width}px`;
+    this.elRoot.style.height = `${height}px`;
   }
 
   /** Pause while the mascot's container is scrolled out of view, so an embedded
@@ -435,34 +563,44 @@ export class MascotEngine {
     }
   }
 
+  private resetScrollTracking() {
+    this.lastScrollY = window.scrollY;
+    this.scrollDirection = 0;
+    this.scrollGestureDirection = 0;
+    this.pendingScrollShift = 0;
+    this.scrollStopPending = false;
+    this.isScrolling = false;
+    this.scrollHold = "none";
+  }
+
   private setVisible(visible: boolean) {
     if (this.visible === visible) return;
     this.visible = visible;
-    if (visible) {
-      // Only the viewport pause resumes here: a resume forced by the tab becoming
-      // visible is reported by the visibilitychange handler, which owns that
-      // reason. Without this the viewport pause had no matching recovery, so a
-      // log could not tell "still frozen" from "resumed while nobody looked".
-      if (!document.hidden) {
-        this.emit({
-          kind: "milestone",
-          name: "resumed",
-          detail: "container back in viewport",
-          x: this.x,
-          y: this.y,
-          leaf: this.leafLabel(),
-        });
-        this.resumeLoop();
-      }
-      return;
-    }
-    cancelAnimationFrame(this.loopId);
-    this.emit({ kind: "milestone", name: "paused", detail: "container left the viewport", x: this.x, y: this.y, leaf: this.leafLabel() });
+    this.setPauseReason("viewport", !visible);
     // Defence in depth: a wrong or stale observation must never freeze the mascot
     // for good, so re-check the geometry shortly afterwards.
     window.setTimeout(() => {
       if (!this.visible && this.isOnScreen()) this.setVisible(true);
     }, 2000);
+  }
+
+  private setPauseReason(reason: PauseReason, paused: boolean) {
+    const wasPaused = this.pauseReasons.size > 0;
+    if (paused) this.pauseReasons.add(reason);
+    else this.pauseReasons.delete(reason);
+    const isPaused = this.pauseReasons.size > 0;
+    if (wasPaused === isPaused) return;
+
+    if (isPaused) {
+      cancelAnimationFrame(this.loopId);
+      window.clearTimeout(this.scrollDebounceTimer);
+      this.resetScrollTracking();
+      this.emit({ kind: "milestone", name: "paused", detail: reason, x: this.x, y: this.y, leaf: this.leafLabel() });
+    } else {
+      this.resetScrollTracking();
+      this.emit({ kind: "milestone", name: "resumed", detail: reason, x: this.x, y: this.y, leaf: this.leafLabel() });
+      this.resumeLoop();
+    }
   }
 
   private isOnScreen() {
@@ -479,6 +617,8 @@ export class MascotEngine {
 
   public destroy() {
     cancelAnimationFrame(this.loopId);
+    this.unregisterPage?.();
+    this.unregisterPage = null;
     this.intersectionObserver?.disconnect();
     this.intersectionObserver = null;
     this.eventsAbortController.abort();
@@ -491,7 +631,7 @@ export class MascotEngine {
 
   /** Current observable state, for timers and for poking at the mascot in the
    *  browser console: `__mascotEngines[0].snapshot()`. */
-  /** Where the mascot is drawn, in page pixels. The engine's own coordinates are
+  /** Where the mascot is drawn, in viewport pixels. The engine's own coordinates are
    *  virtual units (1 unit = 1 sprite pixel at `scale`), so anything outside the
    *  engine — logs, host code — should read this instead of `x`/`y`. */
   public position(): { x: number; y: number } {
@@ -520,7 +660,7 @@ export class MascotEngine {
     };
   }
 
-  /** Convert a virtual length or coordinate to page pixels (the log's unit). */
+  /** Convert a virtual length or coordinate to viewport pixels (the log's unit). */
   private toPage(value: number): number {
     return value * this.spriteScale;
   }
@@ -586,6 +726,7 @@ export class MascotEngine {
   private spritePoint(clientX: number, clientY: number): { x: number; y: number } | null {
     const pose = this.currentPose();
     if (!pose) return null;
+    // `x`/`y` and pointer coordinates are both in the viewport frame.
     const cursor = this.toVirtual(clientX, clientY);
     const width = this.elImg.naturalWidth || SPRITE_WIDTH;
     const left = this.lookRight ? this.x - (width - pose.imageAnchor.x) : this.x - pose.imageAnchor.x;
@@ -638,6 +779,7 @@ export class MascotEngine {
         return;
       }
       this.isDragging = true;
+      this.resetScrollTracking();
       this.elRoot.style.cursor = "grabbing";
       // dragged::init(ctx): foot_x = cursor.x + OffsetX, and the struggle timer.
       // The anchor itself is placed by the tick, not here (dragged::subtick).
@@ -679,29 +821,9 @@ export class MascotEngine {
           this.setBehavior("Thrown", "drag-release");
         }
         window.clearTimeout(this.scrollDebounceTimer);
-        this.isScrolling = false;
-        cancelAnimationFrame(this.loopId);
-        this.emit({
-          kind: "milestone",
-          name: "paused",
-          detail: "tab hidden",
-          x: this.x,
-          y: this.y,
-          leaf: this.leafLabel(),
-        });
+        this.setPauseReason("hidden", true);
       } else {
-        this.lastScrollY = window.scrollY;
-        if (this.visible) {
-          this.emit({
-            kind: "milestone",
-            name: "resumed",
-            detail: "tab visible",
-            x: this.x,
-            y: this.y,
-            leaf: this.leafLabel(),
-          });
-          this.resumeLoop();
-        }
+        this.setPauseReason("hidden", false);
       }
     }, { signal });
 
@@ -737,93 +859,20 @@ export class MascotEngine {
     }, { signal });
 
     window.addEventListener("scroll", () => {
-      const delta = (window.scrollY - this.lastScrollY) / this.spriteScale;
+      const delta = window.scrollY - this.lastScrollY;
       this.lastScrollY = window.scrollY;
-      
-      if (this.isDragging || delta === 0) return;
+      if (delta === 0) return;
+
       this.isScrolling = true;
-
-      const borderBefore = this.currentBorderAt(undefined);
-
-      this.y -= delta;
-      
-      const area = this.area();
-      let targetOutOfBounds = false;
-      for (const frame of this.actionStack) {
-        if (frame.resolved && typeof frame.resolved.TargetY === "number") {
-          frame.resolved.TargetY -= delta;
-          if (frame.resolved.TargetY < area.top || frame.resolved.TargetY > area.bottom) {
-             targetOutOfBounds = true;
-          }
-        }
-      }
-      this.clampToWorkArea();
-      
-      const isAtCeiling = this.y <= area.top + 1;
-      const isAtFloor = this.y >= area.bottom - 1;
-
-      // 1. 若原本在天花板上：页面滚动无论上下，立即脱离天花板下落
-      if (borderBefore === "Ceiling") {
-        this.y = area.top + 2;
-        if (this.currentBehavior?.name !== "Fall") {
-          this.setBehavior("Fall", "scroll-ceiling-drop");
-        }
-      }
-      // 2. 向上滚动（delta < 0）：宠物被推向地面
-      else if (delta < 0) {
-        if (isAtFloor) {
-          // 只要处于或接触地面，必定进入/保持趴地状态（无论此前是地面动作还是下落/落地弹跳）
-          if (this.currentBehavior?.name !== "LieDown") {
-            this.setBehavior("LieDown", "scroll-up-liedown");
-          }
-        } else if (borderBefore === "Wall") {
-          if (this.x <= area.left + 1) this.x += 2;
-          else if (this.x >= area.right - 1) this.x -= 2;
-          if (this.currentBehavior?.name !== "Fall") {
-            this.setBehavior("Fall", "scroll-hit-floor");
-          }
-        }
-      }
-      // 3. 向下滚动（delta > 0）：宠物被推向顶部或脱离地面
-      else if (delta > 0) {
-        if (borderBefore === "Wall") {
-          if (isAtCeiling) {
-            if (this.x <= area.left + 1) this.x += 2;
-            else if (this.x >= area.right - 1) this.x -= 2;
-            this.y = area.top + 2;
-            if (this.currentBehavior?.name !== "Fall") this.setBehavior("Fall", "scroll-hit-ceiling");
-          }
-        } else if (targetOutOfBounds) {
-          if (this.currentBehavior?.name !== "Fall") {
-            if (this.x <= area.left + 1) this.x += 2;
-            else if (this.x >= area.right - 1) this.x -= 2;
-            this.setBehavior("Fall", "scroll-target-lost");
-          }
-        } else if (this.currentBehavior?.name === "Fall") {
-          // 下落中接触顶部：保持下落状态，消除向上动量
-          if (isAtCeiling) {
-            this.vy = 0;
-          }
-        } else {
-          // 在地面时向下滚动：脱离地面掉落
-          if (isAtCeiling) {
-            this.y = area.top + 2;
-          }
-          if (this.currentBehavior?.name !== "Fall") {
-            this.setBehavior("Fall", "scroll-down-fall");
-          }
-        }
-      }
-
-      // 滚动停止后恢复
+      this.scrollDirection = delta > 0 ? 1 : -1;
+      this.pendingScrollShift += delta / this.spriteScale;
+      this.scrollStopPending = false;
       window.clearTimeout(this.scrollDebounceTimer);
       this.scrollDebounceTimer = window.setTimeout(() => {
         this.isScrolling = false;
-        if (!this.isDragging && this.currentBehavior?.name === "LieDown") {
-          this.setBehavior("StandUp", "scroll-stop");
-        }
-      }, 250);
-
+        this.scrollDirection = 0;
+        this.scrollStopPending = true;
+      }, 160);
     }, { signal });
   }
 
@@ -882,9 +931,7 @@ export class MascotEngine {
     return Number.isFinite(numeric) ? numeric / scale : fallback;
   }
 
-  /** The mascot's activity rectangle: `zone` from the configuration, defaulting to
-   *  the whole viewport. Floor, ceiling, walls and every clamp follow it, so a host
-   *  page can keep the mascot inside a strip instead of over its content. */
+  /** The mascot's activity rectangle in viewport coordinates. */
   private area(): Area {
     const zone = MascotEngine.animationConfig.zone(this.mascotName);
     const left = this.metric(zone.left, "x", 0);
@@ -915,11 +962,14 @@ export class MascotEngine {
         : area.top + (spawn.topOffset ?? 100) / this.spriteScale;
   }
 
+  /** Is `point` on one of the work-area borders? */
   private borderIsOn(side: "top" | "right" | "bottom" | "left", point: { x: number; y: number }, area = this.area()) {
     const tolerance = 1;
     if (side === "top" || side === "bottom") {
       const y = side === "top" ? area.top : area.bottom;
-      return Math.abs(point.y - y) < tolerance && point.x >= area.left && point.x <= area.right;
+      const crossed = side === "bottom" && point.y >= y;
+      const near = Math.abs(point.y - y) < tolerance;
+      return (crossed || near) && point.x >= area.left && point.x <= area.right;
     }
     const x = side === "left" ? area.left : area.right;
     return Math.abs(point.x - x) < tolerance && point.y >= area.top && point.y <= area.bottom;
@@ -1215,7 +1265,12 @@ export class MascotEngine {
     // this reset an exhausted counter would switch behaviours on every tick, which
     // both looked broken and stopped sequences (Stand -> scan) from ever advancing.
     this.stillTicks = 0;
-    if (!action) { this.currentBehavior = selected; this.onBehaviorEnd(reason); return; }
+    if (!action) {
+      this.interactionVisualActive = false;
+      this.currentBehavior = selected;
+      this.onBehaviorEnd(reason);
+      return;
+    }
     // libshijima activate_queued_behavior(): running the behaviour a live handshake
     // asked for marks that handshake as started.
     if (this.interaction.available && !this.interaction.started && this.interaction.behavior === selected.name) {
@@ -1224,6 +1279,13 @@ export class MascotEngine {
     // Frames that are being replaced stop advertising and let go of scan targets.
     this.releaseStack();
     this.currentBehavior = selected;
+    this.interactionVisualActive = !!action && this.actionTreeMatches(action, (node) => this.isInteract(node));
+    if (this.interactionVisualActive) {
+      // Remove the standalone frame at the moment the interaction starts. The
+      // partner's interaction sprite must not be paired with this stale frame.
+      this.elImg.style.visibility = "hidden";
+      this.elImg.removeAttribute("src");
+    }
     this.actionStack = [this.newFrame(action)];
     if (from !== selected.name) {
       this.emit({
@@ -1276,6 +1338,13 @@ export class MascotEngine {
     this.prevY = this.y;
     this.tickCount++;
     this.behaviorInitsThisTick = 0;
+    const surfaceBeforeScroll = this.surfaceAt();
+    if (!this.isDragging && this.pendingScrollShift !== 0) {
+      this.y -= this.pendingScrollShift;
+      this.pendingScrollShift = 0;
+      this.clampToWorkArea();
+    }
+    this.applyScrollIntent(surfaceBeforeScroll);
     // Cursor velocity for this tick (see the field comment), in virtual units so the
     // packs' `InitialVX/InitialVY` and `cursor.dx/dy` expressions stay sprite-unit
     // quantities. The clamp is a screen-pixel budget, so a pointer that teleports —
@@ -1323,6 +1392,7 @@ export class MascotEngine {
     this.anchorStillTicks = moved ? 0 : this.anchorStillTicks + 1;
     if (moved) this.wantMovement = false;
     if (!this.isDragging) this.enforceBehaviorSwitch();
+    this.lastSurface = this.surfaceAt();
     this.observeTick(beforeX, beforeY);
   }
 
@@ -1332,16 +1402,61 @@ export class MascotEngine {
    * the behaviour the handshake asked for.
    */
   private maintainBroadcasts() {
+    let claimed: ServerState | null = null;
+    let claimedAffordance = "";
     for (const frame of this.actionStack) {
       const server = frame.server;
       if (!server) continue;
       if (server.active) server.updateAnchor({ x: this.x, y: this.y });
+      if (server.isClaimed && !claimed) {
+        claimed = server;
+        // initBroadcast() deletes `Affordance` from the frame's vars once it has
+        // advertised, so the name is read back off the action node.
+        claimedAffordance = frame.node.attributes?.Affordance ?? frame.node.name ?? "";
+      }
       if (!server.didMeetUp) continue;
       this.interaction = server.interaction();
       const next = this.interaction.behavior;
       if (next) this.setBehavior(next, "interaction-server");
       return;
     }
+    // Somebody claimed an advertisement and is on its way: hold the pose until it
+    // arrives (see BROADCAST_SERVE_TIMEOUT_TICKS). Without this the advertising
+    // animation ends under the approaching partner and the handshake is lost.
+    if (!claimed) {
+      this.servingClaimSince = 0;
+      return;
+    }
+    if (this.servingClaimSince === 0) this.servingClaimSince = this.tickCount;
+    if (this.tickCount - this.servingClaimSince >= BROADCAST_SERVE_TIMEOUT_TICKS) {
+      this.emit({
+        kind: "milestone",
+        name: "broadcast-serve-timeout",
+        detail: `affordance=${claimedAffordance} waited=${this.tickCount - this.servingClaimSince} ticks`,
+        affordance: claimedAffordance,
+        side: "server",
+        x: this.x,
+        y: this.y,
+        leaf: this.leafLabel(),
+      });
+      claimed.finalize();
+      this.servingClaimSince = 0;
+    }
+  }
+
+  /**
+   * Is this frame the advertisement of a claim that has not arrived yet, and is the
+   * wait still within its bound? While it is true the frame must not end and the
+   * pacer must not pull the mascot away, otherwise the scanner loses its partner
+   * mid-approach. Everything else (a drag, a scroll, a forced `Fall`) still releases
+   * the advertisement the normal way — only the advertisement's *own* animation
+   * ending is deferred.
+   */
+  private holdingClaim(frame: ActionFrame | undefined): boolean {
+    const server = frame?.server;
+    if (!server || !server.isClaimed) return false;
+    if (this.servingClaimSince === 0) return true;
+    return this.tickCount - this.servingClaimSince < BROADCAST_SERVE_TIMEOUT_TICKS;
   }
 
   /**
@@ -1361,6 +1476,11 @@ export class MascotEngine {
     if (this.isDragging) return;
     if (this.isFallLike(this.currentLeaf())) return;
     if (this.currentBehavior?.name === "Dragged") return;
+    // A claimed advertisement holds its pose for the approaching partner. The pacer
+    // exists so the page never looks asleep, but a mascot that is waiting to be
+    // hugged is not idle — and pulling it away here is exactly what drops the scan.
+    // The wait is bounded by BROADCAST_SERVE_TIMEOUT_TICKS, so this cannot last.
+    if (this.holdingClaim(this.actionStack[this.actionStack.length - 1])) return;
     const pacer = animation.forcedSwitchTicks(this.mascotName);
     if (pacer > 0 && this.stillTicks >= pacer && !this.isTravelling()) {
       // A long stretch of stillness means the page looks asleep: the behaviour that
@@ -1569,6 +1689,22 @@ export class MascotEngine {
     // `if (!client.connected()) return false;`). The walk itself happens in
     // updatePhysics(), which is where libshijima's move::tick also runs.
     if (this.isScanMove(node) && !(frame.client && frame.client.connected)) {
+      // A link that *was* connected and is not any more means the advertiser went
+      // away before the scanner arrived. libshijima drops this scan without a word;
+      // that silence is what made the loss invisible, so it is reported here.
+      if (frame.client) {
+        this.emit({
+          kind: "milestone",
+          name: "broadcast-abort",
+          detail: `affordance=${frame.vars.Affordance ?? "-"} partner stopped advertising`,
+          affordance: frame.vars.Affordance,
+          side: "client",
+          behavior: this.varString(frame, "Behavior"),
+          x: this.x,
+          y: this.y,
+          leaf: this.leafLabel(),
+        });
+      }
       this.popActionStack();
       return;
     }
@@ -1659,7 +1795,10 @@ export class MascotEngine {
     }
     frame.elapsed++;
     frame.poseTick++;
-    if (frame.durationLimit !== null && frame.elapsed >= frame.durationLimit) { this.popActionStack(); return; }
+    if (frame.durationLimit !== null && frame.elapsed >= frame.durationLimit && !this.holdingClaim(frame)) {
+      this.popActionStack();
+      return;
+    }
     const pose = poses[frame.poseIndex] ?? poses[0];
     if (!pose) { this.popActionStack(); return; }
     if (frame.poseTick >= Math.max(1, pose.duration)) {
@@ -1702,6 +1841,7 @@ export class MascotEngine {
           !node.loop &&
           !this.isDraggedAction(node) &&
           !drivenByInteraction &&
+          !this.holdingClaim(frame) &&
           !this.hasTarget(frame) &&
           frame.durationLimit === null &&
           !endsByPhysics
@@ -1861,17 +2001,81 @@ export class MascotEngine {
 
   /** A border the mascot is standing on right now, other than the one it just lost. */
   private currentBorderAt(lost: string | undefined): "Floor" | "Wall" | "Ceiling" | null {
+    const surface = this.surfaceAt();
+    const border = surface === "floor" ? "Floor" : surface === "ceiling" ? "Ceiling" : surface ? "Wall" : null;
+    if (border && border !== lost) return border;
     const point = { x: this.x, y: this.y };
-    const environment = this.environment();
-    const candidates: Array<["Floor" | "Wall" | "Ceiling", boolean]> = [
-      ["Floor", environment.floor.isOn(point)],
-      ["Wall", environment.wall.isOn(point)],
-      ["Ceiling", !this.isScrolling && environment.ceiling.isOn(point)],
-    ];
-    for (const [name, on] of candidates) {
-      if (on && name !== lost) return name;
-    }
+    const area = this.area();
+    if (lost !== "Floor" && this.borderIsOn("bottom", point, area)) return "Floor";
+    if (lost !== "Wall" && (this.borderIsOn("left", point, area) || this.borderIsOn("right", point, area))) return "Wall";
+    if (lost !== "Ceiling" && this.borderIsOn("top", point, area)) return "Ceiling";
     return null;
+  }
+
+  /** The surface currently supporting the anchor, preserving the active side at corners. */
+  private surfaceAt(point = { x: this.x, y: this.y }, area = this.area()): Surface | null {
+    const floor = this.borderIsOn("bottom", point, area);
+    const left = this.borderIsOn("left", point, area);
+    const right = this.borderIsOn("right", point, area);
+    const ceiling = this.borderIsOn("top", point, area);
+    const required = this.currentLeaf()?.borderType;
+
+    if (required === "Floor" && floor) return "floor";
+    if (required === "Wall" && (left || right)) return left ? "left-wall" : "right-wall";
+    if (required === "Ceiling" && ceiling) return "ceiling";
+
+    if (this.lastSurface === "floor" && floor) return "floor";
+    if (this.lastSurface === "left-wall" && left) return "left-wall";
+    if (this.lastSurface === "right-wall" && right) return "right-wall";
+    if (this.lastSurface === "ceiling" && ceiling) return "ceiling";
+
+    if (floor) return "floor";
+    if (left) return "left-wall";
+    if (right) return "right-wall";
+    if (ceiling) return "ceiling";
+    return null;
+  }
+
+  /** Detach from the current surface before starting Fall; Fall tests contact first. */
+  private detachAndFall(surface: Surface, reason: string) {
+    const area = this.area();
+    const epsilon = 2;
+    if (surface === "floor" && this.y >= area.bottom) this.y = Math.max(area.top, area.bottom - epsilon);
+    else if (surface === "left-wall") this.x = Math.min(area.right, area.left + epsilon);
+    else if (surface === "right-wall") this.x = Math.max(area.left, area.right - epsilon);
+    else if (surface === "ceiling") this.y = Math.min(area.bottom, area.top + epsilon);
+    this.vx = 0;
+    this.vy = 0;
+    this.lastSurface = null;
+    this.setBehavior("Fall", reason);
+  }
+
+  /** Consume one scroll gesture or direction change after applying its page shift. */
+  private applyScrollIntent(surfaceBeforeScroll: Surface | null) {
+    if (this.isDragging) return;
+
+    if (this.scrollStopPending) {
+      this.scrollStopPending = false;
+      this.scrollGestureDirection = 0;
+      if (this.scrollHold === "resting") {
+        this.scrollHold = "none";
+        if (this.currentBehavior?.name === "SitDown" && this.surfaceAt() === "floor") {
+          this.setBehavior("StandUp", "scroll-stop");
+        }
+      }
+    }
+
+    const direction = this.scrollDirection;
+    if (!this.isScrolling || direction === 0 || direction === this.scrollGestureDirection) return;
+    this.scrollGestureDirection = direction;
+    const surface = surfaceBeforeScroll ?? this.lastSurface ?? this.surfaceAt();
+    if (direction < 0 && surface === "floor") {
+      this.scrollHold = "resting";
+      if (this.currentBehavior?.name !== "SitDown") this.setBehavior("SitDown", "scroll-up-sitdown");
+      return;
+    }
+    this.scrollHold = "none";
+    if (surface) this.detachAndFall(surface, direction > 0 ? "scroll-down-fall" : "scroll-up-surface-drop");
   }
 
   /** Can this behaviour actually move the mascot? Used to guarantee that the
@@ -2098,17 +2302,11 @@ export class MascotEngine {
       const onFloor = environment.floor.isOn(point);
       const onCeiling = environment.ceiling.isOn(point);
       const onWall = environment.wall.isOn(point);
-      const onTop = onCeiling || this.borderIsOn("top", point, this.area());
-
-      // 页面滚动时或自由下落时碰触顶部，绝不能算作着陆，始终保持掉落状态
-      if (onTop && (this.isScrolling || this.currentBehavior?.name === "Fall")) {
-        if (this.vy < 0) this.vy = 0;
-      }
-
-      const landingOnCeiling = !this.isScrolling && this.currentBehavior?.name !== "Fall" && onCeiling;
+      const landingOnCeiling = onCeiling && this.currentBehavior?.name !== "Fall";
       const onEdge = onFloor || onWall || landingOnCeiling;
       if (onEdge) {
         this.vx = this.vy = 0;
+        if (onFloor) this.y = this.area().bottom;
         this.emit({
           kind: "milestone",
           name: "land",
@@ -2211,23 +2409,22 @@ export class MascotEngine {
     if (targetX !== null || targetY !== null || translates || leaf.type === "Move") this.guardStall(frame);
   }
 
-  /** Clamps the anchor into the work area; reports when it actually had to move
-   *  the mascot, once per action so sliding along a border is not spammed. */
+  /** Clamp the viewport-space anchor into its work area. */
   private clampToWorkArea() {
     const area = this.area();
-    const clampedX = Math.max(area.left, Math.min(area.right, this.x));
-    const clampedY = Math.max(area.top, Math.min(area.bottom, this.y));
-    const moved = Math.abs(clampedX - this.x) + Math.abs(clampedY - this.y);
     const wasX = this.x;
     const wasY = this.y;
-    this.x = clampedX;
-    this.y = clampedY;
+    this.x = Math.max(area.left, Math.min(area.right, this.x));
+
+    this.y = Math.max(area.top, Math.min(area.bottom, this.y));
+
+    const moved = Math.abs(this.x - wasX) + Math.abs(this.y - wasY);
     if (moved > 0.5 && !this.clampReported) {
       this.clampReported = true;
       this.emit({
         kind: "milestone",
         name: "clamp",
-        detail: `(${this.toPage(wasX).toFixed(1)},${this.toPage(wasY).toFixed(1)}) -> (${this.toPage(clampedX).toFixed(1)},${this.toPage(clampedY).toFixed(1)})`,
+        detail: `(${this.toPage(wasX).toFixed(1)},${this.toPage(wasY).toFixed(1)}) -> (${this.toPage(this.x).toFixed(1)},${this.toPage(this.y).toFixed(1)})`,
         x: this.x,
         y: this.y,
         leaf: this.leafLabel(),
@@ -2237,6 +2434,10 @@ export class MascotEngine {
 
   private onBehaviorEnd(reason = "behavior-end") {
     if (!this.config) return;
+    if (this.scrollHold === "resting" && this.isScrolling && this.scrollDirection < 0 && this.surfaceAt() === "floor") {
+      this.setBehavior("SitDown", "scroll-up-hold");
+      return;
+    }
     const animation = MascotEngine.animationConfig;
     const mascot = this.mascotName;
     const candidates: BehaviorReference[] = [];
@@ -2295,10 +2496,6 @@ export class MascotEngine {
     // pool of ~250), became a ~1% draw. Behaviours with no border requirement, and
     // those that move the mascot first (`Offset`), stay available.
     const standingOn = this.currentBorderAt(undefined);
-    if (this.isScrolling && (standingOn === "Ceiling" || this.y <= this.area().top + 1)) {
-      this.setBehavior("Fall", "scroll-no-ceiling");
-      return;
-    }
     if (standingOn) {
       const runnable = pool.filter((candidate) => {
         const start = this.firstBorderOf(candidate.name);
@@ -2326,22 +2523,42 @@ export class MascotEngine {
     const progress = interpolate ? Math.max(0, Math.min(1, this.accumulator / TICK_MS)) : 1;
     const x = this.prevX + (this.x - this.prevX) * progress;
     const y = this.prevY + (this.y - this.prevY) * progress;
-    // Boundary one: virtual units → screen pixels.
+    // Boundary one: virtual viewport units → screen pixels.
     const scale = this.spriteScale;
     this.elRoot.style.transform = `translate3d(${x * scale}px, ${y * scale}px, 0)`;
     // A pose may legitimately carry no Image at all: the packs use that for the
-    // interaction hold frames (`HurledAction` is `<Pose Velocity="0,0" Duration="128"/>`).
-    // Setting an empty `src` made the browser show a broken-image glyph for the whole
-    // hug, so an image-less pose simply keeps whatever frame is on screen.
-    if (pose.image) {
-      const src = this.spriteUrl(pose.image);
-      if (this.elImg.getAttribute("src") !== src) this.elImg.src = src;
+    // interaction hold frames (`HuggedAction` is `<Pose Velocity="0,0" Duration="93"/>`,
+    // `HurledAction` the same with 128). A normal image-less delay keeps its frame;
+    // an image-less Interact hold intentionally stays hidden after clearing its
+    // standalone frame above.
+    if (!pose.image) {
+      if (this.interactionVisualActive) {
+        this.elImg.style.visibility = "hidden";
+        this.elImg.removeAttribute("src");
+      }
+      return;
     }
+    const src = this.spriteUrl(pose.image);
+    if (this.elImg.getAttribute("src") !== src) {
+      // Keep the previous decoded frame visible until the replacement is ready.
+      // Hiding/clearing here makes normal 4-10 frame animations flash on every pose.
+      this.elImg.src = src;
+    }
+    if (this.elImg.complete && this.elImg.naturalWidth > 0) this.elImg.style.visibility = "visible";
+    // A cached bitmap already reports its size, so the box is correct on the
+    // very first painted frame; the `load` listener covers a cold cache.
+    if (this.elImg.naturalWidth > 0) this.applySpriteIntrinsicSize();
     // Draw the sprite `scale`x larger with its pose ImageAnchor on the root origin,
     // mirrored in place when facing right. Written against `transform-origin: 0 0`
     // so mirroring and sizing combine in one matrix: a bitmap point p lands at
     // (tx + sx*p.x, ty + sy*p.y), and the anchor (ax, ay) must land on (0, 0) —
     // hence tx = -flip*ax*scale with sx = flip*scale.
+    //
+    // An image-less pose parses as `imageAnchor: {x: 0, y: 0}`, so applying it here
+    // would translate the *kept* frame by the whole ImageAnchor (64,128) — the sprite
+    // visibly jumps down-right and reads as a second mascot at the floor for as long
+    // as the hold lasts. libshijima leaves the transform alone in this case, and so
+    // does this now (the non-image fields of the pose still apply above).
     const ax = pose.imageAnchor.x;
     const ay = pose.imageAnchor.y;
     const flip = this.lookRight ? -1 : 1;
