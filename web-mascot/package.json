@@ -1,9 +1,18 @@
 {
   "name": "web-mascot",
-  "private": true,
   "version": "0.0.0",
+  "private": false,
   "type": "module",
   "description": "Embeddable browser mascot engine (NeurolingsCE-Qt web port)",
+  "keywords": [
+    "mascot",
+    "shimeji",
+    "desktop-pet",
+    "browser",
+    "vue"
+  ],
+  "license": "MIT",
+  "sideEffects": false,
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/types/index.d.ts",
@@ -16,6 +25,8 @@
       "types": "./dist/types/devtools.d.ts",
       "import": "./dist/devtools.js"
     },
+    "./mascot_pack": "./dist/mascot_pack",
+    "./mascot_pack/*": "./dist/mascot_pack/*",
     "./package.json": "./package.json"
   },
   "files": [
@@ -29,13 +40,11 @@
     "types": "tsc -p tsconfig.lib.json",
     "preview": "vite preview"
   },
-  "dependencies": {
-    "vue": "^3.4.0"
-  },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.0.0",
     "typescript": "^5.2.2",
     "vite": "^5.0.0",
+    "vue": "^3.4.0",
     "vue-tsc": "^2.0.0"
   }
 }
