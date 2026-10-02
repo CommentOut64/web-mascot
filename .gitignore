@@ -19,6 +19,10 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# ---------- 调试工具产物 ----------
+# 浏览器自动化工具的页面快照与控制台导出
+.playwright-cli/
+
 # ---------- 环境变量 ----------
 .env
 .env.*
