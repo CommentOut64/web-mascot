@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>web-mascot interaction lab</title>
+    <style>
+      html, body { margin: 0; background: #0f1117; color: #e6e6e6; font: 12px/1.5 Consolas, monospace; }
+      #stage { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 9999; }
+      #out { margin: 0; padding: 12px; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <div id="stage"></div>
+    <pre id="out">booting…</pre>
+    <script type="module" src="/src/lab.ts"></script>
+  </body>
+</html>
