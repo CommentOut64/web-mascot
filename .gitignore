@@ -13,6 +13,9 @@ coverage/
 # ---------- 运行时日志 ----------
 # 宠物运行产生的分目录日志、录制文件
 logs/
+# 录制器默认落盘位置（vite.config.ts 的 mascotLog.logRoot），
+# 与仓库根的 logs/ 是两个不同目录，需要各自忽略
+web-mascot/logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
