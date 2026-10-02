@@ -9,9 +9,11 @@ const projectRoot = dirname(fileURLToPath(import.meta.url));
 export default defineConfig({
   plugins: [
     vue(),
-    // Observation log: <repo>/logs/<session>/pet-<n>-<mascot>.log
-    // Deliberately outside the Vite root so writing it never triggers HMR.
-    mascotLog({ logRoot: resolve(projectRoot, "..", "logs") }),
+    // Observation log: web-mascot/logs/<session>/pet-<n>-<mascot>.log
+    // It lives inside the package so a log always sits with the code that produced
+    // it, and `server.watch.ignored` keeps it out of the watcher — writing a log
+    // must never trigger HMR. `logs/` is gitignored, so recordings never ship.
+    mascotLog({ logRoot: resolve(projectRoot, "logs"), text: true }),
   ],
   build: {
     // Library build. The demo app (index.html + src/main.ts) is not part of it:

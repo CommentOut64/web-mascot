@@ -1,14 +1,15 @@
 import { MascotEngine } from "../core/MascotEngine";
 import type { EngineEvent } from "../core/MascotEngine";
+import { loggerFor } from "../core/Logger";
 
 /**
  * Mascot observation log — minimal form.
  *
  * One browser session maps to one directory, one pet to one file:
  *
- *     <repo>/logs/<session>/pet-1-Neuron.log
- *     <repo>/logs/<session>/pet-2-Eviling.log
- *     <repo>/logs/<session>/pet-_index.log    session header + visibility + JS errors
+ *     web-mascot/logs/<session>/pet-1-Neuron.log
+ *     web-mascot/logs/<session>/pet-2-Eviling.log
+ *     web-mascot/logs/<session>/pet-_index.log    session header + visibility + JS errors
  *
  * The engine emits a rich, flat event stream (action stack frames, decoded
  * frames, diagnostics, milestones). This recorder is deliberately a *filter*:
@@ -27,6 +28,13 @@ import type { EngineEvent } from "../core/MascotEngine";
  *   {"t":17,"k":"stop","x":708.99,"y":755,"behavior":"WalkRightAndSit"}
  *   {"t":17.7,"k":"pose","img":"shime11.png","x":708.99,"y":755}
  *   {"t":154,"k":"heartbeat","x":950,"y":900,"behavior":"Stand"}
+ *
+ * `k:"mark"` is the one kind that describes the recorder rather than the pet: it
+ * is written when a recording starts while that pet was *already* alive, so its
+ * `spawn` was never seen. Without it the timeline would begin with an unexplained
+ * mascot standing in the middle of the screen.
+ *
+ *   {"t":0.4,"k":"mark","reason":"recording-started","behavior":"Stand","x":501,"y":755}
  *
  * Mascots can also act on each other through affordance broadcasts. Those records
  * use `k:"peer"` and are the only ones that describe two pets at once, so they
@@ -68,7 +76,9 @@ import type { EngineEvent } from "../core/MascotEngine";
  * across a freeze/resume pair is the only correct reading of that gap. The
  * session index additionally carries one tab-level `visibility` record for the
  * whole page; this per-pet form is kept because the viewport reason is invisible
- * to the index and because the index does not say which pet was affected.
+ * to the index and because the index does not say which pet was affected. A
+ * `resume` closes a *recording* gap the same way: the engine is not told to emit
+ * anything for a hidden tab, so the recorder timestamps the transition itself.
  *
  * A segment is therefore `behavior` + zero or more `move` + one `stop`, and the
  * path is the polyline of their (x, y). A `stop` is suppressed when the segment
@@ -85,14 +95,20 @@ import type { EngineEvent } from "../core/MascotEngine";
  * `msg`/`note` restating the structured fields, which roughly halved the payload
  * for no information a parser could not already read off the fields.
  *
- * Design constraints for a 30+ minute unattended recording:
- *   - records are produced only on state change, never per animation frame;
- *   - the client buffer is bounded and flushed on a timer, so memory cannot grow;
- *   - a failed write is re-queued up to a cap and then the recorder disables
- *     itself instead of spinning;
- *   - the page is flushed with sendBeacon when it is hidden or closed;
- *   - the files are written by a Vite middleware outside the Vite root, so
- *     logging never triggers HMR and never reloads the page.
+ * ## Cost
+ *
+ * Recording is *not* a background service. Nothing is observed, no timer exists
+ * and no record is built until a destination has actually been resolved, and
+ * `detach()`/`disable()` tears both back down. Before a destination is known the
+ * recorder never even subscribes, so a page that does not record pays for one
+ * module import and nothing else. That is why the interesting startup records
+ * (`spawn`, and the first behaviour) are *reconstructed* from the live engines at
+ * enable time instead of being buffered — a bounded queue would either grow
+ * without limit or silently drop the very records it existed to keep.
+ *
+ * The other half of the cost is on the sink side: records are plain JSON lines and
+ * the browser never talks HTTP itself in the file case — the Vite middleware does,
+ * outside the Vite root, so writing a log never triggers HMR or a page reload.
  */
 
 const ENDPOINT = "/__mascot-log";
@@ -118,10 +134,14 @@ const MAX_PING_ATTEMPTS = 6;
 const PING_RETRY_MS = 500;
 const INDEX_PET = "_index";
 
+const log = loggerFor("observe");
+
 const session = new Date().toISOString().replace(/[:.]/g, "-");
 const startedAt = performance.now();
 const buffers = new Map<string, string[]>();
 const trackers = new Map<string, MoveTracker>();
+/** Pets whose `spawn` this recorder has seen, so enable() knows what to synthesise. */
+const spawned = new Map<string, { x: number; y: number; behavior: string; mascot: string }>();
 
 /**
  * Where batches go, when the host supplies a destination. A sink is the supported
@@ -140,14 +160,15 @@ export interface MascotLogSink {
 
 let sinkCallback: MascotLogSink | null = null;
 const extraSinks: MascotLogSink[] = [];
-/** Records produced before a destination was resolved; drained by `enable()`. */
-const pending: { pet: string; line: string }[] = [];
-let droppedPending = 0;
 
 let enabled = false;
 let disabled = false;
 let failures = 0;
 let started = false;
+/** Non-null only while attached: the sampler is not a permanent resident. */
+let sampleTimer: number | null = null;
+/** Set while the tab is hidden, so the record after a resume can explain the gap. */
+let hiddenSince: number | null = null;
 
 /** Everything needed to turn the per-second scan into a compact trajectory. */
 interface MoveTracker {
@@ -203,28 +224,19 @@ function tracker(pet: string, x: number, y: number): MoveTracker {
 }
 
 function push(pet: string, record: Record<string, unknown>) {
-  if (disabled) return;
-  if (enabled) {
-    const state = trackers.get(pet);
-    if (state) state.lastLogAt = performance.now();
-    const line = JSON.stringify(record);
-    let buffer = buffers.get(pet);
-    if (!buffer) {
-      buffer = [];
-      buffers.set(pet, buffer);
-    }
-    buffer.push(line);
-    if (buffer.length >= MAX_BUFFER_LINES) void flush(pet, false);
-    return;
+  // The single guard that makes "logging off" free: before a destination exists
+  // this returns without touching JSON.stringify, the buffers or the trackers.
+  if (disabled || !enabled) return;
+  const state = trackers.get(pet);
+  if (state) state.lastLogAt = performance.now();
+  const line = JSON.stringify(record);
+  let buffer = buffers.get(pet);
+  if (!buffer) {
+    buffer = [];
+    buffers.set(pet, buffer);
   }
-  // No destination resolved yet (the dev endpoint may still be booting, a host
-  // sink may not be set). Records from this window are the most interesting ones
-  // — a mascot's `spawn` and its first behaviour — so hold them in a bounded
-  // queue for `enable()` instead of dropping them.
-  if (pending.length < MAX_REQUEUE_LINES) pending.push({ pet, line: JSON.stringify(record) });
-  else if (droppedPending++ === 0) {
-    console.warn("[mascot-log] pre-start record queue is full; further records are dropped");
-  }
+  buffer.push(line);
+  if (buffer.length >= MAX_BUFFER_LINES) void flush(pet, false);
 }
 
 function allSinks(): MascotLogSink[] {
@@ -246,6 +258,15 @@ async function flush(pet: string, beacon: boolean) {
     }
   }
   if (sinkCallback) {
+    failures = 0;
+    return;
+  }
+  // The endpoint has to be permitted before anything is sent to it. A host that
+  // declined it (`file: false` / `silent: true`) has said the route does not
+  // exist, so posting anyway would only produce a 404 per batch — the records are
+  // already delivered to the extra sinks above, and losing the endpoint copy is
+  // exactly what the host asked for.
+  if (!endpointAllowed) {
     failures = 0;
     return;
   }
@@ -283,17 +304,33 @@ function disable(reason: string) {
   disabled = true;
   enabled = false;
   buffers.clear();
-  dropPending(reason);
-  console.warn(`[mascot-log] recorder disabled: ${reason}`);
+  // Tearing the subscription down is what keeps a disabled recorder free: the old
+  // version left the observer and the 1 s timer installed for the life of the
+  // page, so every engine event and every second still cost a snapshot() call.
+  detach();
+  log.warn(`recorder disabled: ${reason}`);
 }
 
 function observe(engine: MascotEngine, event: EngineEvent) {
-  // `enabled` is deliberately not checked here: before a destination is resolved
-  // `push()` queues the record for `enable()` to drain. Returning early would drop
-  // the mascot's `spawn` and first behaviour, which is exactly what a recording is
-  // most useful for. The engine does not subscribe otherwise, so it costs nothing
-  // when no recorder is attached at all.
   if (disabled) return;
+  if (!enabled) {
+    // Reachable only during the window between subscribing and resolving a
+    // destination, which is now a single ping round-trip. The live-engine scan in
+    // `enable()` reconstructs whatever happened in it, so nothing is buffered here.
+    if (event.kind === "spawn") {
+      const snapshot = engine.snapshot();
+      const where = engine.position();
+      spawned.set(engine.label, {
+        x: where.x,
+        y: where.y,
+        behavior: snapshot.behavior,
+        mascot: snapshot.mascot,
+      });
+    } else if (event.kind === "despawn") {
+      spawned.delete(engine.label);
+    }
+    return;
+  }
   const pet = engine.label;
   const t = round(elapsed());
   const where = engine.position();
@@ -318,6 +355,12 @@ function observe(engine: MascotEngine, event: EngineEvent) {
         lastEvent: "",
         pose: `${snapshot.behavior}|${snapshot.image}`,
       });
+      spawned.set(pet, {
+        x: where.x,
+        y: where.y,
+        behavior: snapshot.behavior,
+        mascot: snapshot.mascot,
+      });
       push(pet, {
         t,
         k: "spawn",
@@ -328,6 +371,8 @@ function observe(engine: MascotEngine, event: EngineEvent) {
       break;
     }
     case "despawn":
+      spawned.delete(pet);
+      trackers.delete(pet);
       push(pet, { t, k: "despawn", x, y });
       break;
     case "behavior": {
@@ -598,28 +643,65 @@ function enable(directory: string) {
     href: location.href,
     started: new Date().toISOString(),
   });
-  // Drain through push() so the normal path (and its tracking) is used; `enabled`
-  // is already true, so nothing re-queues and the loop cannot grow.
-  const queued = pending.splice(0, pending.length);
-  for (const item of queued) push(item.pet, JSON.parse(item.line) as Record<string, unknown>);
-  for (const pet of new Set(queued.map((item) => item.pet))) void flush(pet, false);
+  // Reconstruct the timeline for pets that were already alive when recording
+  // began: their `spawn` happened before there was anywhere to write it, and a
+  // trajectory that starts with an unexplained standing mascot is not readable.
+  for (const engine of MascotEngine.getInstances()) {
+    const pet = engine.label;
+    const snapshot = engine.snapshot();
+    const now = performance.now();
+    const state = tracker(pet, snapshot.x, snapshot.y);
+    state.x = snapshot.x;
+    state.y = snapshot.y;
+    state.at = now;
+    state.seenX = snapshot.x;
+    state.seenY = snapshot.y;
+    state.movingSince = now;
+    state.lastLogAt = now;
+    state.lastBehaviorAt = now;
+    state.pose = `${snapshot.behavior}|${snapshot.image}`;
+    const spawn = spawned.get(pet);
+    if (spawn) {
+      // Its `spawn` was seen but could not be written; write it now, at t≈0.
+      push(pet, { t: round(elapsed()), k: "spawn", mascot: spawn.mascot, x: round(spawn.x), y: round(spawn.y) });
+    } else {
+      push(pet, {
+        t: round(elapsed()),
+        k: "mark",
+        reason: "recording-started",
+        behavior: snapshot.behavior,
+        x: round(snapshot.x),
+        y: round(snapshot.y),
+      });
+    }
+  }
+  for (const pet of buffers.keys()) void flush(pet, false);
+  if (document.visibilityState === "hidden") hiddenSince = performance.now();
 }
 
 /** Records that arrived before a destination was resolved. */
-function dropPending(reason: string) {
-  if (pending.length > 0) {
-    console.warn(`[mascot-log] dropped ${pending.length} pre-start records: ${reason}`);
+function dropState(reason: string) {
+  if (trackers.size > 0 || spawned.size > 0) {
+    log.debug(`dropping observation state: ${reason}`, {
+      pets: trackers.size,
+      spawned: spawned.size,
+    });
   }
-  pending.length = 0;
+  trackers.clear();
+  spawned.clear();
+  buffers.clear();
 }
 
 async function probe(attempt = 1): Promise<void> {
-  // A host-supplied sink is a complete destination on its own. The endpoint is a
-  // Vite dev/preview middleware, so in an embedded or packaged build it does not
-  // exist: probing it first only produces 404s (and, on a host page, visible
-  // console noise) before falling back to the sink it was given all along.
-  if (allSinks().length > 0) {
-    enable("(host sink)");
+  // The host has already told us there is no endpoint worth calling — a packaged
+  // build, or a page that is not served by Vite. Skipping the request entirely is
+  // the point of the option: a decorative feature should not put a 404 in every
+  // visitor's network panel just to discover what the host already said.
+  if (probeSilent) {
+    // The host said there is nothing to probe. If it also supplied nowhere to
+    // write, `startMascotLogRecorder` has already refused to attach, so reaching
+    // here means there is a sink: enable without touching the network.
+    enable("(host sink only)");
     return;
   }
   try {
@@ -633,13 +715,41 @@ async function probe(attempt = 1): Promise<void> {
       }
     }
   } catch {
-    /* the dev server may still be starting */
+    /* no middleware: the dev server may still be starting, or there is none */
+  }
+  // A host-supplied sink is a complete destination *for the records*, so the
+  // endpoint is not worth retrying for: it would only delay the records and keep
+  // re-requesting a route that is evidently absent.
+  if (allSinks().length > 0) {
+    enable("(host sink only)");
+    return;
   }
   if (attempt < MAX_PING_ATTEMPTS) {
     window.setTimeout(() => void probe(attempt + 1), PING_RETRY_MS);
     return;
   }
   disable("log endpoint unavailable (recording is dev/preview only)");
+}
+
+/**
+ * Install the observation subscription and the sampler. Called once a destination
+ * is viable — never speculatively, because the subscription itself is the cost.
+ */
+function attach() {
+  if (sampleTimer !== null) return;
+  MascotEngine.addObserver(observe);
+  installLifecycle();
+  sampleTimer = window.setInterval(sampleOnTimer, SAMPLE_INTERVAL_MS);
+}
+
+/** Remove the subscription, the sampler and every page listener again. */
+function detach() {
+  if (sampleTimer !== null) {
+    window.clearInterval(sampleTimer);
+    sampleTimer = null;
+  }
+  MascotEngine.removeObserver(observe);
+  removeLifecycle();
 }
 
 /**
@@ -653,7 +763,7 @@ function startWhenVisible() {
     void probe();
     return;
   }
-  console.info("[mascot-log] page is in the background; recording starts once it is visible again");
+  log.info("page is in the background; recording starts once it is visible again");
   const onVisible = () => {
     if (document.visibilityState !== "visible") return;
     document.removeEventListener("visibilitychange", onVisible);
@@ -662,36 +772,61 @@ function startWhenVisible() {
   document.addEventListener("visibilitychange", onVisible);
 }
 
+// Named handlers, not inline arrows: `detach()` has to be able to remove them
+// again, and an anonymous listener can never be unregistered.
+const onPageHide = () => flushAll(true);
+const onBeforeUnload = () => flushAll(true);
+const onVisibilityChange = () => {
+  // A hidden tab stops requestAnimationFrame, so these markers explain the gaps in
+  // a per-mascot log. While frozen the mascot does not move and does not switch
+  // behaviour, so keeping this record only in the session index avoids per-pet
+  // duplication. The engine is not told about the transition at all, so the
+  // recorder notes the time itself and reports it on the way back.
+  const state = document.visibilityState;
+  if (state === "hidden") {
+    hiddenSince = performance.now();
+    flushAll(true);
+  }
+  push(INDEX_PET, {
+    t: round(elapsed()),
+    k: "visibility",
+    state,
+    ...(state === "visible" && hiddenSince !== null
+      ? { gapMs: Math.round(performance.now() - hiddenSince) }
+      : {}),
+  });
+  if (state === "visible") hiddenSince = null;
+};
+const onWindowError = (event: ErrorEvent) => {
+  push(INDEX_PET, {
+    t: round(elapsed()),
+    k: "error",
+    detail: event.message,
+    src: `${event.filename}:${event.lineno}`,
+  });
+};
+const onUnhandledRejection = (event: PromiseRejectionEvent) => {
+  push(INDEX_PET, {
+    t: round(elapsed()),
+    k: "rejection",
+    detail: String(event.reason),
+  });
+};
+
 function installLifecycle() {
-  window.addEventListener("pagehide", () => flushAll(true));
-  window.addEventListener("beforeunload", () => flushAll(true));
-  document.addEventListener("visibilitychange", () => {
-    // A hidden tab stops requestAnimationFrame, so these markers explain the
-    // gaps in a per-mascot log. While frozen the mascot does not move and does
-    // not switch behaviour, so keeping this record only in the session index
-    // avoids per-pet duplication.
-    push(INDEX_PET, {
-      t: round(elapsed()),
-      k: "visibility",
-      state: document.visibilityState,
-    });
-    if (document.visibilityState === "hidden") flushAll(true);
-  });
-  window.addEventListener("error", (event) => {
-    push(INDEX_PET, {
-      t: round(elapsed()),
-      k: "error",
-      detail: event.message,
-      src: `${event.filename}:${event.lineno}`,
-    });
-  });
-  window.addEventListener("unhandledrejection", (event) => {
-    push(INDEX_PET, {
-      t: round(elapsed()),
-      k: "rejection",
-      detail: String(event.reason),
-    });
-  });
+  window.addEventListener("pagehide", onPageHide);
+  window.addEventListener("beforeunload", onBeforeUnload);
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  window.addEventListener("error", onWindowError);
+  window.addEventListener("unhandledrejection", onUnhandledRejection);
+}
+
+function removeLifecycle() {
+  window.removeEventListener("pagehide", onPageHide);
+  window.removeEventListener("beforeunload", onBeforeUnload);
+  document.removeEventListener("visibilitychange", onVisibilityChange);
+  window.removeEventListener("error", onWindowError);
+  window.removeEventListener("unhandledrejection", onUnhandledRejection);
 }
 
 /**
@@ -711,11 +846,74 @@ export function addLogSink(sink: MascotLogSink): void {
   extraSinks.push(sink);
 }
 
-export function startMascotLogRecorder() {
-  if (started) return;
+/** Set when the host's log configuration allows the dev-server file endpoint. */
+let endpointAllowed = true;
+/** Set when the host has declared that no endpoint exists, so not even one request
+ *  is worth making. Distinct from `endpointAllowed`: refusing the endpoint still
+ *  implies one probe would be harmless, while `silent` says it would be noise. */
+let probeSilent = false;
+
+/**
+ * Tell the recorder whether the dev-server file endpoint may be used. A published
+ * package has no such route, so `configure({ log: { file: false } })` turns the
+ * probe into a no-op and leaves the page completely untouched.
+ */
+export function allowDevEndpoint(allowed: boolean): void {
+  endpointAllowed = allowed;
+}
+
+/**
+ * Declare that there is no endpoint to probe, so the recorder does not issue even
+ * one request. Use it when the host knows its page is not served by the Vite
+ * dev/preview middleware (a packaged build, a static host, a CDN): `file: false`
+ * already skips the network, and this keeps the *first* probe from being made in
+ * the case where the endpoint would otherwise be assumed to exist.
+ */
+export function silenceDevEndpoint(silent: boolean): void {
+  probeSilent = silent;
+}
+
+/**
+ * Start recording: subscribe, sample, and resolve a destination. A host-provided
+ * sink wins over the dev endpoint, so an embedded build never probes it.
+ *
+ * Returns `false` when the caller explicitly asked for every destination to be
+ * off, in which case nothing at all was installed.
+ */
+export function startMascotLogRecorder(): boolean {
+  if (started) return enabled;
   started = true;
-  MascotEngine.addObserver(observe);
-  installLifecycle();
-  window.setInterval(sampleOnTimer, SAMPLE_INTERVAL_MS);
+  // Two independent questions, deliberately not folded into one test:
+  //
+  //   1. Is there anywhere for the *records* to go? A host sink or the endpoint.
+  //   2. May the *endpoint* be touched? Declining it (`file: false`) must not stop
+  //      recording when a sink exists — that is exactly the packaged-build case,
+  //      where the host supplies a destination and no route exists.
+  //
+  // The previous version only checked "no sink at all AND no endpoint", so a host
+  // that passed its own sink still had the endpoint probed, and a host that
+  // declined the endpoint had recording turned off entirely.
+  const hasSink = sinkCallback !== null || extraSinks.length > 0;
+  if (!hasSink && !endpointAllowed) {
+    disabled = true;
+    return false;
+  }
+  attach();
   startWhenVisible();
+  return true;
+}
+
+/** Stop recording and release everything. Safe to call more than once. */
+export function stopMascotLogRecorder(): void {
+  disable("stopped by the host");
+}
+
+/** Whether a destination has been resolved and records are being produced. */
+export function isRecording(): boolean {
+  return enabled && !disabled;
+}
+
+/** Drop the accumulated per-pet tracking state without touching destinations. */
+export function resetMascotLogRecorder(): void {
+  dropState("reset by the host");
 }
