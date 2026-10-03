@@ -9,6 +9,10 @@ dist-ssr/
 .vite/
 coverage/
 *.tsbuildinfo
+dist-extension/
+release/
+web-mascot/dist-extension/
+web-mascot/release/
 web-mascot/*.tgz
 
 # ---------- 运行时日志 ----------
