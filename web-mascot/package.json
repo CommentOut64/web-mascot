@@ -1,6 +1,6 @@
 {
   "name": "web-mascot",
-  "version": "0.0.0",
+  "version": "0.0.2",
   "private": false,
   "type": "module",
   "description": "Embeddable browser mascot engine (NeurolingsCE-Qt web port)",
