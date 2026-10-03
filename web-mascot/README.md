@@ -6,7 +6,7 @@
 ![code license](https://img.shields.io/badge/code-GPL--3.0--or--later-blue)
 ![assets license](https://img.shields.io/badge/assets-CC--BY--NC--SA--4.0-orange)
 
-零配置、零运行时依赖、框架无关（库本身不依赖 Vue / React）。内置 **Neuron** 与 **Eviling** 两只宠物包，开箱即用。
+零运行时依赖、框架无关（库本身不依赖 Vue / React）。内置 **Neuron** 与 **Eviling** 两只宠物包：把精灵拷进站点静态目录、一行 `configure()` 即可使用。
 
 ---
 
@@ -31,18 +31,38 @@
 npm install web-mascot
 ```
 
-## 30 秒上手（零配置）
+## 30 秒上手
 
-```js
-import { createMascot } from "web-mascot";
+先把包里的精灵目录拷到站点的公共静态目录，再显式指定资源基址（**必须在 `createMascot()` 之前调用**）：
 
-const mascot = await createMascot({ container: document.body, pack: "Neuron" });
-window.addEventListener("pagehide", () => mascot.destroy());
+```bash
+cp -r node_modules/web-mascot/dist/mascot_pack public/mascot_pack
 ```
 
-**不需要**调用 `configure()`，也**不需要**告诉引擎资源在哪：资源基址由模块自身位置推导（`import.meta.url`），所以 CDN、子路径、被哈希的入口名都能正确取图。`container` 是"这只宠物属于文档的哪一处"的锚点，宠物本身在整个视口内活动。
+```js
+import { configure, createMascot } from "web-mascot";
 
-想换成 Eviling 就把 `pack` 改成 `"Eviling"`。
+// 指向静态目录下的 mascot_pack；部署在子路径时要带前缀，如 "/blog/mascot_pack"
+configure({ assets: "/mascot_pack" });
+
+const mascot = await createMascot({ container: document.body, pack: "Neuron" });
+// 之后可调用 mascot.destroy() 移除（可重复调用）
+```
+
+`container` 是"这只宠物属于文档的哪一处"的锚点，宠物本身在整个视口内活动。想换成 Eviling 就把 `pack` 改成 `"Eviling"`。如果要同时挂载两只（或多只）宠物，只需并发或连续调用（全局资源配置仅需一次）：
+
+```js
+// 并发加载多只宠物
+const [neuron, eviling] = await Promise.all([
+  createMascot({ container: document.body, pack: "Neuron" }),
+  createMascot({ container: document.body, pack: "Eviling" })
+]);
+// 它们底层共享 BroadcastManager，在发生如“打招呼”等行为时会自动产生双宠互动
+```
+
+> **注**：模块通过 `import.meta.url` 推导出的资源基址（`PACK_BASE_URL`）只在**未打包、且包目录被原样服务**的环境下有效（裸 ESM，或原样镜像 `dist/` 的 CDN）。经打包器预构建后，推导值会指向构建产物路径（如 `node_modules/.vite/deps/mascot_pack`、`/_astro/mascot_pack`），所有 pack 请求都会 404，因此必须如上文显式配置。
+>
+> 另外，`DEFAULT_PACK_BASE_URL`（`"/mascot_pack"`）只在推导**彻底失败**时才兜底；打包环境里推导是「成功但错误」，兜底不会生效——所以「把精灵放到 `/mascot_pack`」这件事本身还不够，必须显式 `configure()`。
 
 ---
 
@@ -64,11 +84,11 @@ window.addEventListener("pagehide", () => mascot.destroy());
 | 导出 | 签名 | 说明 |
 | --- | --- | --- |
 | `createMascot` | `(options) => Promise<Mascot>` | 创建并挂载一只，解析完 pack 且画出首帧后 resolve |
-| `configure` | `(options) => void` | **可选**覆盖：`assets`、`animationConfigUrl`、`runtime` |
+| `configure` | `(options) => void` | **打包环境必须**（须在 `createMascot()` 之前）：`assets`、`animationConfigUrl`、`runtime`；裸 ESM 下可省略 |
 | `Mascot` | `class` | `.engine` / `.label` / `.destroy()`（可重复调用） |
 | `assetBaseUrl` | `() => string` | 当前**生效**的资源基址 |
 | `runtimeOptions` | `() => RuntimeSnapshot` | 当前运行参数（含默认值） |
-| `PACK_BASE_URL` | `string` | 推导出的资源基址 |
+| `PACK_BASE_URL` | `string` | 推导出的资源基址（仅未打包环境有效；打包后需 `configure` 覆盖） |
 | `DEFAULT_PACK_BASE_URL` | `string` | 兜底常量 `"/mascot_pack"` |
 | `resolveAssetBase` | `(url?) => string \| undefined` | 从模块 URL 推导包根目录，纯函数 |
 | `isConfigured` | `() => boolean` | 是否显式调用过 `configure()`，仅诊断用 |
@@ -175,8 +195,16 @@ const pet = await createMascot({ container: document.body, pack: "MyPet" });
 
 `web-mascot` is an embeddable, framework-agnostic browser mascot engine — a TypeScript port of the NeurolingsCE-Qt / Shijima-Qt mascot simulation engine. It reads Shimeji-format mascot packs.
 
+Copy the sprites into your static root first, then point the engine at them —
+`configure()` is required under any bundler (see the note in the Chinese section):
+
+```bash
+cp -r node_modules/web-mascot/dist/mascot_pack public/mascot_pack
+```
+
 ```js
-import { createMascot } from "web-mascot";
+import { configure, createMascot } from "web-mascot";
+configure({ assets: "/mascot_pack" }); // before createMascot()
 const mascot = await createMascot({ container: document.body, pack: "Neuron" });
 ```
 

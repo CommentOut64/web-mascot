@@ -9,13 +9,15 @@ npm install web-mascot
 ```
 
 ```js
-import { createMascot } from "web-mascot";
+import { configure, createMascot } from "web-mascot";
+
+// 在打包器环境下需将资源放入公共目录，并显式指向它
+configure({ assets: "/mascot_pack" });
 
 const mascot = await createMascot({ container: document.body, pack: "Neuron" });
-window.addEventListener("pagehide", () => mascot.destroy());
 ```
 
-零配置即可工作：**不**需要调用 `configure()`，也**不**需要告诉引擎资源在哪。`pack` 传内置的 `"Neuron"` 或 `"Eviling"`。
+在打包器环境下（Vite、Webpack 等）使用时，由于预构建和代码分割会导致资源路径推导失效，必须调用 `configure()` 显式指定资源基址。`pack` 传内置的 `"Neuron"` 或 `"Eviling"`。
 
 需要覆盖默认值时：
 
@@ -44,7 +46,7 @@ attach({ console: true });               // 观测日志：宠物移动史
 | 导出 | 签名 | 一句话 | 详见 |
 | --- | --- | --- | --- |
 | `createMascot` | `(options: MascotOptions) => Promise<Mascot>` | 创建并挂载一只宠物，解析完 pack 且画出首帧后 resolve | 3.2 |
-| `configure` | `(options: MascotConfig) => void` | **可选**覆盖：资源根 / 动画配置 / 物理参数 | 3.1 |
+| `configure` | `(options: MascotConfig) => void` | **打包环境必须**（在 `createMascot()` 之前）：资源根 / 动画配置 / 物理参数 | 3.1 |
 | `Mascot` | `class` | 一只已挂载的宠物 | 3.3 |
 | `Mascot.engine` | `MascotEngine` | 引擎实例，取仿真状态（`snapshot()` / `position()`）用 | 3.3 |
 | `Mascot.label` | `string` | 稳定标识，形如 `1-Neuron` | 3.3 |
@@ -52,7 +54,7 @@ attach({ console: true });               // 观测日志：宠物移动史
 | `assetBaseUrl` | `() => string` | 当前**生效**的资源基址（推导值或被覆盖值） | 3.4 |
 | `runtimeOptions` | `() => RuntimeSnapshot` | 当前生效的运行参数（含默认值） | 3.4 / 3.5 |
 | `isConfigured` | `() => boolean` | 是否显式调用过 `configure()`，仅诊断 | 3.4 |
-| `PACK_BASE_URL` | `string` | 推导出的资源基址 | 3.4 |
+| `PACK_BASE_URL` | `string` | 推导出的资源基址（仅未打包环境有效） | 3.4 |
 | `DEFAULT_PACK_BASE_URL` | `string` | 兜底常量 `"/mascot_pack"` | 3.4 |
 | `resolveAssetBase` | `(url?: string) => string \| undefined` | 从模块 URL 推导包根目录，纯函数 | 3.4 |
 | `MascotEngine` | `class` | 高级用法，**不承诺稳定** | 3.4 |
@@ -129,33 +131,45 @@ import { attach } from "web-mascot/devtools";
 
 `vue` 是**开发依赖**，不是运行时依赖：库的两个入口都不导入 Vue（只有本仓库的 demo 应用 `src/main.ts` 用），包本身可在任何框架下使用。本包**没有运行时依赖**。
 
-## 2. 最小用法（零配置）
+## 2. 最小用法
 
-```js
-import { createMascot } from "web-mascot";
-
-const mascot = await createMascot({ container: document.body, pack: "Neuron" });
-// 之后
-mascot.destroy();
+```bash
+cp -r node_modules/web-mascot/dist/mascot_pack public/mascot_pack
 ```
 
-**不需要**调用 `configure()`，也**不需要**告诉引擎资源在哪：`PACK_BASE_URL` 由模块自身位置推导（`import.meta.url` → `<packageRoot>/mascot_pack`），因此 CDN、子路径、被哈希的入口名都能正确取图。
+```js
+import { configure, createMascot } from "web-mascot";
 
-推导规则：入口 `dist/index.js` 的同级目录下找 `mascot_pack`。代码分割后的 chunk（`dist/chunks/*.js`）不参与推导，所以入口改名、加哈希都不影响结果。
+// 在打包器环境需将资源放入公共目录，并显式指向它
+configure({ assets: "/mascot_pack" });
+
+const mascot = await createMascot({ container: document.body, pack: "Neuron" });
+// 之后可调用 mascot.destroy(); 销毁
+```
+
+**必须显式调用** `configure({ assets })`：在打包环境（Vite / Webpack 等）下，由于预构建和产物移动，由模块 `import.meta.url` 推导出的 `PACK_BASE_URL` 会指向无效路径（如 `node_modules/.vite/deps/...` 或 `_astro/...`）。此时要求手动同步精灵文件到网站公共根目录（如 `public/mascot_pack`），并通过上述配置项进行纠正。
+
+调用顺序：`assets` 在**创建每只宠物时被快照**（见 3.1），所以要在这之前 `configure()`，否则该宠物会用到推导值。
+
+子路径部署：`assets` 是根绝对路径，部署在 `/blog/` 之类前缀下时要写成 `"/blog/mascot_pack"`。
+
+> **注 1**：仅在未打包、且包目录被原样服务的环境（裸 ESM，或原样镜像 `dist/` 的 CDN）下，基于 `import.meta.url` 的自动推导才会如预期工作。
+>
+> **注 2**：`DEFAULT_PACK_BASE_URL`（`"/mascot_pack"`）只在推导**彻底失败**时兜底。打包环境里推导是「成功但错误」，兜底不会生效——把精灵放到 `/mascot_pack` 并不能替代 `configure()`。
 
 ## 3. 主入口 `web-mascot`
 
-### 3.1 `configure(options)` —— 可选的覆盖
+### 3.1 `configure(options)` —— 资源与运行参数覆盖
 
 ```ts
 function configure(options: MascotConfig): void
 ```
 
-只在需要**覆盖**推导默认值时才调用。
+**打包器宿主必须调用**（且在 `createMascot()` 之前）；只有在未打包、包目录被原样服务的环境里才可以省略。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `assets` | `string?` | 含每个 pack 目录的基址，**不带结尾斜杠**。省略则用推导值 `PACK_BASE_URL`。**当前是全局设置**：页面内所有宠物共用一个资源根 |
+| `assets` | `string?` | 含每个 pack 目录的基址，**不带结尾斜杠**。**打包环境必须给出**；只在未打包环境下可省略（那时才用推导值 `PACK_BASE_URL`）。**当前是全局设置**：页面内所有宠物共用一个资源根 |
 | `animationConfigUrl` | `string?` | 动画配置文件 URL。省略则完全不发起请求，各 pack 使用自身设置 |
 | `runtime` | `RuntimeOptions?` | 仿真调参，见 3.5 |
 
@@ -402,20 +416,24 @@ attach({
 
 ## 5. 资源要求（宿主必须处理）
 
-- **静态服务**：精灵文件在 `dist/mascot_pack/<Pack>/img/` 下。文件名必须与 XML 里 `<Pose Image="...">` 的值**完全一致**（本包内置的两只全是 `.png`，如 `Image="/shime1.png"`）；Shimeji 生态里也有不带扩展名的写法，所以静态服务器必须给出正确的 `Content-Type`（`image/png`），不能靠扩展名推断。本仓库的 `vite.test-host.config.ts` 展示了手工服务写法。
+- **静态服务**：精灵文件在包的 `dist/mascot_pack/<Pack>/img/` 下；宿主要把整个 `dist/mascot_pack/` 拷到自己的静态根（如 `public/mascot_pack`），再把该根传给 `configure({ assets })`。文件名必须与 XML 里 `<Pose Image="...">` 的值**完全一致**（本包内置的两只全是 `.png`，如 `Image="/shime1.png"`）；Shimeji 生态里也有不带扩展名的写法，所以静态服务器必须给出正确的 `Content-Type`（`image/png`），不能靠扩展名推断。本仓库的 `vite.test-host.config.ts` 展示了手工服务写法。
 - **pack 结构**：每个 pack 一个目录，`img/` 放精灵，XML 行为定义**直接位于 pack 根目录**（`actions.xml`、`behaviors.xml`），不在 `conf/` 之类子目录下；另有 `info.json`、`bubble_context.txt`。
 - **跨域**：资源与页面不同源时需允许 CORS（精灵以 `<img>` 加载，通常无需凭据）。
 
 ## 6. 完整示例
 
-最小（零配置）：
+最小（打包器环境，精灵已拷到静态根）：
 
 ```js
-import { createMascot } from "web-mascot";
+import { configure, createMascot } from "web-mascot";
+
+configure({ assets: "/mascot_pack" });   // 必须在 createMascot() 之前
 
 const mascot = await createMascot({ container: document.body, pack: "Neuron" });
-window.addEventListener("pagehide", () => mascot.destroy());
+window.addEventListener("pagehide", () => mascot.destroy());   // 可选：卸载时清理
 ```
+
+未打包的裸 ESM 环境（包目录被原样服务）可省略 `configure()`，见 §2 注 1。
 
 带覆盖与日志：
 

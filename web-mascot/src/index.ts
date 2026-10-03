@@ -6,19 +6,23 @@ import { defaultPackBaseUrl } from "./core/Assets.js";
  * Public entry point of the web-mascot library.
  *
  * A host page imports this module and mounts one or more mascots into its own
- * DOM. Nothing here assumes the page is served from its root, and nothing has to
- * be configured to get started: the pack assets are addressed relative to this
- * module, so `dist/mascot_pack/` works from a CDN, a sub-path, or a bundler that
- * hashed the entry name.
+ * DOM. The pack assets are addressed relative to this module by default, but that
+ * derivation is only valid while this module file is served from its published
+ * location. A bundler relocates it (`node_modules/.vite/deps/…`, `_astro/…`), and
+ * then the derived URL points at a directory that does not exist, so every pack
+ * request 404s. Bundled hosts must therefore copy `dist/mascot_pack/` into their
+ * static root and say where it went:
  *
- *     import { createMascot } from "web-mascot";
+ *     import { configure, createMascot } from "web-mascot";
  *
+ *     configure({ assets: "/mascot_pack" });   // before createMascot()
  *     const neuron = await createMascot({ container: document.body, pack: "Neuron" });
  *     // later
  *     neuron.destroy();
  *
- * `configure()` is therefore optional — it exists to *override* the derived
- * defaults (packs on a CDN, an animation config file, runtime tuning, logging).
+ * So `configure()` is required for bundled hosts; it also overrides the animation
+ * config file, runtime tuning and logging (packs served from a CDN, a rewritten
+ * asset path, a data URL).
  *
  * The observation log is deliberately *not* part of this entry point. It is a
  * development tool that writes through a Vite middleware endpoint, so it lives in
@@ -28,11 +32,16 @@ import { defaultPackBaseUrl } from "./core/Assets.js";
 /** The asset base URL derived from this module's own location. */
 export const PACK_BASE_URL = defaultPackBaseUrl(import.meta.url);
 
-// Make the derived URL the engine's default immediately, so a host that never
-// calls `configure()` still gets working sprite URLs. This is an override of the
-// engine's classic `/mascot_pack` fallback, not a user configuration: a later
+// Make the derived URL the engine's default immediately. This is an override of
+// the engine's classic `/mascot_pack` fallback, not a user configuration: a later
 // `configure({ assets })` still wins, because each mascot snapshots the value when
 // it is constructed.
+//
+// Caveat: the derived value is only correct while this module is served from its
+// published location; bundled hosts must call `configure({ assets })` (see the
+// entry-point note above). Because the derivation *succeeds* with a wrong URL
+// under a bundler, `DEFAULT_PACK_BASE_URL` never gets a chance to act as a
+// fallback — copying the packs to `/mascot_pack` alone is not enough.
 MascotEngine.configure({ packBaseUrl: PACK_BASE_URL });
 
 /** Where the engine reads the packs and the editable configuration file from. */
@@ -40,9 +49,13 @@ export interface MascotConfig {
   /** Base URL that contains one directory per pack, without a trailing slash.
    *  Each mascot reads `<assets>/<pack>/img...`.
    *
-   *  Omit it and the engine uses `PACK_BASE_URL`, derived from the installed
-   *  package, so no configuration is needed for the common case. Set it when the
-   *  packs are relocated (a CDN, a rewritten asset path, a data URL). */
+   *  **Bundled hosts must set this**, before `createMascot()`, to wherever the
+   *  packs were copied (usually the site's static root, e.g. `"/mascot_pack"`).
+   *  Omitting it falls back to `PACK_BASE_URL`, derived from this module's own
+   *  location: correct only when that module is served from its published path
+   *  (an unbundled bare-ESM host, or a CDN mirroring `dist/` verbatim). After
+   *  bundling the derived URL points into the build output (`_astro/…`,
+   *  `node_modules/.vite/deps/…`) and every pack request 404s. */
   assets?: string;
   /** URL of the animation configuration JSON. Omit it and no file is fetched, so
    *  the packs keep their own settings. */

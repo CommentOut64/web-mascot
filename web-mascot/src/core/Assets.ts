@@ -1,12 +1,14 @@
 /**
- * Where the pack assets live, without the host having to say so.
+ * Where the pack assets live, derived from the module's own URL.
  *
- * The point of this module is `import`-and-go: a published package carries its own
- * `dist/mascot_pack/`, so the sprite URL can be derived from the module's own URL
- * instead of being guessed as `/mascot_pack` — which only works if the host
- * happens to serve the package at its document root, and 404s for every real
- * bundler or CDN. `configure({ assets })` still wins when a host relocates the
- * packs (a custom CDN, a rewritten asset path, an inline data URL).
+ * The derived URL is only valid while `dist/index.js` is served from its published
+ * location — an unbundled bare-ESM host, or a CDN that mirrors the package
+ * directory verbatim. A bundler (Vite, Webpack, …) relocates this module into its
+ * own output (`node_modules/.vite/deps/…`, `_astro/<hash>.js`), where the derived
+ * `<dir>/mascot_pack` does not exist, so every pack request 404s. That is the case
+ * `configure({ assets })` exists for: bundled hosts copy `dist/mascot_pack/` into
+ * their static root (usually `/mascot_pack`, i.e. `DEFAULT_PACK_BASE_URL`) and
+ * point the engine at it.
  *
  * The build layout this is derived from (see `vite.config.ts`):
  *
@@ -16,8 +18,9 @@
  *
  * so the package root is `<entry>/../` from an entry chunk and `<chunk>/../../`
  * from a split chunk. Rooting at the *directory* rather than reconstructing the
- * file name is deliberate: it keeps working when the entry is renamed, hashed, or
- * served through a CDN, because only the directory depth is assumed.
+ * file name keeps working when the entry keeps its published directory depth, is
+ * renamed, or is hashed — only the depth is assumed. Moving the module into a
+ * different directory (which is what a bundler does) invalidates the result.
  */
 
 /** Classic Vite public-dir location; the fallback when nothing can be derived. */
