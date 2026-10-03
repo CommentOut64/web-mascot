@@ -159,6 +159,15 @@ export class BroadcastManager {
   public static readonly MAX_SCAN_DISTANCE = 256;
   private servers = new Map<string, ServerState[]>();
 
+  /** Remove finalized advertisements that can no longer be reached. */
+  public prune(): void {
+    for (const [affordance, list] of this.servers) {
+      const live = list.filter((server) => server.active);
+      if (live.length === 0) this.servers.delete(affordance);
+      else if (live.length !== list.length) this.servers.set(affordance, live);
+    }
+  }
+
   public startBroadcast(affordance: string, anchor: Anchor): ServerState {
     const server = new ServerState(anchor);
     const list = this.servers.get(affordance);
@@ -212,6 +221,7 @@ export class BroadcastManager {
 
   /** Live broadcasts per affordance name, for the observation log. */
   public snapshot(): Record<string, number> {
+    this.prune();
     const counts: Record<string, number> = {};
     for (const [affordance, list] of this.servers) {
       const live = list.filter((server) => server.active).length;

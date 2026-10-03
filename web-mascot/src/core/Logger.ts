@@ -151,7 +151,13 @@ function safeJson(data: Record<string, unknown>): string {
 function prefixFor(channel: LogChannel): string {
   const value = prefix;
   if (value === null || value === undefined) return "";
-  if (typeof value === "function") return value(channel);
+  if (typeof value === "function") {
+    try {
+      return value(channel);
+    } catch {
+      return "[web-mascot]";
+    }
+  }
   return value;
 }
 

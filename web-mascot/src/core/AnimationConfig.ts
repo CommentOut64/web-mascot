@@ -183,7 +183,7 @@ function nameList(value: unknown): string[] | undefined {
     .filter((entry): entry is string => typeof entry === "string")
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
-  return names.length > 0 ? names : undefined;
+  return names.length > 0 || value.length === 0 ? names : undefined;
 }
 
 function tickCount(value: unknown, min: number): number | undefined {
@@ -439,18 +439,18 @@ export class AnimationConfig {
   /** Effective options: defaults, then the reduced-motion block, then the mascot. */
   public optionsFor(mascot: string): MascotAnimationOptions {
     const cached = this.resolved.get(mascot);
-    if (cached) return cached;
+    if (cached) return cloneOptions(cached);
     let merged = mergeOptions(this.defaults, this.reducedActive ? this.reduced : {});
     merged = mergeOptions(merged, this.perMascot.get(mascot) ?? {});
     this.resolved.set(mascot, merged);
-    return merged;
+    return cloneOptions(merged);
   }
 
   /** Whether a behaviour may be selected for this mascot. */
   public allows(mascot: string, behavior: string): boolean {
     const options = this.optionsFor(mascot);
     if (options.denyBehaviors?.includes(behavior)) return false;
-    if (options.allowBehaviors && !options.allowBehaviors.includes(behavior)) return false;
+    if (options.allowBehaviors && options.allowBehaviors.length > 0 && !options.allowBehaviors.includes(behavior)) return false;
     return true;
   }
 
@@ -557,12 +557,12 @@ export class AnimationConfig {
   /** Round-trip view of the raw file shape, for a settings UI. */
   public toJSON(): AnimationConfigFile {
     const mascots: Record<string, MascotAnimationOptions> = {};
-    for (const [name, options] of this.perMascot) mascots[name] = options;
+    for (const [name, options] of this.perMascot) mascots[name] = cloneOptions(options);
     return {
       version: 1,
-      defaults: this.defaults,
+      defaults: cloneOptions(this.defaults),
       mascots,
-      reducedMotion: this.reduced,
+      reducedMotion: cloneOptions(this.reduced),
       respectReducedMotion: this.respectReduced,
     };
   }
@@ -644,4 +644,21 @@ export class AnimationConfig {
     if (this.reducedActive) lines.push("reducedMotion: active (OS preference)");
     return lines;
   }
+}
+
+function cloneOptions(options: MascotAnimationOptions): MascotAnimationOptions {
+  return {
+    ...options,
+    allowBehaviors: options.allowBehaviors ? [...options.allowBehaviors] : undefined,
+    denyBehaviors: options.denyBehaviors ? [...options.denyBehaviors] : undefined,
+    pacerExemptBehaviors: options.pacerExemptBehaviors ? [...options.pacerExemptBehaviors] : undefined,
+    exitToPoolBehaviors: options.exitToPoolBehaviors ? [...options.exitToPoolBehaviors] : undefined,
+    behaviorWeights: options.behaviorWeights ? { ...options.behaviorWeights } : undefined,
+    actionDurations: options.actionDurations
+      ? Object.fromEntries(Object.entries(options.actionDurations).map(([key, value]) => [key, Array.isArray(value) ? [...value] : value]))
+      : undefined,
+    partnerWeights: options.partnerWeights ? { ...options.partnerWeights } : undefined,
+    zone: options.zone ? { ...options.zone } : undefined,
+    spawn: options.spawn ? { ...options.spawn } : undefined,
+  };
 }

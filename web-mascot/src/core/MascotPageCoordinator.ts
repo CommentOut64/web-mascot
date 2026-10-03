@@ -15,7 +15,7 @@ const CHANNEL_NAME = "neurolingsce-mascot-page-v1";
 const STORAGE_PREFIX = "__neurolingsce_mascot_page_v1__:";
 const HEARTBEAT_MS = 1500;
 const LEASE_MS = HEARTBEAT_MS * 3;
-const pageId = typeof crypto.randomUUID === "function"
+const pageId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
   ? crypto.randomUUID()
   : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const listeners = new Set<PageListener>();
