@@ -1,0 +1,253 @@
+NOTICE
+======
+
+web-mascot — an embeddable browser mascot engine
+https://github.com/CommentOut64/web-mascot/tree/HEAD/web-mascot
+
+This file records where this package comes from, who holds rights in it, and
+which license applies to which part. Read section 3 before using this package
+for anything commercial.
+
+
+--------------------------------------------------------------------------------
+1. What this package is, and where it comes from
+--------------------------------------------------------------------------------
+
+web-mascot is a browser (TypeScript/JavaScript) port of the mascot simulation
+engine found in NeurolingsCE-Qt and its upstream, Shijima-Qt / libshijima.
+
+    Port author: CommentOut64
+
+
+1.1  Ported into this package — the basis of the port, and why it is GPL
+    ------------------------------------------------------------------
+
+    The source code below is what this port reimplements. It is the reason this
+    package is licensed under the GPL.
+
+      * libshijima — C++ library for shimeji desktop mascots
+        Copyright (C) 2024-2025 pixelomer
+        GNU GPL v3.0 or later
+        https://github.com/pixelomer/libshijima
+
+      * Shijima-Qt — cross-platform shimeji simulation app for desktop
+        Copyright (C) 2025 pixelomer
+        GNU GPL v3.0 or later
+        https://github.com/pixelomer/Shijima-Qt
+
+      * NeurolingsCE / NeurolingsCE-Qt
+        Copyright (c) qingchenyou
+        The upstream project declares this string verbatim in VERSION.txt
+        ("APP_COPYRIGHT=Copyright (c) - qingchenyou") and gives no year; it is
+        reproduced here without adding one. The project's author is 轻尘呦
+        (GitHub: qingchenyouforcc).
+        GNU GPL v3.0 or later
+        https://github.com/qingchenyouforcc/NeurolingsCE-Qt
+
+    These upstream projects are licensed "either version 3 of the License, or
+    (at your option) any later version". This package is a derivative work of
+    them, so the source code in this package is licensed under:
+
+        SPDX-License-Identifier: GPL-3.0-or-later
+
+    Because this package also ships character assets under a different license,
+    package.json deliberately does not declare a single SPDX identifier. It
+    declares:
+
+        "license": "SEE LICENSE IN LICENSE"
+
+    A single identifier such as "GPL-3.0-or-later" would wrongly suggest that
+    everything in the tarball carries one license. The LICENSE file states the
+    scope of each part and reproduces both license texts in full. There is no
+    warranty, to the extent permitted by law.
+
+    For the upstream project's complete contributor list, see its CHANGELOG.md
+    section "Contributors / 贡献者". Besides qingchenyouforcc it names @wyf7685
+    (CI fixes and code optimization) and @XiaoYuan151 (macOS build support).
+
+
+1.2  The mascot format this engine implements
+    -----------------------------------------
+
+    This package contains no Shimeji or Shimeji-ee code. However, the mascot XML
+    format it reads, and the `com.group_finity.mascot.*` action class names it
+    implements, originate from these projects:
+
+      * Shimeji — the original desktop mascot
+        by Yuki Yamada of Group Finity
+        http://www.group-finity.com/Shimeji/
+
+      * Shimeji-ee — the English fork and community continuation
+        by Kilkakon and the Shimeji-ee community
+        https://kilkakon.com/shimeji/
+
+    The mascot packs bundled with this package (section 3) are Shimeji-ee format
+    packs.
+
+
+1.3  Upstream components that were NOT ported
+    ------------------------------------------
+
+    Listed so that it is visible that nothing from them was silently included.
+    The web port needs none of them: it uses the browser's DOMParser and fetch,
+    and an original expression evaluator written for this port.
+
+      * libshimejifinder — Copyright (C) 2025 pixelomer (GPL-3.0-or-later)
+        https://github.com/pixelomer/libshimejifinder
+        Archive parsing; this package has no .mascot/.zip importer.
+      * pugixml — Copyright (c) 2006-2025 Arseny Kapoulkine (MIT)
+        https://github.com/zeux/pugixml
+      * rapidxml — Copyright (c) 2006, 2007 Marcin Kalicinski (MIT)
+      * Duktape — Copyright (c) 2013-present by Duktape authors (MIT)
+        https://duktape.org/
+      * cpp-httplib — Yhirose (MIT)
+        https://github.com/yhirose/cpp-httplib
+      * Qt 6 — The Qt Company Ltd. (LGPL-3.0)
+        https://www.qt.io/
+      * ElaWidgetTools — Copyright (c) 2024 Liniyous (MIT)
+      * libarchive — Copyright by Tim Kientzle (BSD-2-Clause)
+      * unarr — The Unarchiver project, Simon Bünzli and Felix Kauselmann
+        (LGPL-3.0)
+        https://github.com/selmf/unarr
+
+
+--------------------------------------------------------------------------------
+2. GPLv3 section 7 additional terms (passed through from upstream)
+--------------------------------------------------------------------------------
+
+NeurolingsCE-Qt states additional terms under section 7 of the GPLv3. Because
+they are conditions of that license, they also bind this port, any modified
+version of it, and any derivative work. The authoritative text is the upstream
+README; it is reproduced verbatim below, followed by a courtesy translation.
+
+    Original text (Chinese):
+
+        在遵守 GPLv3 的基础上，任何再发布、修改版本或衍生作品还必须遵守以下要求：
+
+        - 保留原始版权声明、许可证声明以及相关归属信息。
+        - 不得冒充本项目的官方版本，或以任何可能造成混淆的方式表示其为官方
+          发布版本。
+        - 未经项目权利人明确许可，不得使用本项目的商标、Logo、项目名称，或
+          以这些标识暗示官方背书、认可或关联。
+
+    Translation (courtesy, not authoritative):
+
+        In addition to complying with the GPLv3, any redistribution, modified
+        version, or derivative work must also satisfy the following:
+
+        - Retain the original copyright notices, license notices, and related
+          attribution information.
+        - Do not impersonate the official version of this project, and do not
+          represent yourself as an official release in any way that could
+          cause confusion.
+        - Do not use the project's trademarks, logo, or project name, or use
+          these marks to imply official endorsement, approval, or association,
+          without the express permission of the project rights holder.
+
+Accordingly: web-mascot is an unofficial, independent web port. It is not
+affiliated with, sponsored by, or endorsed by the NeurolingsCE-Qt project, the
+Shijima-Qt or libshijima projects, the Shimeji or Shimeji-ee projects, or the
+artists who created the mascot artwork. The names "NeurolingsCE", "Shijima",
+"Shimeji", "Shimeji-ee", "Neuro-sama", "Neuron", "Eviling" and "Neurolings"
+belong to their respective owners and are used here only to describe origin and
+compatibility.
+
+
+--------------------------------------------------------------------------------
+3. Bundled mascot assets are NOT GPL — they are CC BY-NC-SA 4.0
+--------------------------------------------------------------------------------
+
+The published tarball ships two ready-to-use mascot packs:
+
+    dist/mascot_pack/Neuron/
+    dist/mascot_pack/Eviling/
+
+The artwork, the XML behaviour definitions, and the other assets of these packs
+are NOT part of the GPL-3.0-or-later source code. They are separate creative
+works, redistributed under:
+
+    Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
+    SPDX-License-Identifier: CC-BY-NC-SA-4.0
+    https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+
+Attribution
+-----------
+
+| Role | Credited to | Source of this credit |
+| --- | --- | --- |
+| Character set / setting "Neurolings" | @Monikaphobia — https://x.com/Monikaphobia/status/1844272129619132682 | upstream README ("致谢" section) |
+| Sprite artwork (the "Neurolings" sprite set) | Paccha — https://linktr.ee/paccha_ | the packs' own `info.json` |
+| Behaviour configuration (`actions.xml`, `behaviors.xml`) | @promote. — https://z.ne1.co, https://neuro.us.to — and @dalekcraft | the packs' own `info.json` |
+| Packaging, `.mascot` package format and pack metadata | qingchenyouforcc — https://github.com/qingchenyouforcc | upstream `CHANGELOG.md` contributor list, and the authorship of the upstream `mascot_pack/` commits |
+| Extraction and redistribution into this npm package | CommentOut64 | this package — see "Modifications" below |
+
+Reproduced verbatim from the packs' own `info.json`:
+
+    "author": "Paccha[https://linktr.ee/paccha_], Configuration by
+     [@promote.] (https://z.ne1.co & https://neuro.us.to) and [@dalekcraft]"
+
+Note that `info.json` names no packager. The credit to qingchenyouforcc for the
+package format and metadata comes from the upstream project's own contributor
+record — `CHANGELOG.md` credits them with "mascot package format, metadata"
+(v0.3.2) and "mascot combinations, package creation" (v0.4.0) — and from the
+authorship of the upstream `mascot_pack/` commits. It is recorded here as a
+contribution to these packs *as distributed by the upstream project*, and it
+does not displace the artwork or the configuration credits above.
+
+The Neuron pack depicts the character "Neuro-sama". As with every character name
+in this package, that name belongs to its respective owner and is used here only
+to describe what the artwork shows: this package is an unofficial fan work.
+
+
+    ***  NON-COMMERCIAL ONLY  ***
+
+    The "NC" term means these two mascot packs may not be used for commercial
+    purposes. If you are building a commercial product, you must NOT ship or
+    serve `Neuron` or `Eviling`. Either obtain separate permission from the
+    rights holders, or supply your own mascot pack — the engine itself accepts
+    any Shimeji-format pack directory, see README.md.
+
+
+The complete CC BY-NC-SA 4.0 legal code is reproduced in two places: in the
+package-root LICENSE (as part 2 of 2), and in each pack directory as
+LICENSE-CC-BY-NC-SA-4.0.txt. Each pack directory also carries its own LICENSE
+holding the license notice and attribution required by the CC license, so a pack
+stays self-describing if it is extracted on its own.
+
+
+Modifications
+-------------
+
+CC BY-NC-SA 4.0 section 3(a)(1)(B) requires that modifications be indicated.
+These are all of them:
+
+    * actions.xml — the UTF-8 byte-order mark was removed.
+    * actions.xml — the malformed expression `Math.random*100` was corrected to
+      `Math.random()*100`, in two places per pack (four occurrences in total).
+      The affected expression computes the wall-climb target; without the
+      parentheses it evaluates to NaN.
+    * info.json — a `"license"` field was added. No other field was changed.
+    * img/*.png — byte-for-byte identical to upstream, unmodified.
+    * behaviors.xml, bubble_context.txt — byte-for-byte identical, unmodified.
+
+Nothing else in this package is affected by the CC license. In particular,
+`dist/index.js`, `dist/devtools.js`, `dist/chunks/*`, `dist/types/*`,
+`src/**`, `dist/animation.config.json`, this NOTICE and the LICENSE file are
+GPL-3.0-or-later only.
+
+
+--------------------------------------------------------------------------------
+4. Runtime dependencies, corresponding source, and scope of this notice
+--------------------------------------------------------------------------------
+
+The published tarball has no runtime dependencies. It contains no Qt, rapidxml,
+pugixml, Duktape, libarchive, or unarr code — see section 1.3.
+
+The Corresponding Source for this package is included in the published tarball
+(`src/core/`, `src/dev/`, `src/index.ts`, `src/devtools.ts`) and is also
+available from the repository URL above.
+
+This notice describes the engineering structure of the package and reproduces
+the upstreams' own statements. It is not legal advice; if your use is
+commercially sensitive, obtain your own legal review.
