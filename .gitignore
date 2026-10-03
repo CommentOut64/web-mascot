@@ -9,6 +9,11 @@ dist-ssr/
 .vite/
 coverage/
 *.tsbuildinfo
+dist-extension/
+release/
+web-mascot/dist-extension/
+web-mascot/release/
+web-mascot/*.tgz
 
 # ---------- 运行时日志 ----------
 # 宠物运行产生的分目录日志、录制文件
