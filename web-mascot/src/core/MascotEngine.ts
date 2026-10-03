@@ -1,12 +1,12 @@
-import { XMLParser } from "./XMLParser";
-import { AnimationConfig } from "./AnimationConfig";
-import { BroadcastManager, ClientHandle, Interaction, ServerState } from "./Broadcast";
-import { hotspotAt } from "./Hotspot";
-import { registerMascotPage } from "./MascotPageCoordinator";
-import { evaluateExpression } from "./ExpressionEvaluator";
-import { loggerFor } from "./Logger";
-import type { Hotspot } from "./Hotspot";
-import type { ActionNode, AnimationVariant, Behavior, BehaviorReference, MascotConfig, Pose } from "./types";
+import { XMLParser } from "./XMLParser.js";
+import { AnimationConfig } from "./AnimationConfig.js";
+import { BroadcastManager, ClientHandle, Interaction, ServerState } from "./Broadcast.js";
+import { hotspotAt } from "./Hotspot.js";
+import { registerMascotPage } from "./MascotPageCoordinator.js";
+import { evaluateExpression } from "./ExpressionEvaluator.js";
+import { loggerFor } from "./Logger.js";
+import type { Hotspot } from "./Hotspot.js";
+import type { ActionNode, AnimationVariant, Behavior, BehaviorReference, MascotConfig, Pose } from "./types.js";
 
 const expressionLog = loggerFor("engine");
 const loggedExpressionFailures = new Set<string>();

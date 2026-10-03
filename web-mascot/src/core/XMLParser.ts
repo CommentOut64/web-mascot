@@ -5,8 +5,8 @@ import type {
   Pose,
   BehaviorReference,
   ActionType,
-} from "./types";
-import type { Hotspot } from "./Hotspot";
+} from "./types.js";
+import type { Hotspot } from "./Hotspot.js";
 
 export class XMLParser {
   /**

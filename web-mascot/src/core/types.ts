@@ -1,4 +1,4 @@
-import type { Hotspot } from "./Hotspot";
+import type { Hotspot } from "./Hotspot.js";
 
 export interface Pose {
   image: string;

@@ -1,6 +1,6 @@
-import { MascotEngine } from "../core/MascotEngine";
-import type { EngineEvent } from "../core/MascotEngine";
-import { loggerFor } from "../core/Logger";
+import { MascotEngine } from "../core/MascotEngine.js";
+import type { EngineEvent } from "../core/MascotEngine.js";
+import { loggerFor } from "../core/Logger.js";
 
 /**
  * Mascot observation log — minimal form.

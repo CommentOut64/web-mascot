@@ -6,7 +6,16 @@
     "declaration": true,
     "declarationMap": true,
     "outDir": "dist/types",
-    "rootDir": "src"
+    "rootDir": "src",
+    // These declarations ship to consumers, and modern Node projects resolve
+    // types with moduleResolution node16/nodenext. Under those modes a relative
+    // import must carry an explicit .js extension. The project-wide mode is
+    // "bundler" (tsconfig.json), which silently accepts extensionless imports
+    // and would therefore emit declarations that every node16/nodenext consumer
+    // fails to typecheck with TS2834. Forcing nodenext *here* is the only place
+    // that can turn that regression into a build failure.
+    "module": "nodenext",
+    "moduleResolution": "nodenext"
   },
   "include": ["src/index.ts", "src/devtools.ts"],
   "references": []

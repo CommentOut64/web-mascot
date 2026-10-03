@@ -1,6 +1,6 @@
-import { MascotEngine } from "./core/MascotEngine";
-import type { RuntimeOptions, RuntimeSnapshot } from "./core/MascotEngine";
-import { defaultPackBaseUrl } from "./core/Assets";
+import { MascotEngine } from "./core/MascotEngine.js";
+import type { RuntimeOptions, RuntimeSnapshot } from "./core/MascotEngine.js";
+import { defaultPackBaseUrl } from "./core/Assets.js";
 
 /**
  * Public entry point of the web-mascot library.
@@ -144,11 +144,11 @@ export async function createMascot(options: MascotOptions): Promise<Mascot> {
   return new Mascot(engine);
 }
 
-export { MascotEngine } from "./core/MascotEngine";
-export type { RuntimeOptions, RuntimeSnapshot } from "./core/MascotEngine";
-export { AnimationConfig } from "./core/AnimationConfig";
-export { BroadcastManager } from "./core/Broadcast";
-export { DEFAULT_PACK_BASE_URL, resolveAssetBase } from "./core/Assets";
-export type { EngineEvent, EngineObserver } from "./core/MascotEngine";
-export type { Pose, ActionNode, Behavior } from "./core/types";
-export type { Hotspot } from "./core/Hotspot";
+export { MascotEngine } from "./core/MascotEngine.js";
+export type { RuntimeOptions, RuntimeSnapshot } from "./core/MascotEngine.js";
+export { AnimationConfig } from "./core/AnimationConfig.js";
+export { BroadcastManager } from "./core/Broadcast.js";
+export { DEFAULT_PACK_BASE_URL, resolveAssetBase } from "./core/Assets.js";
+export type { EngineEvent, EngineObserver } from "./core/MascotEngine.js";
+export type { Pose, ActionNode, Behavior } from "./core/types.js";
+export type { Hotspot } from "./core/Hotspot.js";
