@@ -27,8 +27,10 @@ export default defineConfig({
       formats: ["es"],
     },
     rollupOptions: {
-      // Vue is a peer dependency: the host owns the Vue instance. Everything else
-      // is either bundled or browser-native.
+      // The library entries import nothing from Vue — only this repo's demo app
+      // does (`src/main.ts`), and the demo is not part of the lib build. The rule
+      // is kept as a guard so that if a Vue-based helper is ever added to an
+      // entry, the host's own Vue instance is still never duplicated.
       external: [/^vue(\/.*)?$/],
       output: {
         entryFileNames: "[name].js",
