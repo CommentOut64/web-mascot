@@ -3,6 +3,7 @@ import vue from "@vitejs/plugin-vue";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { mascotLog } from "./vite-plugin-mascot-log";
+import { ANIMATION_PRESET_FILE } from "./src/core/animationPreset";
 
 const projectRoot = dirname(fileURLToPath(import.meta.url));
 
@@ -14,6 +15,20 @@ export default defineConfig({
     // it, and `server.watch.ignored` keeps it out of the watcher — writing a log
     // must never trigger HMR. `logs/` is gitignored, so recordings never ship.
     mascotLog({ logRoot: resolve(projectRoot, "logs"), text: true }),
+    // The copy of the built-in preset that ships as `dist/animation.config.json`
+    // (exported as `web-mascot/animation.config.json` for hosts that want a file to
+    // edit). It is generated from the very data the engine applies by default, so
+    // the template and the default behaviour cannot drift apart.
+    {
+      name: "web-mascot:emit-animation-preset",
+      generateBundle() {
+        this.emitFile({
+          type: "asset",
+          fileName: "animation.config.json",
+          source: `${JSON.stringify(ANIMATION_PRESET_FILE, null, 2)}\n`,
+        });
+      },
+    },
   ],
   build: {
     // Library build. The demo app (index.html + src/main.ts) is not part of it:

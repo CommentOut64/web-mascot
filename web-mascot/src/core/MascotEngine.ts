@@ -68,6 +68,22 @@ const RUNTIME_DEFAULTS: Required<RuntimeOptions> = {
 /** Live tuning; read by the simulation, so it can be changed between ticks. */
 let runtime: Required<RuntimeOptions> = { ...RUNTIME_DEFAULTS };
 
+/**
+ * Add every sprite a pack action node can show to `urls`.
+ *
+ * A `<Pose>` may carry no `Image` (the shipped packs use one as a bare delay): it
+ * has nothing to preload, and `spriteUrl("")` would request the `img` directory
+ * itself, which the dev server answers with a 500 and an error overlay on the
+ * host page.
+ */
+function collectSpriteUrls(node: ActionNode, urls: Set<string>, toUrl: (image: string) => string): void {
+  for (const pose of node.poses ?? []) if (pose.image) urls.add(toUrl(pose.image));
+  for (const animation of node.animations ?? []) {
+    for (const pose of animation.poses) if (pose.image) urls.add(toUrl(pose.image));
+  }
+  for (const child of node.children ?? []) collectSpriteUrls(child, urls, toUrl);
+}
+
 /** Counterpart of `RuntimeOptions`, without repeating every default. */
 function mergeRuntime(options: RuntimeOptions | undefined): Required<RuntimeOptions> {
   const merged = { ...runtime };
@@ -261,6 +277,12 @@ export class MascotEngine {
   private static animationConfig = new AnimationConfig();
   private static animationConfigLoad: Promise<void> | null = null;
   private static animationConfigSetExplicitly = false;
+  /**
+   * Host-level answer to "should the built-in preset apply?", set through
+   * `configure({ ignoreBuiltin })`. `null` means "whatever the file says", which
+   * `AnimationConfig` tracks on its own.
+   */
+  private static builtinPreference: boolean | null = null;
   /** Affordance registry, shared by every mascot in the page (broadcast/manager). */
   private static broadcasts = new BroadcastManager();
   private static globalEventsInstalled = false;
@@ -551,12 +573,24 @@ export class MascotEngine {
    * fetched once and then cached for the page, so a later change is only picked up
    * by `reloadAnimationConfig()`.
    */
-  public static configure(options: { packBaseUrl?: string; animationConfigUrl?: string }): void {
+  public static configure(options: {
+    packBaseUrl?: string;
+    animationConfigUrl?: string;
+    /** True drops the built-in animation preset for this page; false is the default. */
+    ignoreBuiltin?: boolean;
+  }): void {
     if (options.packBaseUrl) {
       MascotEngine.packBaseUrl = options.packBaseUrl.replace(/\/+$/, "");
     }
     if (options.animationConfigUrl && !MascotEngine.animationConfigUrl) {
       MascotEngine.animationConfigUrl = options.animationConfigUrl;
+    }
+    if (options.ignoreBuiltin !== undefined) {
+      // Remembered as a page-level preference instead of being written into the
+      // current instance, because a configuration file may replace that instance
+      // later: `applyBuiltinPreference()` re-applies it afterwards.
+      MascotEngine.builtinPreference = options.ignoreBuiltin;
+      MascotEngine.applyBuiltinPreference();
     }
   }
 
@@ -592,15 +626,45 @@ export class MascotEngine {
    * `loadAnimationConfig()` is called again with `force`.
    */
   public static setAnimationConfig(file: unknown, source = "(programmatic)"): AnimationConfig {
+    // An explicit object that carries the flag also updates the page-level
+    // preference; otherwise the last `configure({ ignoreBuiltin })` stays in force.
+    const flag = (file as { ignoreBuiltin?: unknown } | null | undefined)?.ignoreBuiltin;
+    if (typeof flag === "boolean") MascotEngine.builtinPreference = flag;
     MascotEngine.animationConfig = new AnimationConfig(file, source);
     MascotEngine.animationConfigSetExplicitly = true;
+    MascotEngine.applyBuiltinPreference();
     MascotEngine.watchReducedMotion();
     return MascotEngine.animationConfig;
   }
 
   /**
-   * Read the configuration file once and keep it. Missing or invalid files leave
-   * the mascots on the pack's own settings, so this never breaks the app.
+   * Re-apply the page-level `ignoreBuiltin` preference to the configuration in
+   * effect.
+   *
+   * `toJSON()` hands back the host's own layer only, so re-seeding it never bakes
+   * the built-in preset into anything; a page that never passes the flag keeps
+   * whatever the file said.
+   */
+  private static applyBuiltinPreference(): void {
+    const preference = MascotEngine.builtinPreference;
+    if (preference === null) return;
+    const current = MascotEngine.animationConfig;
+    const host = current.toJSON();
+    if ((host.ignoreBuiltin === true) === preference) return;
+    MascotEngine.animationConfig = new AnimationConfig(
+      { ...host, ignoreBuiltin: preference },
+      current.source,
+    );
+  }
+
+  /**
+   * Read the configuration file once and keep it. A missing or invalid file leaves
+   * the built-in preset in place (or the packs' own settings, when the page asked
+   * for `ignoreBuiltin`), so this never breaks the app.
+   *
+   * Probing the classic path is the price of the "just drop a file at
+   * `/animation.config.json`" workflow: a host that has no file sees one expected
+   * 404 per page load, and nothing else.
    */
   public static loadAnimationConfig(url?: string): Promise<void> {
     if (url) MascotEngine.animationConfigUrl = url;
@@ -610,18 +674,25 @@ export class MascotEngine {
       try {
         const controller = new AbortController();
         const timer = window.setTimeout(() => controller.abort(), 3000);
-        const response = await fetch(target, { cache: "no-store", signal: controller.signal });
-        window.clearTimeout(timer);
-        const contentType = response.headers.get("content-type") ?? "";
-        if (!response.ok || !contentType.includes("json")) return;
-        const file: unknown = await response.json();
-        if (!MascotEngine.animationConfigSetExplicitly) {
-          MascotEngine.animationConfig = new AnimationConfig(file, target);
+        try {
+          const response = await fetch(target, { cache: "no-store", signal: controller.signal });
+          const contentType = response.headers.get("content-type") ?? "";
+          if (!response.ok || !contentType.includes("json")) return;
+          const file: unknown = await response.json();
+          if (!MascotEngine.animationConfigSetExplicitly) {
+            MascotEngine.animationConfig = new AnimationConfig(file, target);
+          }
+          MascotEngine.applyBuiltinPreference();
+        } finally {
+          window.clearTimeout(timer);
         }
       } catch {
-        /* no configuration file, or it is unreachable: keep the pack defaults */
+        /* no configuration file, or it is unreachable: keep the current settings */
+      } finally {
+        // Runs on the "no file" path too: the OS reduced-motion preference has to
+        // be followed whether or not this site happens to serve a file.
+        MascotEngine.watchReducedMotion();
       }
-      MascotEngine.watchReducedMotion();
     })();
     return MascotEngine.animationConfigLoad;
   }
@@ -745,18 +816,9 @@ export class MascotEngine {
     const actions = this.config?.actions;
     if (!actions) return;
     const urls = new Set<string>();
-    // A `<Pose>` may carry no `Image` (the shipped packs use one as a bare delay).
-    // It has nothing to preload, and `spriteUrl("")` would request the `img`
-    // directory itself, which the dev server answers with a 500 and an error
-    // overlay on the host page.
-    const collect = (node: ActionNode) => {
-      for (const pose of node.poses ?? []) if (pose.image) urls.add(this.spriteUrl(pose.image));
-      for (const animation of node.animations ?? []) {
-        for (const pose of animation.poses) if (pose.image) urls.add(this.spriteUrl(pose.image));
-      }
-      for (const child of node.children ?? []) collect(child);
-    };
-    for (const node of Object.values(actions)) collect(node);
+    for (const node of Object.values(actions)) {
+      collectSpriteUrls(node, urls, (image) => this.spriteUrl(image));
+    }
     for (const url of urls) {
       if (MascotEngine.preloaded.has(url)) continue;
       MascotEngine.preloaded.add(url);
@@ -766,22 +828,42 @@ export class MascotEngine {
     }
   }
 
-  /** Decode the pose that will be painted first, so even the spawn has no gap.
+  /** Decode the poses the spawn paints, so even the landing sequence has no gap.
    *  Bounded by a timeout: a slow network must never delay the mascot. */
   private async warmFirstPose(): Promise<void> {
     const pose = this.currentPose() ?? this.firstPose();
     if (!pose || !pose.image) return;
-    const image = new Image();
-    image.src = this.spriteUrl(pose.image);
-    const decode = typeof image.decode === "function" ? image.decode().catch(() => undefined) : Promise.resolve();
-    await Promise.race([decode, new Promise((resolve) => window.setTimeout(resolve, 1500))]);
+
+    // The whole "Fall" tree is warmed (it carries Bouncing, Stand and friends): a
+    // landing sequence whose frames arrive one by one flashes empty sprites.
+    const first = this.spriteUrl(pose.image);
+    const urls = new Set<string>([first]);
+    const spawnAction = this.config?.actions?.["Fall"];
+    if (spawnAction) collectSpriteUrls(spawnAction, urls, (image) => this.spriteUrl(image));
+
+    // The instances are kept: the first pose's bitmap is what seeds the sprite box
+    // below, and `naturalWidth` is only trustworthy on the instance that has
+    // actually finished decoding.
+    const images = new Map<string, HTMLImageElement>();
+    const decodes: Promise<void>[] = [];
+    for (const url of urls) {
+      const image = new Image();
+      images.set(url, image);
+      image.src = url;
+      decodes.push(
+        typeof image.decode === "function" ? image.decode().catch(() => undefined) : Promise.resolve(),
+      );
+    }
+    await Promise.race([Promise.all(decodes), new Promise((resolve) => window.setTimeout(resolve, 1500))]);
+
     // Seed the sprite box before the first frame so the initial paint already has
-    // a real size (the warm-up image is decoded, so its bitmap size is known).
-    if (image.naturalWidth > 0) {
-      this.elImg.style.width = `${image.naturalWidth}px`;
-      this.elImg.style.height = `${image.naturalHeight}px`;
-      this.elRoot.style.width = `${image.naturalWidth}px`;
-      this.elRoot.style.height = `${image.naturalHeight}px`;
+    // a real size (this image is decoded, so its bitmap size is known).
+    const warm = images.get(first);
+    if (warm && warm.naturalWidth > 0) {
+      this.elImg.style.width = `${warm.naturalWidth}px`;
+      this.elImg.style.height = `${warm.naturalHeight}px`;
+      this.elRoot.style.width = `${warm.naturalWidth}px`;
+      this.elRoot.style.height = `${warm.naturalHeight}px`;
     }
   }
 

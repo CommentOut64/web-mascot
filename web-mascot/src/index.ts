@@ -24,6 +24,11 @@ import { defaultPackBaseUrl } from "./core/Assets.js";
  * config file, runtime tuning and logging (packs served from a CDN, a rewritten
  * asset path, a data URL).
  *
+ * Animation *behaviour* needs no configuration at all: the engine ships a built-in
+ * preset (see `ANIMATION_CONFIG.md`). A config file overrides it field by field,
+ * and `configure({ ignoreBuiltin: true })` drops it altogether so the packs behave
+ * exactly as they ship.
+ *
  * The observation log is deliberately *not* part of this entry point. It is a
  * development tool that writes through a Vite middleware endpoint, so it lives in
  * the `web-mascot/devtools` entry; see `src/devtools.ts`.
@@ -57,9 +62,16 @@ export interface MascotConfig {
    *  bundling the derived URL points into the build output (`_astro/…`,
    *  `node_modules/.vite/deps/…`) and every pack request 404s. */
   assets?: string;
-  /** URL of the animation configuration JSON. Omit it and no file is fetched, so
-   *  the packs keep their own settings. */
+  /** URL of the animation configuration JSON. Omitting it probes the classic
+   *  `/animation.config.json` once per page; if that file is absent nothing breaks
+   *  and the built-in preset stays in effect. */
   animationConfigUrl?: string;
+  /** Set true to drop the built-in animation preset and run the packs exactly as
+   *  they ship: no pacer, no behaviour-weight overrides, no long-sequence
+   *  exemption. Default false — the built-in preset is what a host gets when it
+   *  configures nothing. Orthogonal to `animationConfigUrl`: this removes the
+   *  layer underneath, it does not disable the file. */
+  ignoreBuiltin?: boolean;
   /** Simulation tuning. See `RuntimeOptions`; omitted fields keep their defaults. */
   runtime?: RuntimeOptions;
 }
@@ -76,20 +88,22 @@ export interface MascotOptions {
 let hasConfigured = false;
 
 /**
- * Override the derived defaults. Entirely optional: calling nothing gives a
- * working mascot with the pack's own animation settings.
+ * Override the derived defaults. Entirely optional: calling nothing still gives a
+ * working mascot, with the engine's built-in animation preset.
  *
  * The assets URL is snapshotted when each mascot is constructed, so changing it
  * later never leaves one mascot reading from a different pack root. Runtime tuning
  * is *not* snapshotted — it is read per tick, so a later change affects mascots
- * that are already on the page.
+ * that are already on the page. `ignoreBuiltin` lasts for the whole page.
  */
 export function configure(options: MascotConfig): void {
   hasConfigured = true;
-  if (options.assets) {
-    MascotEngine.configure({ packBaseUrl: options.assets, animationConfigUrl: options.animationConfigUrl });
-  } else if (options.animationConfigUrl) {
-    MascotEngine.configure({ animationConfigUrl: options.animationConfigUrl });
+  if (options.assets || options.animationConfigUrl || options.ignoreBuiltin !== undefined) {
+    MascotEngine.configure({
+      packBaseUrl: options.assets,
+      animationConfigUrl: options.animationConfigUrl,
+      ignoreBuiltin: options.ignoreBuiltin,
+    });
   }
   if (options.runtime) MascotEngine.setRuntimeOptions(options.runtime);
 }
