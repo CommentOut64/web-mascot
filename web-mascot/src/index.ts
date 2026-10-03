@@ -1,5 +1,5 @@
 import { MascotEngine } from "./core/MascotEngine";
-import type { RuntimeOptions } from "./core/MascotEngine";
+import type { RuntimeOptions, RuntimeSnapshot } from "./core/MascotEngine";
 import { defaultPackBaseUrl } from "./core/Assets";
 
 /**
@@ -94,7 +94,7 @@ export function assetBaseUrl(): string {
 }
 
 /** The runtime tuning actually in effect. */
-export function runtimeOptions(): Required<RuntimeOptions> {
+export function runtimeOptions(): RuntimeSnapshot {
   return MascotEngine.getRuntimeOptions();
 }
 
@@ -145,7 +145,7 @@ export async function createMascot(options: MascotOptions): Promise<Mascot> {
 }
 
 export { MascotEngine } from "./core/MascotEngine";
-export type { RuntimeOptions } from "./core/MascotEngine";
+export type { RuntimeOptions, RuntimeSnapshot } from "./core/MascotEngine";
 export { AnimationConfig } from "./core/AnimationConfig";
 export { BroadcastManager } from "./core/Broadcast";
 export { DEFAULT_PACK_BASE_URL, resolveAssetBase } from "./core/Assets";

@@ -29,7 +29,7 @@ export class XMLParser {
     const actionsRaw = await actionsXmlRes.text();
     const behaviorsRaw = await behaviorsXmlRes.text();
 
-    if (actionsRaw.trim().toLowerCase().startsWith("<!doctype html>")) {
+    if (actionsRaw.trim().toLowerCase().startsWith("<!doctype html>") || behaviorsRaw.trim().toLowerCase().startsWith("<!doctype html>")) {
       throw new Error(
         `[XMLParser] 加载 ${mascotName} 的 actions.xml 失败：Vite 返回了 HTML fallback。`,
       );
@@ -41,6 +41,12 @@ export class XMLParser {
     const parser = new DOMParser();
     const actionsDoc = parser.parseFromString(cleanActionsStr, "text/xml");
     const behaviorsDoc = parser.parseFromString(cleanBehaviorsStr, "text/xml");
+    if (actionsDoc.getElementsByTagName("parsererror").length > 0) {
+      throw new Error(`配置 XML 无法解析: ${mascotName}/actions.xml。`);
+    }
+    if (behaviorsDoc.getElementsByTagName("parsererror").length > 0) {
+      throw new Error(`配置 XML 无法解析: ${mascotName}/behaviors.xml。`);
+    }
 
     return {
       actions: this.parseActions(actionsDoc),
@@ -152,11 +158,17 @@ export class XMLParser {
       const pNode = poseNodes[i];
       const anchor = (pNode.getAttribute("ImageAnchor") || "0,0").split(",");
       const vel = (pNode.getAttribute("Velocity") || "0,0").split(",");
+      const imageAnchorX = Number(anchor[0]);
+      const imageAnchorY = Number(anchor[1]);
+      const velocityX = Number(vel[0]);
+      const velocityY = Number(vel[1]);
+      const duration = Number(pNode.getAttribute("Duration") || "1");
+      if (![imageAnchorX, imageAnchorY, velocityX, velocityY, duration].every(Number.isFinite)) continue;
       poses.push({
         image: pNode.getAttribute("Image") || "",
-        imageAnchor: { x: parseInt(anchor[0]), y: parseInt(anchor[1]) },
-        velocity: { x: parseFloat(vel[0]), y: parseFloat(vel[1]) },
-        duration: parseInt(pNode.getAttribute("Duration") || "1"),
+        imageAnchor: { x: imageAnchorX, y: imageAnchorY },
+        velocity: { x: velocityX, y: velocityY },
+        duration: Math.max(1, Math.round(duration)),
       });
     }
     return poses;
@@ -180,7 +192,11 @@ export class XMLParser {
       const originY = parseFloat(origin[1]);
       const sizeX = parseFloat(size[0]);
       const sizeY = parseFloat(size[1]);
-      if (![originX, originY, sizeX, sizeY].every((value) => Number.isFinite(value))) continue;
+      if (
+        ![originX, originY, sizeX, sizeY].every((value) => Number.isFinite(value)) ||
+        sizeX <= 0 ||
+        sizeY <= 0
+      ) continue;
       hotspots.push({
         shape,
         origin: { x: originX, y: originY },
@@ -200,7 +216,8 @@ export class XMLParser {
       const name = node.getAttribute("Name");
       if (!name) continue;
 
-      const frequency = parseInt(node.getAttribute("Frequency") || "0");
+      const frequencyValue = Number(node.getAttribute("Frequency") || "0");
+      const frequency = Number.isFinite(frequencyValue) ? Math.max(0, frequencyValue) : 0;
       const hidden = node.getAttribute("Hidden") === "true";
 
       let condition: string | undefined = undefined;
@@ -219,15 +236,24 @@ export class XMLParser {
         addNext = nextList.getAttribute("Add") !== "false";
         const refs = this.getTag(nextList, "BehaviorReference");
         for (let j = 0; j < refs.length; j++) {
+          const referenceFrequency = Number(refs[j].getAttribute("Frequency") || "0");
           nextBehaviors.push({
             name: refs[j].getAttribute("Name") || "",
-            frequency: parseInt(refs[j].getAttribute("Frequency") || "0"),
+            frequency: Number.isFinite(referenceFrequency) ? Math.max(0, referenceFrequency) : 0,
             condition: refs[j].getAttribute("Condition") || undefined,
           });
         }
       }
 
-      behaviors.push({ name, frequency, hidden, condition, nextBehaviors, addNext });
+      behaviors.push({ name, id: i, frequency, hidden, condition, nextBehaviors, addNext });
+    }
+    for (const behavior of behaviors) {
+      for (const reference of behavior.nextBehaviors) {
+        const match = behaviors.find(
+          (candidate) => candidate.name === reference.name && candidate.frequency === reference.frequency,
+        );
+        if (match) reference.id = match.id;
+      }
     }
     return behaviors;
   }
