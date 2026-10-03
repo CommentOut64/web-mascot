@@ -2,6 +2,87 @@
 
 本文只描述**封装后对外暴露的接口**，即 `package.json` 的 `exports` 映射所声明的入口。内部实现（`src/core/*`、`src/dev/*`）不属于本契约的一部分，可能随版本变动。
 
+## 快速开始
+
+```bash
+npm install web-mascot
+```
+
+```js
+import { createMascot } from "web-mascot";
+
+const mascot = await createMascot({ container: document.body, pack: "Neuron" });
+window.addEventListener("pagehide", () => mascot.destroy());
+```
+
+零配置即可工作：**不**需要调用 `configure()`，也**不**需要告诉引擎资源在哪。`pack` 传内置的 `"Neuron"` 或 `"Eviling"`。
+
+需要覆盖默认值时：
+
+```js
+import { configure, createMascot } from "web-mascot";
+
+configure({ assets: "https://cdn.example.com/mascot_pack", runtime: { tickMs: 40 } });
+const mascot = await createMascot({ container: document.querySelector("#pet-root"), pack: "Neuron" });
+```
+
+只想看日志：
+
+```js
+import { attach, configureLogging } from "web-mascot/devtools";
+
+configureLogging({ console: "info" });   // 库自身诊断：[web-mascot] ...
+attach({ console: true });               // 观测日志：宠物移动史
+```
+
+## 导出速查
+
+本表用于"我知道要什么、只要签名"的场景；完整语义见右侧指向的章节。
+
+### 主入口 `web-mascot`（12 个值 + 10 个类型）
+
+| 导出 | 签名 | 一句话 | 详见 |
+| --- | --- | --- | --- |
+| `createMascot` | `(options: MascotOptions) => Promise<Mascot>` | 创建并挂载一只宠物，解析完 pack 且画出首帧后 resolve | 3.2 |
+| `configure` | `(options: MascotConfig) => void` | **可选**覆盖：资源根 / 动画配置 / 物理参数 | 3.1 |
+| `Mascot` | `class` | 一只已挂载的宠物 | 3.3 |
+| `Mascot.engine` | `MascotEngine` | 引擎实例，取仿真状态（`snapshot()` / `position()`）用 | 3.3 |
+| `Mascot.label` | `string` | 稳定标识，形如 `1-Neuron` | 3.3 |
+| `Mascot.destroy` | `() => void` | 移除宠物，释放 DOM / 定时器 / 监听器；**可重复调用** | 3.3 |
+| `assetBaseUrl` | `() => string` | 当前**生效**的资源基址（推导值或被覆盖值） | 3.4 |
+| `runtimeOptions` | `() => RuntimeSnapshot` | 当前生效的运行参数（含默认值） | 3.4 / 3.5 |
+| `isConfigured` | `() => boolean` | 是否显式调用过 `configure()`，仅诊断 | 3.4 |
+| `PACK_BASE_URL` | `string` | 推导出的资源基址 | 3.4 |
+| `DEFAULT_PACK_BASE_URL` | `string` | 兜底常量 `"/mascot_pack"` | 3.4 |
+| `resolveAssetBase` | `(url?: string) => string \| undefined` | 从模块 URL 推导包根目录，纯函数 | 3.4 |
+| `MascotEngine` | `class` | 高级用法，**不承诺稳定** | 3.4 |
+| `AnimationConfig` | `class` | 高级用法，**不承诺稳定** | 3.4 |
+| `BroadcastManager` | `class` | 高级用法，**不承诺稳定** | 3.4 |
+
+类型：`MascotOptions`、`MascotConfig`、`RuntimeOptions`、`RuntimeSnapshot`、`Pose`、`ActionNode`、`Behavior`、`Hotspot`、`EngineEvent`、`EngineObserver`。
+
+### 开发工具入口 `web-mascot/devtools`（13 个值 + 8 个类型）
+
+| 导出 | 签名 | 一句话 | 详见 |
+| --- | --- | --- | --- |
+| `attach` | `(options?: DevtoolsOptions) => boolean` | 打开**观测日志**；返回 `false` 表示没装任何东西 | 4.2 |
+| `configureLogging` | `(options: LogOptions) => void` | 打开库自身**诊断日志** | 4.1 |
+| `disableLogging` | `() => void` | 关掉诊断日志 | 4.3 |
+| `loggingState` | `() => { ... }` | 读诊断日志当前配置（内联对象类型） | 4.3 |
+| `consoleSink` | `(level?: LogLevel) => LogSinkEntry` | 现成的诊断输出目的地 | 4.3 |
+| `loggerFor` | `(channel: LogChannel) => Logger` | 取某通道的 logger | 4.3 |
+| `setLogSink` | `(sink: MascotLogSink) => void` | 观测日志的目的地（覆盖式，兼容旧用法） | 4.3 |
+| `addLogSink` | `(sink: MascotLogSink) => void` | 追加一个观测日志目的地 | 4.3 |
+| `startMascotLogRecorder` | `() => boolean` | 开始录制；无可用目的地时返回 `false` | 4.3 |
+| `stopMascotLogRecorder` | `() => void` | 停止录制 | 4.3 |
+| `isRecording` | `() => boolean` | 是否正在录制 | 4.3 |
+| `resetMascotLogRecorder` | `() => void` | 重置录制器状态 | 4.3 |
+| `MascotEngine` | `class` | 便于只用本入口的宿主也能拿到引擎 | 4.3 |
+
+类型：`DevtoolsOptions`、`MascotLogSink`、`MascotLogBatch`、`LogLevel`、`LogSink`、`LogRecord`、`LogChannel`、`LogOptions`。
+
+> **两处类型泄漏**（已知，暂未修）：`consoleSink()` 的返回类型 `LogSinkEntry`、`loggerFor()` 的返回类型 `Logger` 都没有从本入口导出，所以 TS 里无法显式标注这两个返回值。需要时用 `ReturnType<typeof consoleSink>` 绕开。
+
 ## 1. 入口与产物
 
 构建：
@@ -18,19 +99,24 @@ npm run build:lib     # 等价于 vue-tsc && vite build && tsc -p tsconfig.lib.j
 | `dist/devtools.js` | 开发工具入口（含记录器） |
 | `dist/chunks/MascotEngine-*.js` | 两个入口共享的引擎实现 |
 | `dist/types/**/*.d.ts` | 类型声明（由 `tsc` 直接产出） |
-| `dist/mascot_pack/**` | 精灵资源（由 Vite 从 `public/` 拷入） |
+| `dist/animation.config.json` | 默认动画配置档，可经 `web-mascot/animation.config.json` 导入 |
+| `dist/mascot_pack/**` | 精灵资源（由 Vite 从 `public/` 拷入）。每个 pack 还带自己的 `LICENSE` 与 `LICENSE-CC-BY-NC-SA-4.0.txt` |
+| `src/**` | 库源码，随包提供：既是 GPL 要求的对应源码，也让 sourcemap 能解析到真实文件 |
 
 `exports` 映射：
 
 ```json
 {
-  ".":              { "types": "./dist/types/index.d.ts",    "import": "./dist/index.js" },
-  "./devtools":     { "types": "./dist/types/devtools.d.ts", "import": "./dist/devtools.js" },
-  "./mascot_pack":  "./dist/mascot_pack",
-  "./mascot_pack/*": "./dist/mascot_pack/*",
-  "./package.json": "./package.json"
+  ".":                       { "types": "./dist/types/index.d.ts",    "import": "./dist/index.js",    "default": "./dist/index.js" },
+  "./devtools":              { "types": "./dist/types/devtools.d.ts", "import": "./dist/devtools.js", "default": "./dist/devtools.js" },
+  "./animation.config.json": "./dist/animation.config.json",
+  "./mascot_pack":           "./dist/mascot_pack",
+  "./mascot_pack/*":         "./dist/mascot_pack/*",
+  "./package.json":          "./package.json"
 }
 ```
+
+`exports` 是一份**严格白名单**：未列出的子路径在 Node 与打包器里都会解析失败（`ERR_PACKAGE_PATH_NOT_EXPORTED`）。所以 `web-mascot/dist/mascot_pack/...` 是**取不到**的，要按上面的映射走 `web-mascot/mascot_pack/...`。库源码 `src/**` 随包分发，但**不在** `exports` 里——它是给你读的，不是给你 import 的。
 
 因此导入形式为：
 
@@ -41,7 +127,7 @@ import { attach } from "web-mascot/devtools";
 
 `./mascot_pack/*` 是给**自己取资源**的宿主用的：需要按真实路径拿包内精灵时（自定义 loader、CDN 上传脚本、`new URL()`），可以直接引用该子路径。注意这是**打包器/Node 的模块解析**能力，浏览器运行时不会解析裸说明符 —— 页面里请用绝对 URL，例如 `/mascot_pack/Neuron/img/shime1.png`（这正是 `assetBaseUrl()` 的用途）。
 
-`vue` 是**开发依赖**，不是运行时依赖：库的两个入口都不导入 Vue（只有本仓库的 demo 应用 `src/main.ts` 用），包本身可在任何框架下使用。
+`vue` 是**开发依赖**，不是运行时依赖：库的两个入口都不导入 Vue（只有本仓库的 demo 应用 `src/main.ts` 用），包本身可在任何框架下使用。本包**没有运行时依赖**。
 
 ## 2. 最小用法（零配置）
 
@@ -69,7 +155,7 @@ function configure(options: MascotConfig): void
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `assets` | `string?` | 含每个 pack 目录的基址，**不带结尾斜杠**。省略则用推导值 `PACK_BASE_URL` |
+| `assets` | `string?` | 含每个 pack 目录的基址，**不带结尾斜杠**。省略则用推导值 `PACK_BASE_URL`。**当前是全局设置**：页面内所有宠物共用一个资源根 |
 | `animationConfigUrl` | `string?` | 动画配置文件 URL。省略则完全不发起请求，各 pack 使用自身设置 |
 | `runtime` | `RuntimeOptions?` | 仿真调参，见 3.5 |
 
@@ -81,6 +167,8 @@ function configure(options: MascotConfig): void
 - `animationConfigUrl` 遵循同一规则（快照于首次生效）。这不影响 `runtime`——运行参数是**每 tick 读取**的，改了立刻对已有宠物生效。
 - 全部字段可选，且多次调用会合并；只传 `runtime` 不会清掉之前的 `assets`。
 
+> **当前限制与路线图**：`assets` 是**全局**的（`MascotEngine.packBaseUrl` 是静态字段），所以"内置的 Neuron + 你自己放在别处的 MyPet"目前要求两者的 pack 目录位于同一个资源根下（把内置 pack 拷到你的静态目录即可）。**按宠物单独指定资源根在路线图上**，届时 `MascotOptions` 会新增可选的 `assets`，优先级为 per-mascot > 全局 > 推导默认值——纯追加，不会影响现在写好的代码。
+
 ### 3.2 `createMascot(options)`
 
 ```ts
@@ -90,7 +178,7 @@ function createMascot(options: MascotOptions): Promise<Mascot>
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `container` | `HTMLElement` | **锚点**：宠物属于文档的哪个位置 |
-| `pack` | `string` | pack 目录名，如 `"Neuron"` |
+| `pack` | `string` | **mascot key**：不透明标识，同时是动画配置 `mascots` 的索引键。当前实现里它等于 pack 目录名，如 `"Neuron"`；未来支持运行时导入用户模型后，它可能不再是目录名，所以不要把它当路径解析 |
 
 `container` 是**锚点语义**，不是裁剪框：宠物在**整个视口**内活动，`container` 只决定它属于文档的哪一处。当 `container` 被滚动出视口时，引擎会暂停这只宠物（`IntersectionObserver`）。这与 libshijima 的"桌宠属于桌面"不同，是网页场景下的等价物。
 
@@ -114,7 +202,7 @@ function createMascot(options: MascotOptions): Promise<Mascot>
 | `runtimeOptions()` | 当前生效的运行参数（含默认值） |
 | `DEFAULT_PACK_BASE_URL` | 兜底常量 `"/mascot_pack"` |
 | `resolveAssetBase(url?)` | 从模块 URL 推导包根目录；纯函数，便于自行诊断 |
-| `MascotEngine` / `AnimationConfig` / `BroadcastManager` | 高级用法，见 `dist/types/` |
+| `MascotEngine` / `AnimationConfig` / `BroadcastManager` | 高级用法，**不承诺语义化版本稳定性**（0.x 期间可能重构）。类型与全貌见 `dist/types/` |
 | 类型 `Pose` / `ActionNode` / `Behavior` / `Hotspot` / `EngineEvent` / `EngineObserver` / `RuntimeOptions` | — |
 
 ### 3.5 运行参数 `RuntimeOptions`
@@ -314,7 +402,7 @@ attach({
 
 ## 5. 资源要求（宿主必须处理）
 
-- **静态服务**：精灵文件在 `dist/mascot_pack/<Pack>/img/` 下，**多数没有扩展名**（Shimeji 资源格式），因此静态服务器必须给出正确的 `Content-Type`（`image/png`）。本仓库的 `vite.test-host.config.ts` 展示了手工服务写法。
+- **静态服务**：精灵文件在 `dist/mascot_pack/<Pack>/img/` 下。文件名必须与 XML 里 `<Pose Image="...">` 的值**完全一致**（本包内置的两只全是 `.png`，如 `Image="/shime1.png"`）；Shimeji 生态里也有不带扩展名的写法，所以静态服务器必须给出正确的 `Content-Type`（`image/png`），不能靠扩展名推断。本仓库的 `vite.test-host.config.ts` 展示了手工服务写法。
 - **pack 结构**：每个 pack 一个目录，`img/` 放精灵，XML 行为定义**直接位于 pack 根目录**（`actions.xml`、`behaviors.xml`），不在 `conf/` 之类子目录下；另有 `info.json`、`bubble_context.txt`。
 - **跨域**：资源与页面不同源时需允许 CORS（精灵以 `<img>` 加载，通常无需凭据）。
 
@@ -355,6 +443,15 @@ const mascot = await createMascot({ container: document.querySelector("#pet-root
 - 宿主可以用 CSS 移动挂载点（Firefly 的 `body.has-global-player #mascot-pet-anchor { transform: translateY(-4.5rem) }` 就是把它抬到播放器上方）。此时引擎会**从 DOM 测量**挂载点相对自己坐标系的位移（每个逻辑 tick 至多测一次，按下时强制重测），指针映射与热区/命中判定都以**实际绘制位置**为准 —— 否则点击会整体偏移，且不透明像素判定会把正常按下判成盒外。
 - 中间件只在 Vite dev/preview 下存在；发布构建请用 sink。
 
-## 8. 发布状态
+## 8. 发布状态与许可
 
-`version` 为 `0.0.0`，接口尚未承诺语义化版本稳定性。
+`version` 为 `0.0.2`。接口尚未承诺语义化版本稳定性：0.x 允许破坏性变更，其中 `MascotEngine` / `AnimationConfig` / `BroadcastManager` 属于**明确不稳定**的高级用法（见 3.4）。
+
+许可拆成两部分，不要混：
+
+| 部分 | 许可证 | 商用 |
+| --- | --- | --- |
+| 源码（`dist/`、`src/`） | `GPL-3.0-or-later` | ✅ 可以，但衍生作品须同样开源 |
+| 内置宠物包 `Neuron` / `Eviling` | `CC-BY-NC-SA-4.0` | ❌ **不可以** |
+
+`package.json` 声明的是 `"SEE LICENSE IN LICENSE"`，而**不是**单一 SPDX 标识——单一标识会被读成"整包同一许可"。包根 `LICENSE` 划定了上面两部分的适用范围，并附 GPLv3 与 CC BY-NC-SA 4.0 两份**全文**；`NOTICE` 载明上游署名、GPLv3 §7 附加条款以及对内嵌 pack 的修改声明。每个 pack 目录内另有自己的 `LICENSE` 与 `LICENSE-CC-BY-NC-SA-4.0.txt`。商业产品请自备素材包，或用 `configure({ assets })` 指向你自己的资源根。
