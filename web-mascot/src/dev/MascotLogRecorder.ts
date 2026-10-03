@@ -139,6 +139,7 @@ const log = loggerFor("observe");
 const session = new Date().toISOString().replace(/[:.]/g, "-");
 const startedAt = performance.now();
 const buffers = new Map<string, string[]>();
+const flushQueues = new Map<string, Promise<void>>();
 const trackers = new Map<string, MoveTracker>();
 /** Pets whose `spawn` this recorder has seen, so enable() knows what to synthesise. */
 const spawned = new Map<string, { x: number; y: number; behavior: string; mascot: string }>();
@@ -243,7 +244,8 @@ function allSinks(): MascotLogSink[] {
   return sinkCallback ? [sinkCallback, ...extraSinks] : extraSinks;
 }
 
-async function flush(pet: string, beacon: boolean) {
+async function flushNow(pet: string, beacon: boolean) {
+  if (disabled) return;
   const buffer = buffers.get(pet);
   if (!buffer || buffer.length === 0) return;
   const lines = buffer.splice(0, buffer.length);
@@ -251,6 +253,7 @@ async function flush(pet: string, beacon: boolean) {
   // Host-provided sinks win: they are how an embedded or packaged build receives
   // records, where the dev endpoint below does not exist.
   for (const sink of allSinks()) {
+    if (disabled) return;
     try {
       sink({ session, pet, lines });
     } catch {
@@ -261,6 +264,7 @@ async function flush(pet: string, beacon: boolean) {
     failures = 0;
     return;
   }
+  if (disabled) return;
   // The endpoint has to be permitted before anything is sent to it. A host that
   // declined it (`file: false` / `silent: true`) has said the route does not
   // exist, so posting anyway would only produce a 404 per batch — the records are
@@ -272,8 +276,7 @@ async function flush(pet: string, beacon: boolean) {
   }
   if (beacon && typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
     try {
-      navigator.sendBeacon(ENDPOINT, new Blob([body], { type: "application/json" }));
-      return;
+      if (navigator.sendBeacon(ENDPOINT, new Blob([body], { type: "application/json" }))) return;
     } catch {
       /* fall through to fetch */
     }
@@ -293,6 +296,16 @@ async function flush(pet: string, beacon: boolean) {
     if (current.length + lines.length <= MAX_REQUEUE_LINES) buffers.set(pet, lines.concat(current));
     if (failures >= 3) disable("log endpoint keeps failing");
   }
+}
+
+/** Serialize delivery per pet so batches cannot reorder under concurrent timers. */
+function flush(pet: string, beacon: boolean): Promise<void> {
+  const previous = flushQueues.get(pet) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(() => flushNow(pet, beacon));
+  flushQueues.set(pet, next.finally(() => {
+    if (flushQueues.get(pet) === next) flushQueues.delete(pet);
+  }));
+  return next;
 }
 
 function flushAll(beacon: boolean) {

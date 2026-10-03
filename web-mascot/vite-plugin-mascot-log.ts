@@ -44,6 +44,7 @@ export function mascotLog(options: MascotLogOptions): Plugin {
   const wantText = options.text ?? false;
   const sizes = new Map<string, number>();
   const textSizes = new Map<string, number>();
+  const writeQueues = new Map<string, Promise<void>>();
   let fsMod: any;
   let pathMod: any;
   let resolvedRoot: string | null = null;
@@ -115,6 +116,15 @@ export function mascotLog(options: MascotLogOptions): Plugin {
     sizeMap.set(file, size + bytes);
   }
 
+  function enqueueWrite(file: string, task: () => Promise<void>): Promise<void> {
+    const previous = writeQueues.get(file) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(task);
+    writeQueues.set(file, next.finally(() => {
+      if (writeQueues.get(file) === next) writeQueues.delete(file);
+    }));
+    return next;
+  }
+
   /** One record line per JSON line, prefixed with its own `t` for readability. */
   function toText(lines: string[]): string {
     let out = "";
@@ -143,12 +153,12 @@ export function mascotLog(options: MascotLogOptions): Plugin {
     await fs.mkdir(directory, { recursive: true });
 
     const payload = `${lines.join("\n")}\n`;
-    await appendFile(fs, file, payload, Buffer.byteLength(payload, "utf8"), sizes);
+    await enqueueWrite(file, () => appendFile(fs, file, payload, Buffer.byteLength(payload, "utf8"), sizes));
 
     if (wantText) {
       const textFile = path.join(directory, `pet-${pet}.txt`);
       const text = toText(lines);
-      await appendFile(fs, textFile, text, Buffer.byteLength(text, "utf8"), textSizes);
+      await enqueueWrite(textFile, () => appendFile(fs, textFile, text, Buffer.byteLength(text, "utf8"), textSizes));
     }
   }
 
