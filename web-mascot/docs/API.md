@@ -129,8 +129,8 @@ function createMascot(options: MascotOptions): Promise<Mascot>
 | `resistanceY` | `0.1` | 垂直空气阻力 |
 | `stayDurationTicks` | `250` | `Stay` 动作未自带 `Duration` 时的保持时长 |
 | `dragResistTicks` | `250` | 被拖住后静止多少 tick 开始挣扎 |
-| `dragResistAbortPx` | `5` | 挣扎期间多大的鼠标位移算挣脱 |
-| `dragOffsetX` / `dragOffsetY` | `0` / `120` | 被拖住时锚点距光标的偏移；pack 自带 `OffsetX/OffsetY` 时以其为准 |
+| `dragResistAbortPx` | `5` | 挣扎（`Resisting`）期间光标离锚点多远算挣脱；挣扎期间锚点不跟随（`resist::tick` 只比较），所以等价于"开始挣扎后鼠标移动了多少" |
+| `dragOffsetX` / `dragOffsetY` | `0` / `120` | 被拖住时锚点距**局部光标**的偏移；pack 自带 `OffsetX/OffsetY` 时以其为准。局部光标在按下时被播种，使第一个 tick 复现抓取时的锚点 —— 也就是**抓在哪里就从哪里跟手**，不会跳到固定握点（Qt `state::local_cursor` 的语义）。 |
 | `broadcastServeTimeoutTicks` | `600` | 广告方等待已被认领的伙伴多久 |
 | `suspectStepPx` | `24` | 单 tick 位移超过此值上报为跳变嫌疑 |
 
@@ -166,6 +166,23 @@ function createMascot(options: MascotOptions): Promise<Mascot>
   }
 }
 ```
+
+### 3.7 输入与手势（与 NeurolingsCE 对齐）
+
+鼠标交互按 NeurolingsCE 的 `ui/mascot/MascotHoldGesture.hpp`、`MascotWidget::pointInside()` 与 `manager::trigger_hotspot()` 实现：
+
+| 操作 | 行为 |
+| --- | --- |
+| 按下**透明像素** | 不属于宠物，不产生任何交互（`pointInside` 的 alpha 判定；跨域精灵读不到像素时退化为整个精灵盒） |
+| 按下**当前动画的 hotspot** | 只是候选，不立刻播行为 |
+| 候选按住 ≥ **260 ms** 且位移 ≤ **12 px** | 播该 hotspot 的行为，并在按住期间持续重发（对应 Qt 的 `prefer_next_behavior` 连播） |
+| 候选在 ≤ **400 ms** 内松手且位移 ≤ **6 px** | 视为**点击**，触发**松手点**下的 hotspot |
+| 候选位移 > **12 px** | 取消候选，转为**抓起**宠物（所以从头上开始拖也能抓起来） |
+| 按下非 hotspot 的不透明像素 | 立刻抓起 |
+
+hotspot 来自 pack 的 `actions.xml`（`<Hotspot Shape/Origin/Size Behavior>`），随当前动画变化；动画配置的 `denyBehaviors` 依旧过滤它们。
+
+被抓起时：锚点 = **局部光标** + `OffsetX/OffsetY`（缺省 `dragOffsetX/dragOffsetY`），局部光标在按下时播种，因此**抓在哪里就从哪里跟手**，不会跳到 pack 的固定握点。指针事件里即时重钉锚点、且拖拽期间不做绘制插值（Qt 每 10 ms 重钉一次，且 `dragged::requests_interpolation() == false`），所以高速拖动不会落后于指针。`Resisting` 期间锚点不跟随（`resist::tick` 只比较），光标离开 `dragResistAbortPx` 即中止挣扎。
 
 ## 4. 开发工具入口 `web-mascot/devtools`
 
@@ -335,6 +352,7 @@ const mascot = await createMascot({ container: document.querySelector("#pet-root
 - 引擎在**每页每实例**基础上工作；同时挂载的宠物越多，共享的 `BroadcastManager` 上互动机会越多。
 - 宠物的 `x`/`y` 是**虚拟单位**（1 单位 = 1 精灵像素，受动画配置的 `scale` 影响）。外部取坐标请用 `engine.position()` 或 `engine.snapshot()`，不要直接读 `x`/`y`。
 - `animationConfigUrl` 每页面只拉取一次；要重新读取需 `MascotEngine.reloadAnimationConfig()`。
+- 宿主可以用 CSS 移动挂载点（Firefly 的 `body.has-global-player #mascot-pet-anchor { transform: translateY(-4.5rem) }` 就是把它抬到播放器上方）。此时引擎会**从 DOM 测量**挂载点相对自己坐标系的位移（每个逻辑 tick 至多测一次，按下时强制重测），指针映射与热区/命中判定都以**实际绘制位置**为准 —— 否则点击会整体偏移，且不透明像素判定会把正常按下判成盒外。
 - 中间件只在 Vite dev/preview 下存在；发布构建请用 sink。
 
 ## 8. 发布状态
