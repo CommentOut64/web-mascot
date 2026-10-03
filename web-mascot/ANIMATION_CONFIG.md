@@ -1,30 +1,53 @@
 # 动画自定义配置（Animation configuration）
 
-配置文件默认位置：`web-mascot/public/animation.config.json`，运行时可从
-`/animation.config.json` 读取（也可以 `?config=/my.config.json` 指向别的文件）。
+引擎**自带一套默认预设**，宿主什么都不做就是它：普通静止约 8 秒即被推动（偏活跃），
+但晃腿这类长静止序列允许完整播完再回主池。这份预设的**唯一事实源**是库源码里的
+`src/core/animationPreset.ts`；构建时同一份数据会生成 `dist/animation.config.json`
+（也就是 `web-mascot/animation.config.json`），供想要一份文件来改的宿主取用 —— 两者不会漂移。
 
+生效的配置按下面的优先级叠加，后写的覆盖先写的（**逐字段**，对象型字段按 key 合并）：
+
+```
+内置预设  →  文件 / 运行时下发的 defaults  →  reducedMotion（系统要求减少动效时）  →  mascots.<宠物名>
+```
+
+配置文件默认从 `/animation.config.json` 读取（也可以 `?config=/my.config.json` 指向别的文件）。
 一份配置同时管五件事：**出现哪些行为、各行为多大概率、各动作持续多久、多久换一次行为、
-宠物出现在哪里、以及活动区域**。**不提供内置预设**——下面每个字段都可以按宿主页面自行组合。
+宠物出现在哪里、以及活动区域**。
 
 ## 生效方式
 
 | 方式 | 用法 |
 |---|---|
-| 改文件 | 保存 `public/animation.config.json` → 刷新页面（Vite 会自动刷新），或控制台 `__mascotConfig.reload()` |
+| 改文件 | 把 `animation.config.json` 放进站点静态根（或 `?config=` 指定）→ 刷新页面，或控制台 `__mascotConfig.reload()` |
+| 改内置预设 | 编辑 `src/core/animationPreset.ts` 后重新构建 —— 它同时决定运行时默认值与随包附带的 `dist/animation.config.json` |
 | 换文件 | URL 加 `?config=/my.config.json` |
 | 运行时下发 | `__mascotConfig.set({ defaults: {...}, mascots: {...} })` —— 立即作用于**已在运行**的宠物 |
 | 读回生效值 | `__mascotConfig.get()`（文件形状）/ `__mascotConfig.get("Neuron")`（该宠物的解析结果） |
 | 看广播状态 | `__mascotConfig.broadcasts()` —— 当前存活的可互动告示（`{CuddleNeuro: 1, ...}`） |
 | 代码内嵌 | `MascotEngine.setAnimationConfig(obj)` / `loadAnimationConfig(url)` / `reloadAnimationConfig(url)` |
 
-文件缺失或格式错误时**回退到 pack 原本的行为**，不会影响宠物运行。每次 `Spawn` 时，生效配置的
-摘要会写进观测日志（`k:"spawn"` 的 `config` 字段 + `k:"config"` 明细行），便于事后核对。
+文件缺失或格式错误时，配置退回**引擎内置预设**（若文件里写了 `ignoreBuiltin: true`，则退回 pack 原生行为），不会影响宠物运行。引擎每页会探测一次默认路径，所以没有这个文件的站点会看到**一次预期内的 404** —— 不影响运行，也不产生控制台噪音。
+
+每次 `Spawn` 时，生效配置的摘要会写进观测日志（`k:"spawn"` 的 `config` 字段 + `k:"config"` 明细行），便于事后核对；摘要里的 `source=…` 会带 `+builtin` / `no-builtin`，一眼能看出内置预设是否生效。
+
+### 三档用法（最容易混的地方）
+
+| 想要 | 怎么写 |
+|---|---|
+| 引擎默认（内置的活跃预设） | 什么都不做 |
+| 在内置预设之上微调 | 文件里只写要改的字段：`{"defaults":{"forcedSwitchTicks":400}}` |
+| 纯正原版（pack 原生：无 pacer、无权重覆盖、无长序列豁免） | `{"version":1,"ignoreBuiltin":true}` —— **文件里只写这一项**；或代码里 `configure({ ignoreBuiltin: true })` / `setAnimationConfig({ ignoreBuiltin: true })` |
+
+`ignoreBuiltin` 关掉的是**内置预设这一层**，不是"整个配置"：它与 `defaults` 正交，所以
+`{"ignoreBuiltin":true,"defaults":{"forcedSwitchTicks":300}}` 得到的是「pack 原生 + 300 tick 的 pacer」。
 
 ## 字段
 
 ```jsonc
 {
   "version": 1,
+  "ignoreBuiltin": false, // true = 丢弃内置预设这一层（与下面的 defaults 正交，不会禁用本文件）
   "respectReducedMotion": true,
   "defaults": { /* 对所有宠物生效 */ },
   "mascots": { "Neuron": { /* 覆盖 defaults */ }, "Eviling": { } },
@@ -351,18 +374,38 @@ on=Floor n=11 total=830  partnerShare=0.0%     ← 强制移动时的池子：�
 }
 ```
 
-## 网页版默认档的取值理由
+## 内置默认档的取值理由
 
-默认配置（`public/animation.config.json`）是按「**网页宠物**，不是桌面宠物」定的：
+内置预设（`src/core/animationPreset.ts`，并原样出现在 `dist/animation.config.json`）是按
+「**网页宠物**，不是桌面宠物」定的 —— 不显得呆，但也不把 pack 本来设计好的长动画掐断：
 
 | 取值 | 为什么 |
 |---|---|
-| `forcedSwitchTicks: 250`（10 s） | 访客对装饰元素的注意力窗口约 5–15 s；静止超过 10 s 就可能一直没被看到在动 |
-| `maxBehaviorTicks: 375`（15 s） | 桌面 pack 允许一次爬墙 40–50 s，网页上太长 |
+| `forcedSwitchTicks: 200`（8 s） | 访客对装饰元素的注意力窗口约 5–15 s；静止超过 8 s 就可能一直没被看到在动 |
+| `pacerExemptBehaviors: ["SitWhileDanglingLegs"]` | pacer 的"静止"按**位置是否变化**判定，坐着晃腿这种速度为零的长序列也会命中，所以必须豁免，否则它永远播不完 |
+| `exitToPoolBehaviors: ["SitWhileDanglingLegs"]` | 与上一条配套：pack 的 `SitAndFaceMouse` 用 `Add="false"` 构成闭链，不回主池就再也出不来 |
+| `maxBehaviorTicks: 1100`（44 s） | pacer 只管静止，这条兜住其余行为；放在晃腿序列长度之上，让那一段播完 |
+| `behaviorWeights: { SitWhileDanglingLegs: 150, SitAndFaceMouse: 8 }` | 两个 pack 原生都给它 `50`，而它是最有戏的动作；`SitAndFaceMouse` 是上面那个闭链的入口，压低 |
+| `spawn: { topOffset: 100, staggerPx: 180 }` | 顶部落下；多只宠物按 ±180 px 交替错开（大于 128 px 的精灵宽），不叠在一起 |
+
+### 可选示例：更克制的网页档
+
+早期随包附带的 `animation.config.json` 是另一套取向：节奏更慢、禁掉鼠标追人、宠物缩放 1.25，
+并用 `partnerWeights` 让两只更容易互动。想换成这一套，就把它整块写进你的 `defaults`
+（它会覆盖内置预设的同名字段）：
+
+| 取值 | 为什么 |
+|---|---|
+| `forcedSwitchTicks: 750`（30 s） | 让地板上的坐/趴接近 pack 原意，页面又不会定格 |
+| `maxBehaviorTicks: 900`（36 s） | 单个行为的兜底 |
 | `maxTravelPx: 240` | 桌面宠物可以横穿整个屏幕，网页宠物会踩到正文 |
-| `partnerWeights: {alone: 40, withPartner: 1200}` + `scanDistancePx: 520` | 单只时不空转，两只时能真的互动 |
+| `partnerWeights: {alone: 40, withPartner: 150, reachable: 1800}` + `scanDistancePx: 520` | 单只时不空转；"对方同高度且在半径内"时加码，两只才真的抱得上 |
 | `denyBehaviors: ["ChaseMouse"]` | 不要一有鼠标移动就冲过去；`SitAndFaceMouse` 只是转头，保留 |
-| `spawn: {vertical: "top", x: "center", staggerPx: 180}` | 顶部落下（默认），多只宠物按 ±180 px 交替错开，不叠在一起 |
+| `scale: 1.25` | 128 px 素材下 1.25 尚可、1.5 起明显发虚 |
+| `actionDurations: { HoldOntoWall: 120, … }` | 只掐"该赶紧下来"的动作（挂墙/攀爬/爬行），而不是全局上限 |
+
+> 下面的实测对照来自**历史迭代**（pacer 250 / cap 375 那一版），保留是为了说明各旋钮的作用量级；
+> 它既不是内置预设的数字，也不是上面这套示例档的数字。
 
 ### 实测对照（40 ms tick，两只宠物约 240 s）
 

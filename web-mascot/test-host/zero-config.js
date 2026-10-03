@@ -1,10 +1,15 @@
 /**
- * Zero-configuration verification host.
+ * Unbundled-host verification page (bare ESM only).
  *
  * The one thing this proves, which `main.js` deliberately does *not*: a host that
  * never calls `configure()` still gets working sprites, because the asset base URL
  * is derived from the library module's own location. It also reports the derived
  * URL and proves the sprite actually decoded, so a silent 404 cannot pass.
+ *
+ * Scope: that only holds while the library module is served *in place* — this host
+ * aliases the bare specifier to `dist/index.js` and serves `dist/mascot_pack` at
+ * the derived URL. It says nothing about a bundler, which relocates the module and
+ * therefore needs `configure({ assets })` (see `main.js` and the README).
  */
 import { createMascot, PACK_BASE_URL, assetBaseUrl } from "web-mascot";
 

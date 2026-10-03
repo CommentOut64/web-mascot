@@ -1,10 +1,15 @@
-import { XMLParser } from "./XMLParser";
-import { AnimationConfig } from "./AnimationConfig";
-import { BroadcastManager, ClientHandle, Interaction, ServerState } from "./Broadcast";
-import { hotspotAt } from "./Hotspot";
-import { registerMascotPage } from "./MascotPageCoordinator";
-import type { Hotspot } from "./Hotspot";
-import type { ActionNode, AnimationVariant, Behavior, BehaviorReference, MascotConfig, Pose } from "./types";
+import { XMLParser } from "./XMLParser.js";
+import { AnimationConfig } from "./AnimationConfig.js";
+import { BroadcastManager, ClientHandle, Interaction, ServerState } from "./Broadcast.js";
+import { hotspotAt } from "./Hotspot.js";
+import { registerMascotPage } from "./MascotPageCoordinator.js";
+import { evaluateExpression } from "./ExpressionEvaluator.js";
+import { loggerFor } from "./Logger.js";
+import type { Hotspot } from "./Hotspot.js";
+import type { ActionNode, AnimationVariant, Behavior, BehaviorReference, MascotConfig, Pose } from "./types.js";
+
+const expressionLog = loggerFor("engine");
+const loggedExpressionFailures = new Set<string>();
 
 /**
  * Runtime tuning. Every field here is a *number the simulation reads*, exposed so a
@@ -44,6 +49,8 @@ export interface RuntimeOptions {
   suspectStepPx?: number;
 }
 
+export type RuntimeSnapshot = Readonly<Required<RuntimeOptions>>;
+
 const RUNTIME_DEFAULTS: Required<RuntimeOptions> = {
   tickMs: 40,
   gravity: 2,
@@ -61,13 +68,45 @@ const RUNTIME_DEFAULTS: Required<RuntimeOptions> = {
 /** Live tuning; read by the simulation, so it can be changed between ticks. */
 let runtime: Required<RuntimeOptions> = { ...RUNTIME_DEFAULTS };
 
+/**
+ * Add every sprite a pack action node can show to `urls`.
+ *
+ * A `<Pose>` may carry no `Image` (the shipped packs use one as a bare delay): it
+ * has nothing to preload, and `spriteUrl("")` would request the `img` directory
+ * itself, which the dev server answers with a 500 and an error overlay on the
+ * host page.
+ */
+function collectSpriteUrls(node: ActionNode, urls: Set<string>, toUrl: (image: string) => string): void {
+  for (const pose of node.poses ?? []) if (pose.image) urls.add(toUrl(pose.image));
+  for (const animation of node.animations ?? []) {
+    for (const pose of animation.poses) if (pose.image) urls.add(toUrl(pose.image));
+  }
+  for (const child of node.children ?? []) collectSpriteUrls(child, urls, toUrl);
+}
+
 /** Counterpart of `RuntimeOptions`, without repeating every default. */
 function mergeRuntime(options: RuntimeOptions | undefined): Required<RuntimeOptions> {
   const merged = { ...runtime };
+  const limits: Record<keyof RuntimeOptions, readonly [number, number]> = {
+    tickMs: [1, 1000],
+    gravity: [-1000, 1000],
+    resistanceX: [0, 1],
+    resistanceY: [0, 1],
+    stayDurationTicks: [1, 1_000_000],
+    dragResistTicks: [1, 1_000_000],
+    dragResistAbortPx: [0, 100_000],
+    dragOffsetX: [-100_000, 100_000],
+    dragOffsetY: [-100_000, 100_000],
+    broadcastServeTimeoutTicks: [1, 1_000_000],
+    suspectStepPx: [0, 100_000],
+  };
   if (!options) return merged;
   for (const key of Object.keys(RUNTIME_DEFAULTS) as (keyof RuntimeOptions)[]) {
     const value = options[key];
-    if (typeof value === "number" && Number.isFinite(value)) merged[key] = value;
+    if (typeof value === "number" && Number.isFinite(value)) {
+      const [min, max] = limits[key];
+      merged[key] = Math.min(max, Math.max(min, value));
+    }
   }
   return merged;
 }
@@ -91,6 +130,18 @@ const MAX_CURSOR_STEP = 80;
 
 /** dragged::subtick() resets that timer once the cursor moves 5/subtick_count px. */
 const DRAG_STILL_EPSILON = 1.25;
+/**
+ * Gesture policy for a press on a hotspot, copied from NeurolingsCE's
+ * `ui/mascot/MascotHoldGesture.hpp`: the press is only a *candidate* — it becomes the
+ * hotspot's hold behaviour after `HOLD_TRIGGER_MS`, counts as a click when released
+ * inside the click tolerances, and turns into a pickup once the pointer travels
+ * farther than the hold tolerance. libshijima itself only owns the "is the cursor on
+ * a hotspot" test (`animation::handle_dragging`); the rest is app policy.
+ */
+const HOLD_TRIGGER_MS = 260;
+const HOLD_MOVEMENT_TOLERANCE_PX = 12;
+const CLICK_MOVEMENT_TOLERANCE_PX = 6;
+const CLICK_DURATION_MS = 400;
 /** resist::tick(): this much cursor movement aborts the struggle. */
 
 /** dragged::subtick() offsets: the anchor is placed this far from the cursor
@@ -100,6 +151,8 @@ const DRAG_STILL_EPSILON = 1.25;
 /** libshijima's `mascot::tick::reached_init_limit()`: a behaviour chain that keeps
  *  ending instantly must not loop for ever inside a single tick. */
 const MAX_BEHAVIOR_INITS_PER_TICK = 20;
+/** Maximum synchronous action-tree expansion work in one logic tick. */
+const MAX_ACTION_EXPANSIONS_PER_TICK = 200;
 /**
  * How long an advertiser holds its pose for a scanner that has already claimed its
  * affordance but has not arrived yet.
@@ -224,8 +277,15 @@ export class MascotEngine {
   private static animationConfig = new AnimationConfig();
   private static animationConfigLoad: Promise<void> | null = null;
   private static animationConfigSetExplicitly = false;
+  /**
+   * Host-level answer to "should the built-in preset apply?", set through
+   * `configure({ ignoreBuiltin })`. `null` means "whatever the file says", which
+   * `AnimationConfig` tracks on its own.
+   */
+  private static builtinPreference: boolean | null = null;
   /** Affordance registry, shared by every mascot in the page (broadcast/manager). */
   private static broadcasts = new BroadcastManager();
+  private static globalEventsInstalled = false;
   /** Removes the reduced-motion listener again; null while none is installed. */
   private static reducedMotionWatcher: (() => void) | null = null;
   /** Default location of the editable configuration file. */
@@ -301,6 +361,49 @@ export class MascotEngine {
    *  from. The pack's own Pinched action reads it to choose its pose. */
   private footX = 0;
   private footDX = 0;
+  /**
+   * Qt `state::local_cursor` (see `state::get_raw_cursor()`): while the mascot is
+   * held, the cursor the simulation reads is the pointer *plus this drag's grab
+   * offset*, seeded when the drag starts so that `anchor = cursor + OffsetX/OffsetY`
+   * reproduces the anchor the mascot had when it was picked up. Without it the first
+   * held tick snaps the mascot to the pack's fixed hold point — measured 108 px for a
+   * grab 12 px above the feet — because the old code kept only the *fixed* offsets.
+   * `null` means "no drag in progress, the pointer is the cursor".
+   */
+  private dragGrab: { x: number; y: number } | null = null;
+  /** Anchor and pointer at mousedown, in virtual units, so the grab offset can be
+   *  derived on the first held tick — which is when the action's own OffsetX/OffsetY
+   *  (the values Qt seeds the local cursor from) are known. */
+  private dragPressAnchorX = 0;
+  private dragPressAnchorY = 0;
+  private dragPressCursorX = 0;
+  private dragPressCursorY = 0;
+  /**
+   * Press bookkeeping for the hotspot gesture (HOLD_TRIGGER_MS …). A press is
+   * tracked until the button is released, because which gesture it is (hold, click or
+   * pickup) is only decided by how long and how far the pointer moved.
+   */
+  private pressActive = false;
+  private pressStartAt = 0;
+  private pressClientX = 0;
+  private pressClientY = 0;
+  /** Largest Manhattan distance the pointer travelled during this press. */
+  private pressMaxMovement = 0;
+  /** The hotspot the press landed on, while it can still become a hold or a click. */
+  private hotspotHold: Hotspot | null = null;
+  private hotspotHoldTriggered = false;
+  /** Buttons currently held, as reported by the last pointer event. Qt queries
+   *  `QGuiApplication::mouseButtons()` per tick so a release that never arrives
+   *  cannot leave a press or a drag stuck; this is the DOM's equivalent. */
+  private cursorButtons = 0;
+  /** Offscreen copy of the frame the mascot is showing, for the opaque-pixel hit
+   *  test (`ShijimaWidget::pointInside`). Re-read whenever the image changes. */
+  private alphaCanvas: HTMLCanvasElement | null = null;
+  private alphaData: ImageData | null = null;
+  private alphaSrc = "";
+  /** Cached host-CSS offset between this engine's coordinates and the drawn anchor
+   *  (see `hostShift()`); refreshed at most once per logic tick. */
+  private hostShiftCache = { x: 0, y: 0, tick: -1 };
   /** Change detection for the observation stream. */
   private observedPath = "";
   private observedImage = "";
@@ -332,6 +435,7 @@ export class MascotEngine {
   private interactionCooldownUntil = 0;
   /** Behaviours initialised in the current tick, for the runaway guard. */
   private behaviorInitsThisTick = 0;
+  private actionExpansionsThisTick = 0;
   /** Affordance state (see Broadcast.ts). Advertisements and scan links belong to
    *  the action instance and live on its frame; the handshake belongs to the
    *  mascot, because its behaviour is what the partner is waiting on. */
@@ -352,6 +456,90 @@ export class MascotEngine {
 
   public static addObserver(observer: EngineObserver) {
     MascotEngine.observers.add(observer);
+  }
+
+  /** One page-level dispatcher handles events for all mascots. */
+  private static installGlobalEvents(): void {
+    if (MascotEngine.globalEventsInstalled || typeof window === "undefined") return;
+    MascotEngine.globalEventsInstalled = true;
+    window.addEventListener("mousemove", (event) => {
+      for (const engine of MascotEngine.liveEngines) {
+        engine.cursorX = event.clientX;
+        engine.cursorY = event.clientY;
+        engine.cursorButtons = event.buttons;
+        if (engine.pressActive) {
+          if ((event.buttons & 1) === 0) {
+            // `MascotHoldGesture::leftButtonIsDown`: a release that never reached the
+            // window must not leave a press (or a drag) stuck.
+            engine.finishPress(event.clientX, event.clientY);
+          } else {
+            engine.updatePressMovement();
+            // Qt re-pins the anchor once per 10 ms subtick; doing it on every pointer
+            // event is what keeps a fast drag from trailing the cursor.
+            if (engine.isDragging) engine.applyDragAnchor();
+          }
+        }
+        if (!engine.isDragging) engine.elRoot.style.cursor = engine.hotspotUnderCursor(event.clientX, event.clientY) ? "pointer" : "grab";
+      }
+    });
+    window.addEventListener("mouseup", (event) => {
+      for (const engine of MascotEngine.liveEngines) {
+        engine.cursorButtons = event.buttons;
+        // ShijimaWidget::mouseReleaseEvent(): click or throw, decided by the gesture.
+        if (engine.pressActive) engine.finishPress(event.clientX, event.clientY);
+      }
+    });
+    document.addEventListener("visibilitychange", () => {
+      for (const engine of MascotEngine.liveEngines) {
+        if (document.hidden) {
+          if (engine.isDragging) {
+            engine.endDrag();
+            engine.setBehavior("Thrown", "drag-release");
+          }
+          // MascotHoldGesture::cancelsForEvent(Hide): a hidden page drops the press.
+          engine.cancelPress();
+          window.clearTimeout(engine.scrollDebounceTimer);
+          engine.setPauseReason("hidden", true);
+        } else engine.setPauseReason("hidden", false);
+      }
+    });
+    window.addEventListener("resize", () => {
+      for (const engine of MascotEngine.liveEngines) {
+        window.clearTimeout(engine.resizeTimer);
+        engine.resizeTimer = window.setTimeout(() => {
+          const borderBefore = engine.currentBorderAt(undefined);
+          engine.partnerCache.clear();
+          engine.travelCache.clear();
+          engine.borderStartCache.clear();
+          engine.behaviorUsability.clear();
+          engine.clampToWorkArea();
+          const area = engine.area();
+          for (const frame of engine.actionStack) {
+            if (typeof frame.resolved.TargetX === "number") frame.resolved.TargetX = Math.max(area.left, Math.min(area.right, frame.resolved.TargetX));
+            if (typeof frame.resolved.TargetY === "number") frame.resolved.TargetY = Math.max(area.top, Math.min(area.bottom, frame.resolved.TargetY));
+          }
+          const borderAfter = engine.currentBorderAt(undefined);
+          if (borderBefore && !borderAfter && !/Jump|Fall|Thrown|Dragged/i.test(engine.currentBehavior?.name || "")) engine.setBehavior("Fall", "resize-border-lost");
+        }, 200);
+      }
+    });
+    window.addEventListener("scroll", () => {
+      for (const engine of MascotEngine.liveEngines) {
+        const delta = window.scrollY - engine.lastScrollY;
+        engine.lastScrollY = window.scrollY;
+        if (delta === 0) continue;
+        engine.isScrolling = true;
+        engine.scrollDirection = delta > 0 ? 1 : -1;
+        engine.pendingScrollShift += delta / engine.spriteScale;
+        engine.scrollStopPending = false;
+        window.clearTimeout(engine.scrollDebounceTimer);
+        engine.scrollDebounceTimer = window.setTimeout(() => {
+          engine.isScrolling = false;
+          engine.scrollDirection = 0;
+          engine.scrollStopPending = true;
+        }, 160);
+      }
+    });
   }
 
   public static removeObserver(observer: EngineObserver) {
@@ -385,12 +573,24 @@ export class MascotEngine {
    * fetched once and then cached for the page, so a later change is only picked up
    * by `reloadAnimationConfig()`.
    */
-  public static configure(options: { packBaseUrl?: string; animationConfigUrl?: string }): void {
+  public static configure(options: {
+    packBaseUrl?: string;
+    animationConfigUrl?: string;
+    /** True drops the built-in animation preset for this page; false is the default. */
+    ignoreBuiltin?: boolean;
+  }): void {
     if (options.packBaseUrl) {
       MascotEngine.packBaseUrl = options.packBaseUrl.replace(/\/+$/, "");
     }
     if (options.animationConfigUrl && !MascotEngine.animationConfigUrl) {
       MascotEngine.animationConfigUrl = options.animationConfigUrl;
+    }
+    if (options.ignoreBuiltin !== undefined) {
+      // Remembered as a page-level preference instead of being written into the
+      // current instance, because a configuration file may replace that instance
+      // later: `applyBuiltinPreference()` re-applies it afterwards.
+      MascotEngine.builtinPreference = options.ignoreBuiltin;
+      MascotEngine.applyBuiltinPreference();
     }
   }
 
@@ -404,14 +604,14 @@ export class MascotEngine {
    * from the old values (a mascot mid-fall keeps its velocity), so a change is
    * smooth rather than instantaneous.
    */
-  public static setRuntimeOptions(options: RuntimeOptions): Required<RuntimeOptions> {
+  public static setRuntimeOptions(options: RuntimeOptions): RuntimeSnapshot {
     runtime = mergeRuntime(options);
-    return runtime;
+    return Object.freeze({ ...runtime });
   }
 
   /** The tuning currently in effect. */
-  public static getRuntimeOptions(): Required<RuntimeOptions> {
-    return runtime;
+  public static getRuntimeOptions(): RuntimeSnapshot {
+    return Object.freeze({ ...runtime });
   }
 
   /** The asset base URL in effect, for diagnostics and for hosts that build their
@@ -426,14 +626,45 @@ export class MascotEngine {
    * `loadAnimationConfig()` is called again with `force`.
    */
   public static setAnimationConfig(file: unknown, source = "(programmatic)"): AnimationConfig {
+    // An explicit object that carries the flag also updates the page-level
+    // preference; otherwise the last `configure({ ignoreBuiltin })` stays in force.
+    const flag = (file as { ignoreBuiltin?: unknown } | null | undefined)?.ignoreBuiltin;
+    if (typeof flag === "boolean") MascotEngine.builtinPreference = flag;
     MascotEngine.animationConfig = new AnimationConfig(file, source);
     MascotEngine.animationConfigSetExplicitly = true;
+    MascotEngine.applyBuiltinPreference();
+    MascotEngine.watchReducedMotion();
     return MascotEngine.animationConfig;
   }
 
   /**
-   * Read the configuration file once and keep it. Missing or invalid files leave
-   * the mascots on the pack's own settings, so this never breaks the app.
+   * Re-apply the page-level `ignoreBuiltin` preference to the configuration in
+   * effect.
+   *
+   * `toJSON()` hands back the host's own layer only, so re-seeding it never bakes
+   * the built-in preset into anything; a page that never passes the flag keeps
+   * whatever the file said.
+   */
+  private static applyBuiltinPreference(): void {
+    const preference = MascotEngine.builtinPreference;
+    if (preference === null) return;
+    const current = MascotEngine.animationConfig;
+    const host = current.toJSON();
+    if ((host.ignoreBuiltin === true) === preference) return;
+    MascotEngine.animationConfig = new AnimationConfig(
+      { ...host, ignoreBuiltin: preference },
+      current.source,
+    );
+  }
+
+  /**
+   * Read the configuration file once and keep it. A missing or invalid file leaves
+   * the built-in preset in place (or the packs' own settings, when the page asked
+   * for `ignoreBuiltin`), so this never breaks the app.
+   *
+   * Probing the classic path is the price of the "just drop a file at
+   * `/animation.config.json`" workflow: a host that has no file sees one expected
+   * 404 per page load, and nothing else.
    */
   public static loadAnimationConfig(url?: string): Promise<void> {
     if (url) MascotEngine.animationConfigUrl = url;
@@ -443,18 +674,25 @@ export class MascotEngine {
       try {
         const controller = new AbortController();
         const timer = window.setTimeout(() => controller.abort(), 3000);
-        const response = await fetch(target, { cache: "no-store", signal: controller.signal });
-        window.clearTimeout(timer);
-        const contentType = response.headers.get("content-type") ?? "";
-        if (!response.ok || !contentType.includes("json")) return;
-        const file: unknown = await response.json();
-        if (!MascotEngine.animationConfigSetExplicitly) {
-          MascotEngine.animationConfig = new AnimationConfig(file, target);
+        try {
+          const response = await fetch(target, { cache: "no-store", signal: controller.signal });
+          const contentType = response.headers.get("content-type") ?? "";
+          if (!response.ok || !contentType.includes("json")) return;
+          const file: unknown = await response.json();
+          if (!MascotEngine.animationConfigSetExplicitly) {
+            MascotEngine.animationConfig = new AnimationConfig(file, target);
+          }
+          MascotEngine.applyBuiltinPreference();
+        } finally {
+          window.clearTimeout(timer);
         }
       } catch {
-        /* no configuration file, or it is unreachable: keep the pack defaults */
+        /* no configuration file, or it is unreachable: keep the current settings */
+      } finally {
+        // Runs on the "no file" path too: the OS reduced-motion preference has to
+        // be followed whether or not this site happens to serve a file.
+        MascotEngine.watchReducedMotion();
       }
-      MascotEngine.watchReducedMotion();
     })();
     return MascotEngine.animationConfigLoad;
   }
@@ -469,7 +707,7 @@ export class MascotEngine {
   private static watchReducedMotion() {
     MascotEngine.animationConfig.refreshReducedMotion();
     if (MascotEngine.reducedMotionWatcher) return;
-    if (typeof window.matchMedia !== "function") return;
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
     try {
       const query = window.matchMedia("(prefers-reduced-motion: reduce)");
       const listener = () => MascotEngine.animationConfig.setReducedMotion(query.matches);
@@ -529,6 +767,7 @@ export class MascotEngine {
     this.elImg.style.height = `${SPRITE_WIDTH}px`;
     this.elRoot.appendChild(this.elImg);
     this.bindEvents();
+    MascotEngine.installGlobalEvents();
   }
 
   public async init() {
@@ -551,6 +790,7 @@ export class MascotEngine {
     // as a flicker on every pose change.
     this.preloadSprites();
     await this.warmFirstPose();
+    if (this.destroyed) return;
     // Do not expose the fixed box while the first real bitmap is still pending.
     // This prevents the browser's empty-image placeholder from flashing at (0, 0).
     this.elRoot.style.visibility = "visible";
@@ -576,18 +816,9 @@ export class MascotEngine {
     const actions = this.config?.actions;
     if (!actions) return;
     const urls = new Set<string>();
-    // A `<Pose>` may carry no `Image` (the shipped packs use one as a bare delay).
-    // It has nothing to preload, and `spriteUrl("")` would request the `img`
-    // directory itself, which the dev server answers with a 500 and an error
-    // overlay on the host page.
-    const collect = (node: ActionNode) => {
-      for (const pose of node.poses ?? []) if (pose.image) urls.add(this.spriteUrl(pose.image));
-      for (const animation of node.animations ?? []) {
-        for (const pose of animation.poses) if (pose.image) urls.add(this.spriteUrl(pose.image));
-      }
-      for (const child of node.children ?? []) collect(child);
-    };
-    for (const node of Object.values(actions)) collect(node);
+    for (const node of Object.values(actions)) {
+      collectSpriteUrls(node, urls, (image) => this.spriteUrl(image));
+    }
     for (const url of urls) {
       if (MascotEngine.preloaded.has(url)) continue;
       MascotEngine.preloaded.add(url);
@@ -597,22 +828,42 @@ export class MascotEngine {
     }
   }
 
-  /** Decode the pose that will be painted first, so even the spawn has no gap.
+  /** Decode the poses the spawn paints, so even the landing sequence has no gap.
    *  Bounded by a timeout: a slow network must never delay the mascot. */
   private async warmFirstPose(): Promise<void> {
     const pose = this.currentPose() ?? this.firstPose();
     if (!pose || !pose.image) return;
-    const image = new Image();
-    image.src = this.spriteUrl(pose.image);
-    const decode = typeof image.decode === "function" ? image.decode().catch(() => undefined) : Promise.resolve();
-    await Promise.race([decode, new Promise((resolve) => window.setTimeout(resolve, 1500))]);
+
+    // The whole "Fall" tree is warmed (it carries Bouncing, Stand and friends): a
+    // landing sequence whose frames arrive one by one flashes empty sprites.
+    const first = this.spriteUrl(pose.image);
+    const urls = new Set<string>([first]);
+    const spawnAction = this.config?.actions?.["Fall"];
+    if (spawnAction) collectSpriteUrls(spawnAction, urls, (image) => this.spriteUrl(image));
+
+    // The instances are kept: the first pose's bitmap is what seeds the sprite box
+    // below, and `naturalWidth` is only trustworthy on the instance that has
+    // actually finished decoding.
+    const images = new Map<string, HTMLImageElement>();
+    const decodes: Promise<void>[] = [];
+    for (const url of urls) {
+      const image = new Image();
+      images.set(url, image);
+      image.src = url;
+      decodes.push(
+        typeof image.decode === "function" ? image.decode().catch(() => undefined) : Promise.resolve(),
+      );
+    }
+    await Promise.race([Promise.all(decodes), new Promise((resolve) => window.setTimeout(resolve, 1500))]);
+
     // Seed the sprite box before the first frame so the initial paint already has
-    // a real size (the warm-up image is decoded, so its bitmap size is known).
-    if (image.naturalWidth > 0) {
-      this.elImg.style.width = `${image.naturalWidth}px`;
-      this.elImg.style.height = `${image.naturalHeight}px`;
-      this.elRoot.style.width = `${image.naturalWidth}px`;
-      this.elRoot.style.height = `${image.naturalHeight}px`;
+    // a real size (this image is decoded, so its bitmap size is known).
+    const warm = images.get(first);
+    if (warm && warm.naturalWidth > 0) {
+      this.elImg.style.width = `${warm.naturalWidth}px`;
+      this.elImg.style.height = `${warm.naturalHeight}px`;
+      this.elRoot.style.width = `${warm.naturalWidth}px`;
+      this.elRoot.style.height = `${warm.naturalHeight}px`;
     }
   }
 
@@ -747,6 +998,9 @@ export class MascotEngine {
     window.clearTimeout(this.scrollDebounceTimer);
     for (const timer of this.pendingTimers) window.clearTimeout(timer);
     this.pendingTimers.clear();
+    this.releaseStack();
+    this.actionStack = [];
+    this.interaction.finalize();
     this.emit({ kind: "despawn", detail: "destroy()" });
     MascotEngine.liveEngines.delete(this);
     if (this.elRoot.parentNode) this.elRoot.parentNode.removeChild(this.elRoot);
@@ -852,9 +1106,38 @@ export class MascotEngine {
     // `x`/`y` and pointer coordinates are both in the viewport frame.
     const cursor = this.toVirtual(clientX, clientY);
     const width = this.elImg.naturalWidth || SPRITE_WIDTH;
-    const left = this.lookRight ? this.x - (width - pose.imageAnchor.x) : this.x - pose.imageAnchor.x;
-    const top = this.y - pose.imageAnchor.y;
+    const shift = this.hostShift();
+    const left =
+      (this.lookRight ? this.x - (width - pose.imageAnchor.x) : this.x - pose.imageAnchor.x) + shift.x;
+    const top = this.y - pose.imageAnchor.y + shift.y;
     return { x: cursor.x - left, y: cursor.y - top };
+  }
+
+  /**
+   * How far the host's CSS moves the anchor away from the coordinates this engine
+   * computes, in virtual units.
+   *
+   * The engine's own model is `x`/`y`, but nothing stops the host from moving the
+   * anchor with CSS — firefly lifts it above its music player
+   * (`body.has-global-player #mascot-pet-anchor { transform: translateY(-4.5rem) }`).
+   * Pointer mapping has to follow the pixels the visitor sees, or a press lands on
+   * whatever the engine *would* have drawn at that spot: measured 56–72 px off in
+   * firefly, which made the drawn head unpressable and put the hotspots on the body.
+   *
+   * The shift is measured from the DOM at most once per logic tick (and forced before
+   * a press), because the anchor's border box already carries both this engine's
+   * transform and the host's.
+   */
+  private hostShift(force = false): { x: number; y: number } {
+    if (!force && this.hostShiftCache.tick === this.tickCount) return this.hostShiftCache;
+    const scale = this.spriteScale;
+    const rect = this.elRoot.getBoundingClientRect();
+    this.hostShiftCache = {
+      x: rect.left / scale - this.x,
+      y: rect.top / scale - this.y,
+      tick: this.tickCount,
+    };
+    return this.hostShiftCache;
   }
 
   /** The hotspot under a client point, if that behaviour is allowed to run. */
@@ -884,119 +1167,41 @@ export class MascotEngine {
 
     this.elRoot.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
+      // A press has to be mapped through the *drawn* position, so measure any host CSS
+      // offset now instead of reusing this tick's cached value.
+      this.hostShift(true);
+      // ShijimaWidget::pointInside(): the press only belongs to the mascot when it
+      // lands on an opaque pixel of the frame it is showing, so the transparent
+      // corners of the 128 px box are not a handle.
+      if (!this.isOpaqueAt(e.clientX, e.clientY)) return;
+      this.pressActive = true;
+      this.pressStartAt = performance.now();
+      this.pressClientX = e.clientX;
+      this.pressClientY = e.clientY;
+      this.pressMaxMovement = 0;
+      this.hotspotHoldTriggered = false;
+      // The press is itself a pointer report. Qt reads `QCursor::pos()` every tick, so
+      // its cursor is always current; here the cursor would otherwise stay where the
+      // last `mousemove` left it — a mascot that walked under a resting pointer would
+      // look like it had been dragged away from the press point.
+      this.cursorX = e.clientX;
+      this.cursorY = e.clientY;
+      this.cursorButtons = e.buttons;
       // libshijima animation::handle_dragging(): a press inside a hotspot runs that
-      // behaviour and does *not* pick the mascot up. Clicking a mascot's head is how
-      // the packs trigger their Blush behaviours, which nothing else can reach.
+      // behaviour instead of picking the mascot up. The gesture policy decides *when*
+      // (long press or click), and moving past the hold tolerance turns the press into
+      // a pickup anyway (MascotWidgetInteraction::mouseMoveEvent).
       const hotspot = this.hotspotUnderCursor(e.clientX, e.clientY);
       if (hotspot) {
-        this.emit({
-          kind: "milestone",
-          name: "hotspot",
-          detail: `behavior=${hotspot.behavior} shape=${hotspot.shape} local=${this.spritePoint(e.clientX, e.clientY)?.x.toFixed(0)},${this.spritePoint(e.clientX, e.clientY)?.y.toFixed(0)}(sprite px)`,
-          x: this.x,
-          y: this.y,
-          leaf: this.leafLabel(),
-        });
-        this.setBehavior(hotspot.behavior, "hotspot");
-        this.elRoot.style.cursor = "grab";
+        this.hotspotHold = hotspot;
+        this.elRoot.style.cursor = "pointer";
         return;
       }
-      this.isDragging = true;
-      this.resetScrollTracking();
-      this.elRoot.style.cursor = "grabbing";
-      // dragged::init(ctx): foot_x = cursor.x + OffsetX, and the struggle timer.
-      // The anchor itself is placed by the tick, not here (dragged::subtick).
-      this.cursorX = e.clientX;
-      this.cursorY = e.clientY;
-      this.footX = e.clientX / this.spriteScale;
-      this.footDX = 0;
-      this.dragStillTicks = 0;
-      this.vx = this.vy = 0;
-      // libshijima animation::handle_dragging(): picking a mascot up ends any
-      // interaction it is in.
-      this.interaction.finalize();
-      this.setBehavior("Dragged", "drag-start");
+      this.hotspotHold = null;
+      this.beginDrag(e.clientX, e.clientY);
     }, { signal });
 
-    window.addEventListener("mousemove", (e) => {
-      this.cursorX = e.clientX;
-      this.cursorY = e.clientY;
-      // While the mascot is held there is nothing to do here: libshijima's
-      // dragged::subtick() moves the anchor from the cursor once per tick, and the
-      // render loop paints it.
-      if (this.isDragging) return;
-      // libshijima's UI asks for the hotspot under the cursor to give feedback.
-      this.elRoot.style.cursor = this.hotspotUnderCursor(e.clientX, e.clientY) ? "pointer" : "grab";
-    }, { signal });
-
-    window.addEventListener("mouseup", () => {
-      if (!this.isDragging) return;
-      this.isDragging = false;
-      this.elRoot.style.cursor = "grab";
-      this.setBehavior("Thrown", "drag-release");
-    }, { signal });
-
-    document.addEventListener("visibilitychange", () => {
-      if (document.hidden) {
-        if (this.isDragging) {
-          this.isDragging = false;
-          this.elRoot.style.cursor = "grab";
-          this.setBehavior("Thrown", "drag-release");
-        }
-        window.clearTimeout(this.scrollDebounceTimer);
-        this.setPauseReason("hidden", true);
-      } else {
-        this.setPauseReason("hidden", false);
-      }
-    }, { signal });
-
-    window.addEventListener("resize", () => {
-      window.clearTimeout(this.resizeTimer);
-      this.resizeTimer = window.setTimeout(() => {
-        const borderBefore = this.currentBorderAt(undefined);
-        
-        this.partnerCache.clear();
-        this.travelCache.clear();
-        this.borderStartCache.clear();
-        this.behaviorUsability.clear();
-        
-        this.clampToWorkArea();
-        
-        const area = this.area();
-        for (const frame of this.actionStack) {
-          if (frame.resolved) {
-            if (typeof frame.resolved.TargetX === "number") {
-               frame.resolved.TargetX = Math.max(area.left, Math.min(area.right, frame.resolved.TargetX));
-            }
-            if (typeof frame.resolved.TargetY === "number") {
-               frame.resolved.TargetY = Math.max(area.top, Math.min(area.bottom, frame.resolved.TargetY));
-            }
-          }
-        }
-
-        const borderAfter = this.currentBorderAt(undefined);
-        if (borderBefore && !borderAfter && !/Jump|Fall|Thrown|Dragged/i.test(this.currentBehavior?.name || "")) {
-           this.setBehavior("Fall", "resize-border-lost");
-        }
-      }, 200);
-    }, { signal });
-
-    window.addEventListener("scroll", () => {
-      const delta = window.scrollY - this.lastScrollY;
-      this.lastScrollY = window.scrollY;
-      if (delta === 0) return;
-
-      this.isScrolling = true;
-      this.scrollDirection = delta > 0 ? 1 : -1;
-      this.pendingScrollShift += delta / this.spriteScale;
-      this.scrollStopPending = false;
-      window.clearTimeout(this.scrollDebounceTimer);
-      this.scrollDebounceTimer = window.setTimeout(() => {
-        this.isScrolling = false;
-        this.scrollDirection = 0;
-        this.scrollStopPending = true;
-      }, 160);
-    }, { signal });
+    // Page-level input is dispatched once for all mascots by installGlobalEvents().
   }
 
   /**
@@ -1027,11 +1232,213 @@ export class MascotEngine {
     return { x: clientX / scale, y: clientY / scale };
   }
 
+  /**
+   * The cursor the *simulation* reads, in virtual units: the pointer, plus this
+   * drag's grab offset while the mascot is held. Qt reads the same value here and in
+   * the pack's `mascot.environment.cursor` (`state::get_raw_cursor()` →
+   * `roll_dcursor()` → `get_cursor()`), so the held pose's `FootX` comparison and the
+   * anchor stay in one reference frame.
+   */
+  private simulationCursorVirtual(): { x: number; y: number } {
+    const cursor = this.toVirtual(this.cursorX, this.cursorY);
+    return this.dragGrab ? { x: cursor.x + this.dragGrab.x, y: cursor.y + this.dragGrab.y } : cursor;
+  }
+
   /** `environment.cursor` for the pack expressions: position and per-tick delta,
    *  both in virtual units. */
   private cursorInVirtualUnits(): { x: number; y: number; dx: number; dy: number } {
-    const cursor = this.toVirtual(this.cursorX, this.cursorY);
+    const cursor = this.simulationCursorVirtual();
     return { x: cursor.x, y: cursor.y, dx: this.cursorTickDX, dy: this.cursorTickDY };
+  }
+
+  /** Release a held mascot: the grab offset goes away, so the pointer is the cursor
+   *  again. The behaviour change (Thrown, resist-escape) is the caller's job. */
+  private endDrag(): void {
+    this.isDragging = false;
+    this.dragGrab = null;
+    this.elRoot.style.cursor = "grab";
+  }
+
+  /** Pick the mascot up: Qt does this from `beginLeftPress()` when the press is not on
+   *  a hotspot, and from `mouseMoveEvent()` when a hotspot candidate leaves the hold
+   *  tolerance. */
+  private beginDrag(clientX: number, clientY: number): void {
+    this.isDragging = true;
+    this.resetScrollTracking();
+    this.elRoot.style.cursor = "grabbing";
+    // dragged::init(ctx): `foot_x = cursor.x + OffsetX` — and the local cursor is
+    // seeded on the first anchor write below so that this equals the anchor the
+    // mascot already has. That is what keeps the grab point under the cursor instead
+    // of snapping to the pack's fixed hold point. The anchor itself is placed by
+    // `applyDragAnchor()`, not here (dragged::subtick).
+    const pressCursor = this.toVirtual(clientX, clientY);
+    this.dragPressAnchorX = this.x;
+    this.dragPressAnchorY = this.y;
+    this.dragPressCursorX = pressCursor.x;
+    this.dragPressCursorY = pressCursor.y;
+    this.dragGrab = null;
+    this.cursorX = clientX;
+    this.cursorY = clientY;
+    this.footX = this.x;
+    this.footDX = 0;
+    this.dragStillTicks = 0;
+    this.vx = this.vy = 0;
+    // libshijima animation::handle_dragging(): picking a mascot up ends any
+    // interaction it is in.
+    this.interaction.finalize();
+    this.setBehavior("Dragged", "drag-start");
+  }
+
+  /**
+   * `dragged::subtick()`: pin the anchor to `cursor + OffsetX/OffsetY`.
+   *
+   * Qt runs this once per *subtick* — every 10 ms, i.e. four times per logic frame —
+   * and assigns the anchor directly, with no clamp and no interpolation, so a held
+   * mascot can never drift away from the cursor however fast the pointer moves. The
+   * web engine ticks every 40 ms, so this is called from the tick *and* from every
+   * pointer event, and `render()` skips interpolation while a drag is active.
+   */
+  private applyDragAnchor(): void {
+    const frame = this.actionStack[this.actionStack.length - 1];
+    // libshijima writes the anchor from `dragged::subtick()` only: while the pack's
+    // `Resisting` action (`resist::tick`) runs, the held mascot stays where it was —
+    // which is also what makes that action's "the cursor has moved" test fire.
+    if (this.isResistAction(frame?.node)) return;
+    const offsetX = this.varNumber(frame, "OffsetX") ?? runtime.dragOffsetX;
+    const offsetY = this.varNumber(frame, "OffsetY") ?? runtime.dragOffsetY;
+    if (!this.dragGrab) {
+      // Qt reads a *local* cursor here (`state::get_raw_cursor()`); seeding it from
+      // the grab point is what keeps the mascot from snapping to the pack's hold point.
+      this.dragGrab = {
+        x: this.dragPressAnchorX - this.dragPressCursorX - offsetX,
+        y: this.dragPressAnchorY - this.dragPressCursorY - offsetY,
+      };
+      this.footX = this.dragPressAnchorX;
+    }
+    const cursor = this.simulationCursorVirtual();
+    this.x = cursor.x + offsetX;
+    this.y = cursor.y + offsetY;
+  }
+
+  /** Qt `ShijimaWidget::mouseMoveEvent()`: remember how far the pointer has travelled
+   *  since the press, and let a hotspot candidate become a pickup once it leaves the
+   *  hold tolerance. */
+  private updatePressMovement(): void {
+    if (!this.pressActive) return;
+    const distance =
+      Math.abs(this.cursorX - this.pressClientX) + Math.abs(this.cursorY - this.pressClientY);
+    this.pressMaxMovement = Math.max(this.pressMaxMovement, distance);
+    if (this.isDragging || !this.hotspotHold) return;
+    if (distance <= HOLD_MOVEMENT_TOLERANCE_PX) return;
+    // Past the tolerance the candidate is dropped and the press picks the mascot up,
+    // so a drag that starts on the head still works.
+    this.hotspotHold = null;
+    this.beginDrag(this.cursorX, this.cursorY);
+  }
+
+  /** Qt `ShijimaWidget::maintainHotspotHold()`: a press that has been held inside the
+   *  tolerances long enough runs the hotspot's behaviour, and keeps it running. Qt
+   *  pins the behaviour's next selection to itself (`prefer_next_behavior`) so the
+   *  patpat repeats; re-issuing it whenever the mascot has moved on is the equivalent
+   *  here, without touching the behaviour-selection machinery. */
+  private maintainHotspotHold(): void {
+    if (!this.pressActive || !this.hotspotHold || this.isDragging) return;
+    if (performance.now() - this.pressStartAt < HOLD_TRIGGER_MS) return;
+    if (this.pressMaxMovement > HOLD_MOVEMENT_TOLERANCE_PX) return;
+    const behavior = this.hotspotHold.behavior;
+    this.hotspotHoldTriggered = true;
+    if (this.currentBehavior?.name === behavior) return;
+    this.emitHotspot("hold", this.hotspotHold);
+    this.setBehavior(behavior, "hotspot-hold");
+  }
+
+  /** Qt `ShijimaWidget::mouseReleaseEvent()`: a short, still release counts as a click
+   *  and triggers the hotspot under the *release* point (`manager::trigger_hotspot`);
+   *  a release after a pickup throws the mascot (`dragged::handle_dragging`). */
+  private finishPress(clientX: number, clientY: number): void {
+    if (!this.pressActive) return;
+    const elapsed = performance.now() - this.pressStartAt;
+    const triggeredHold = this.hotspotHoldTriggered;
+    const hadCandidate = this.hotspotHold !== null;
+    const movement = this.pressMaxMovement;
+    this.pressActive = false;
+    this.hotspotHold = null;
+    this.hotspotHoldTriggered = false;
+    if (this.isDragging) {
+      this.endDrag();
+      this.setBehavior("Thrown", "drag-release");
+      return;
+    }
+    // A release that follows a completed hold simply stops patting; only a short,
+    // still release is a click (`MascotHoldGesture::qualifiesAsClick`).
+    if (triggeredHold || !hadCandidate) return;
+    if (elapsed > CLICK_DURATION_MS || movement > CLICK_MOVEMENT_TOLERANCE_PX) return;
+    const hotspot = this.hotspotUnderCursor(clientX, clientY);
+    if (!hotspot) return;
+    this.emitHotspot("click", hotspot);
+    this.setBehavior(hotspot.behavior, "hotspot");
+  }
+
+  /** Drop a press without deciding a gesture (the tab went hidden mid-press). */
+  private cancelPress(): void {
+    this.pressActive = false;
+    this.hotspotHold = null;
+    this.hotspotHoldTriggered = false;
+  }
+
+  private emitHotspot(phase: "hold" | "click", hotspot: Hotspot): void {
+    const local = this.spritePoint(this.cursorX, this.cursorY);
+    this.emit({
+      kind: "milestone",
+      name: "hotspot",
+      detail: `${phase} behavior=${hotspot.behavior} shape=${hotspot.shape} local=${local ? `${local.x.toFixed(0)},${local.y.toFixed(0)}` : "?"}(sprite px)`,
+      x: this.x,
+      y: this.y,
+      leaf: this.leafLabel(),
+    });
+  }
+
+  /** `ShijimaWidget::pointInside()`: a press only belongs to the mascot when it lands
+   *  on an opaque pixel of the frame it is showing. The bitmap is cached until the
+   *  image changes; a canvas that cannot be read (sprites served from another origin)
+   *  degrades to the whole box. */
+  private isOpaqueAt(clientX: number, clientY: number): boolean {
+    const point = this.spritePoint(clientX, clientY);
+    if (!point) return false;
+    const img = this.elImg;
+    const width = img.naturalWidth || SPRITE_WIDTH;
+    const height = img.naturalHeight || SPRITE_WIDTH;
+    if (point.x < 0 || point.y < 0 || point.x > width || point.y > height) return false;
+    const data = this.frameAlpha();
+    if (!data) return true;
+    // `spritePoint()` is in drawn (possibly mirrored) space; the bitmap is not.
+    const x = Math.min(width - 1, Math.max(0, Math.round(this.lookRight ? width - point.x : point.x)));
+    const y = Math.min(height - 1, Math.max(0, Math.round(point.y)));
+    return data.data[(y * data.width + x) * 4 + 3] !== 0;
+  }
+
+  /** The pixels of the frame the mascot is currently showing, cached per image URL. */
+  private frameAlpha(): ImageData | null {
+    const src = this.elImg.getAttribute("src") ?? "";
+    if (this.alphaSrc === src) return this.alphaData;
+    this.alphaSrc = src;
+    this.alphaData = null;
+    const img = this.elImg;
+    if (!src || !img.complete || img.naturalWidth === 0) return null;
+    const canvas = this.alphaCanvas ?? (this.alphaCanvas = document.createElement("canvas"));
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) return null;
+    try {
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(img, 0, 0);
+      this.alphaData = context.getImageData(0, 0, canvas.width, canvas.height);
+    } catch {
+      // Tainted canvas (sprites served from another origin): fall back to the box.
+      this.alphaData = null;
+    }
+    return this.alphaData;
   }
 
   /** Resolve a configuration Metric against one viewport axis. A bare number is a
@@ -1142,7 +1549,7 @@ export class MascotEngine {
   }
 
   private run(expression: string, scope: Record<string, unknown>) {
-    return Function(...Object.keys(scope), `return (${this.cleanExpression(expression)})`)(...Object.values(scope));
+    return evaluateExpression(this.cleanExpression(expression), scope);
   }
 
   /**
@@ -1250,7 +1657,11 @@ export class MascotEngine {
   }
 
   private context(frame?: ActionFrame) {
-    return this.mascotScope(this.frameVars(frame));
+    const target = frame?.client?.target;
+    return this.mascotScope({
+      ...this.frameVars(frame),
+      target: target ? { anchor: { x: target.x, y: target.y } } : undefined,
+    });
   }
 
   private cleanExpression(expression: string) {
@@ -1261,7 +1672,16 @@ export class MascotEngine {
     if (!expression) return undefined;
     try {
       return this.run(expression, this.context(frame));
-    } catch {
+    } catch (error) {
+      const key = `${this.mascotName}:${expression}`;
+      if (!loggedExpressionFailures.has(key)) {
+        loggedExpressionFailures.add(key);
+        expressionLog.warn("expression evaluation failed", {
+          mascot: this.mascotName,
+          expression,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
       return undefined;
     }
   }
@@ -1364,7 +1784,7 @@ export class MascotEngine {
     for (const frame of this.actionStack) this.releaseFrame(frame);
   }
 
-  private setBehavior(name: string, reason = "engine") {
+  private setBehavior(name: string, reason = "engine", behaviorId?: number) {
     if (!this.config) return;
     if (this.behaviorInitsThisTick >= MAX_BEHAVIOR_INITS_PER_TICK) {
       if (name === "StandUp") return;
@@ -1373,7 +1793,7 @@ export class MascotEngine {
     }
     this.behaviorInitsThisTick++;
     const behavior =
-      this.config.behaviors.find((entry) => entry.name === name) ||
+      this.config.behaviors.find((entry) => entry.name === name && (behaviorId === undefined || entry.id === behaviorId)) ||
       (this.config.actions[name] ? { name, frequency: 100, hidden: false, nextBehaviors: [] } : undefined);
     const selected =
       behavior ||
@@ -1398,6 +1818,13 @@ export class MascotEngine {
     // asked for marks that handshake as started.
     if (this.interaction.available && !this.interaction.started && this.interaction.behavior === selected.name) {
       this.interaction.started = true;
+    }
+    if (
+      this.interaction.ongoing &&
+      selected.name !== this.interaction.behavior &&
+      !reason.startsWith("interaction-")
+    ) {
+      this.interaction.finalize();
     }
     // Frames that are being replaced stop advertising and let go of scan targets.
     this.releaseStack();
@@ -1424,6 +1851,7 @@ export class MascotEngine {
   }
 
   private loop(timestamp: number) {
+    if (this.destroyed) return;
     // Clamp only: a pause is already explained by the visibility markers the
     // recorder writes, so there is nothing else to do about the background case.
     this.accumulator += Math.min(timestamp - this.lastTime, MAX_FRAME_DELTA_MS);
@@ -1432,7 +1860,11 @@ export class MascotEngine {
     // leave it frozen for ever. Swallow the error, report it, and keep going.
     try {
       while (this.accumulator >= runtime.tickMs) { this.tick(); this.accumulator -= runtime.tickMs; }
-      this.render();
+      // libshijima interpolates the anchor of *move* actions between subticks, but the
+      // dragged action opts out (`dragged::requests_interpolation() == false`): a held
+      // mascot is painted exactly where the cursor is, so it cannot trail behind a fast
+      // drag. Its smoothness comes from pointer events re-pinning the anchor instead.
+      this.render(!this.isDragging);
     } catch (error) {
       this.accumulator = 0;
       const now = performance.now();
@@ -1450,17 +1882,29 @@ export class MascotEngine {
         });
       }
     }
-    this.loopId = requestAnimationFrame((t) => this.loop(t));
+    if (!this.destroyed) this.loopId = requestAnimationFrame((t) => this.loop(t));
   }
 
   private tick() {
     if (!this.config || !this.actionStack.length) return;
+    // ShijimaWidget::tick() runs the gesture policy before ticking the engine: a
+    // release that never arrived must not leave a press (or a drag) stuck
+    // (`MascotHoldGesture::leftButtonIsDown`), and a press held long enough becomes
+    // the hotspot's hold behaviour.
+    if (this.pressActive) {
+      if ((this.cursorButtons & 1) === 0) this.finishPress(this.cursorX, this.cursorY);
+      else {
+        this.updatePressMovement();
+        this.maintainHotspotHold();
+      }
+    }
     const beforeX = this.x;
     const beforeY = this.y;
     this.prevX = this.x;
     this.prevY = this.y;
     this.tickCount++;
     this.behaviorInitsThisTick = 0;
+    this.actionExpansionsThisTick = 0;
     const surfaceBeforeScroll = this.surfaceAt();
     if (!this.isDragging && this.pendingScrollShift !== 0) {
       this.y -= this.pendingScrollShift;
@@ -1478,28 +1922,25 @@ export class MascotEngine {
     this.lastTickCursorX = this.cursorX;
     this.lastTickCursorY = this.cursorY;
     if (this.isDragging) {
-      // libshijima dragged::subtick(): the anchor is placed at the cursor plus the
-      // action's offsets (OffsetX = 0, OffsetY = 120 in these packs), so the mascot
-      // is always held by the same point rather than wherever it was grabbed. The
-      // clamp to the activity area is a page-specific guard that also puts the anchor
-      // exactly on a wall edge, which is what the wall grab after the release needs.
       const frame = this.actionStack[this.actionStack.length - 1];
-      const offsetX = this.varNumber(frame, "OffsetX") ?? runtime.dragOffsetX;
-      const offsetY = this.varNumber(frame, "OffsetY") ?? runtime.dragOffsetY;
-      const area = this.area();
-      // The cursor comes from the DOM in screen pixels; the offsets are sprite-unit
-      // quantities, so the anchor is cursorVirtual + offset (which is
-      // cursorScreen + offset*scale on screen).
-      const cursor = this.toVirtual(this.cursorX, this.cursorY);
-      this.x = Math.max(area.left, Math.min(area.right, cursor.x + offsetX));
-      this.y = Math.max(area.top, Math.min(area.bottom, cursor.y + offsetY));
-      // dragged::subtick() keeps a held mascot facing left (the held sprites are
-      // drawn that way).
-      this.lookRight = false;
-      // dragged::subtick(idx 0), once per tick: a smoothed follow of the cursor that
-      // the held pose is chosen from (it is compared against cursor.x in the pack).
-      this.footDX = (this.footDX + (cursor.x - this.footX) * 0.1) * 0.8;
-      this.footX += this.footDX;
+      // libshijima writes the anchor and the foot state from `dragged::subtick()`
+      // only: while the pack's `Resisting` action (`resist::tick`) runs, the held
+      // mascot stays where it was — which is also what makes that action's "the
+      // cursor has moved" test fire, because the anchor stops tracking the pointer.
+      if (!this.isResistAction(frame?.node)) {
+        // dragged::subtick(): the anchor is pinned to the local cursor plus the
+        // action's offsets (OffsetX = 0, OffsetY = 120 in these packs) and assigned
+        // directly — Qt clamps nothing while a mascot is held.
+        this.applyDragAnchor();
+        const cursor = this.simulationCursorVirtual();
+        // dragged::subtick() keeps a held mascot facing left (the held sprites are
+        // drawn that way).
+        this.lookRight = false;
+        // dragged::subtick(idx 0), once per tick: a smoothed follow of the cursor that
+        // the held pose is chosen from (it is compared against cursor.x in the pack).
+        this.footDX = (this.footDX + (cursor.x - this.footX) * 0.1) * 0.8;
+        this.footX += this.footDX;
+      }
     }
     this.maintainBroadcasts();
     this.tickStartVX = this.vx;
@@ -1525,6 +1966,7 @@ export class MascotEngine {
    * the behaviour the handshake asked for.
    */
   private maintainBroadcasts() {
+    MascotEngine.broadcasts.prune();
     let claimed: ServerState | null = null;
     let claimedAffordance = "";
     for (const frame of this.actionStack) {
@@ -1718,6 +2160,18 @@ export class MascotEngine {
   private advanceActionTree(): void {
     const frame = this.actionStack[this.actionStack.length - 1];
     if (!frame || !this.config) return;
+    if (++this.actionExpansionsThisTick > MAX_ACTION_EXPANSIONS_PER_TICK) {
+      this.emit({
+        kind: "milestone",
+        name: "action-expansion-limit",
+        detail: `>${MAX_ACTION_EXPANSIONS_PER_TICK} expansions in one tick`,
+        x: this.x,
+        y: this.y,
+        leaf: this.leafLabel(),
+      });
+      this.popActionStack();
+      return;
+    }
     const node = frame.node;
 
     if (node.type === "ActionReference") {
@@ -1885,9 +2339,11 @@ export class MascotEngine {
     // libshijima resist::tick() — the pack's `Resisting` action (Class ...Regist).
     // Moving the cursor aborts the struggle and hands the mascot back to being held;
     // if it is left alone the animation plays out and the mascot breaks free.
-    // `get_cursor()` is a virtual-units quantity, so the raw screen cursor has to be
-    // converted before comparing it with the anchor.
-    if (this.isResistAction(node) && Math.abs(this.toVirtual(this.cursorX, this.cursorY).x - this.x) >= runtime.dragResistAbortPx) {
+    // Both sides are virtual units, and the cursor is the same local (grab-offset)
+    // cursor `dragged::subtick()` used — which is also why the difference grows while
+    // the struggle runs: nothing writes the anchor any more, so the pointer walks away
+    // from it.
+    if (this.isResistAction(node) && Math.abs(this.simulationCursorVirtual().x - this.x) >= runtime.dragResistAbortPx) {
       // Handed back to being held: dragged::init() restarts its timer.
       this.dragStillTicks = 0;
       this.setBehavior("Dragged", "resist-abort");
@@ -1941,8 +2397,7 @@ export class MascotEngine {
         // mascot is no longer held, so it breaks free — and, being released, is
         // thrown from where it is.
         if (this.isResistAction(node)) {
-          this.isDragging = false;
-          this.elRoot.style.cursor = "grab";
+          this.endDrag();
           this.emit({
             kind: "milestone",
             name: "resist-escape",
@@ -2621,9 +3076,7 @@ export class MascotEngine {
         if (!this.evaluateCondition(behavior.condition) || !this.behaviorUsable(behavior)) continue;
         const frequency = this.effectiveWeight(behavior.name, behavior.frequency);
         if (frequency <= 0) continue;
-        if (!candidates.some((candidate) => candidate.name === behavior.name)) {
-          candidates.push({ name: behavior.name, frequency });
-        }
+        candidates.push({ name: behavior.name, id: behavior.id, frequency });
       }
     }
     if (!candidates.length) {
@@ -2659,13 +3112,13 @@ export class MascotEngine {
       if (runnable.length > 0) pool = runnable;
     }
     const total = pool.reduce((sum, candidate) => sum + Math.max(0, candidate.frequency), 0);
-    if (total <= 0) { this.setBehavior(pool[0].name, reason); return; }
+    if (total <= 0) { this.setBehavior(pool[0].name, reason, pool[0].id); return; }
     let random = Math.random() * total;
     for (const candidate of pool) {
       random -= candidate.frequency;
-      if (random <= 0) { this.setBehavior(candidate.name, reason); return; }
+      if (random <= 0) { this.setBehavior(candidate.name, reason, candidate.id); return; }
     }
-    this.setBehavior(candidates[0].name, reason);
+    this.setBehavior(candidates[0].name, reason, candidates[0].id);
   }
 
   private render(interpolate = true) {

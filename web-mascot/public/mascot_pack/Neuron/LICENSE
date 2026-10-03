@@ -1,0 +1,76 @@
+Neuron — mascot pack bundled with `web-mascot`
+==============================================
+
+This directory is a creative work, separate from the web-mascot source code.
+The GPL-3.0-or-later license that covers web-mascot's code does NOT cover this
+pack. See the NOTICE file in the package root.
+
+
+License
+-------
+    Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
+    SPDX-License-Identifier: CC-BY-NC-SA-4.0
+    https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+The complete legal code is in LICENSE-CC-BY-NC-SA-4.0.txt in this directory, and
+also in part 2 of 2 of the package-root LICENSE.
+
+
+Attribution
+-----------
+Artwork ("Neurolings" sprite set):
+    Paccha — https://linktr.ee/paccha_
+
+Configuration (actions.xml, behaviors.xml):
+    @promote. — https://z.ne1.co, https://neuro.us.to
+    and @dalekcraft
+
+Packaging, `.mascot` package format and pack metadata:
+    qingchenyouforcc — https://github.com/qingchenyouforcc
+    Credited by the upstream project's CHANGELOG.md ("mascot package format,
+    metadata", v0.3.2; "mascot combinations, package creation", v0.4.0); the
+    upstream mascot_pack/ commits are theirs. This pack's own info.json does not
+    name a packager.
+
+Reproduced verbatim from this pack's info.json:
+
+    "author": "Paccha[https://linktr.ee/paccha_], Configuration by
+     [@promote.] (https://z.ne1.co & https://neuro.us.to) and [@dalekcraft]"
+
+
+Source
+------
+Extracted from NeurolingsCE-Qt:
+    https://github.com/qingchenyouforcc/NeurolingsCE-Qt
+
+The upstream project lists this pack, together with its five siblings (Cerber,
+Eviling, Tuteling, Vedaling, Weuron), as CC-BY-NC-SA-4.0.
+
+
+    ***  NON-COMMERCIAL ONLY  ***
+
+    You may not use this pack for commercial purposes. For commercial use,
+    obtain separate permission from the rights holders, or supply your own
+    mascot pack instead — the web-mascot engine accepts any Shimeji-format
+    pack directory.
+
+
+Modifications
+-------------
+Required to be indicated by CC BY-NC-SA 4.0 section 3(a)(1)(B). These are the
+only changes made to this pack:
+
+    * actions.xml — the UTF-8 byte-order mark was removed.
+    * actions.xml — `Math.random*100` was corrected to `Math.random()*100`
+      (2 occurrences; this expression computes the wall-climb target and
+      otherwise evaluates to NaN).
+    * info.json — a `"license"` field was added. No other field was changed.
+    * img/*.png — byte-for-byte identical to upstream, unmodified.
+    * behaviors.xml, bubble_context.txt — byte-for-byte identical, unmodified.
+
+
+No warranty
+-----------
+This pack is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the license for the full disclaimer.

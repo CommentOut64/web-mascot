@@ -16,7 +16,14 @@
  *                                   mascots are spread apart
  *   reducedMotion / respectReducedMotion
  *                                   what to change when the OS asks for reduced
- *                                   motion (no built-in presets: the host decides)
+ *                                   motion (the host decides; the engine ships no
+ *                                   reduced-motion preset)
+ *   ignoreBuiltin                   true drops the engine's built-in preset
+ *
+ * The engine ships a built-in preset (see `animationPreset.ts`) — the layer every
+ * host starts from. Each field above overrides it, and `ignoreBuiltin` removes it.
+ * The same data is emitted as `dist/animation.config.json`, so the template a host
+ * copies and the behaviour it gets by default cannot drift apart.
  *
  * Everything is optional and validated: a malformed value is ignored rather than
  * breaking the mascot, and unknown names are kept (they simply never match) so a
@@ -24,6 +31,8 @@
  * accepts the same shape as an object, and `toJSON()` / `optionsFor()` hand the
  * effective settings back for a settings UI.
  */
+
+import { ANIMATION_PRESET_DEFAULTS } from "./animationPreset.js";
 
 /** A position or size: pixels as a number, a percentage like "40%", or a keyword
  *  ("left" | "right" | "top" | "bottom" | "center"). */
@@ -146,6 +155,11 @@ export type DurationSetting = number | [number, number];
 
 export interface AnimationConfigFile {
   version?: number;
+  /** Set true to drop the engine's built-in preset and run the packs exactly as
+   *  they ship: no pacer, no behaviour-weight overrides, no long-sequence
+   *  exemption. Default false. Orthogonal to the fields below — this removes the
+   *  layer *underneath*, it does not disable the file. */
+  ignoreBuiltin?: boolean;
   /** Applied to every mascot. */
   defaults?: MascotAnimationOptions;
   /** Per-mascot overrides, keyed by mascot name (`Neuron`, `Eviling`, ...). */
@@ -183,7 +197,7 @@ function nameList(value: unknown): string[] | undefined {
     .filter((entry): entry is string => typeof entry === "string")
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
-  return names.length > 0 ? names : undefined;
+  return names.length > 0 || value.length === 0 ? names : undefined;
 }
 
 function tickCount(value: unknown, min: number): number | undefined {
@@ -370,12 +384,23 @@ function hasContent(options: MascotAnimationOptions): boolean {
   );
 }
 
+/**
+ * The built-in preset, normalised once.
+ *
+ * It is declared *below* the helpers on purpose: module-level `const`
+ * initialisation runs in source order, and `normalizeOptions` reads constants of
+ * its own, so hoisting the function is not enough. Moving this above them throws
+ * "Cannot access '…' before initialization" on import.
+ */
+const BUILTIN_ANIMATION_CONFIG: MascotAnimationOptions = normalizeOptions(ANIMATION_PRESET_DEFAULTS);
+
 export class AnimationConfig {
   private defaults: MascotAnimationOptions = {};
   private perMascot = new Map<string, MascotAnimationOptions>();
   private reduced: MascotAnimationOptions = {};
   private reducedActive = false;
   private respectReduced = true;
+  private respectBuiltin = true;
   private resolved = new Map<string, MascotAnimationOptions>();
   /** Where the settings came from, for logs and diagnostics. */
   public readonly source: string;
@@ -391,8 +416,10 @@ export class AnimationConfig {
     this.perMascot = new Map();
     this.reduced = {};
     this.respectReduced = true;
+    this.respectBuiltin = true;
     this.resolved = new Map();
     if (!isRecord(file)) return;
+    this.respectBuiltin = file.ignoreBuiltin !== true;
     this.defaults = normalizeOptions(file.defaults);
     this.reduced = normalizeOptions(file.reducedMotion);
     this.respectReduced = file.respectReducedMotion !== false;
@@ -432,25 +459,29 @@ export class AnimationConfig {
     return this.reducedActive;
   }
 
+  /** True when this configuration cannot affect anything: the built-in preset is
+   *  off and the host supplied nothing of its own. */
   public get isEmpty(): boolean {
-    return !hasContent(this.defaults) && this.perMascot.size === 0 && !hasContent(this.reduced);
+    return !this.respectBuiltin && !hasContent(this.defaults) && this.perMascot.size === 0 && !hasContent(this.reduced);
   }
 
-  /** Effective options: defaults, then the reduced-motion block, then the mascot. */
+  /** Effective options: built-in (if not ignored), then file defaults, then reduced-motion block, then mascot overrides. */
   public optionsFor(mascot: string): MascotAnimationOptions {
     const cached = this.resolved.get(mascot);
-    if (cached) return cached;
-    let merged = mergeOptions(this.defaults, this.reducedActive ? this.reduced : {});
+    if (cached) return cloneOptions(cached);
+    let base = this.respectBuiltin ? BUILTIN_ANIMATION_CONFIG : {};
+    let merged = mergeOptions(base, this.defaults);
+    merged = mergeOptions(merged, this.reducedActive ? this.reduced : {});
     merged = mergeOptions(merged, this.perMascot.get(mascot) ?? {});
     this.resolved.set(mascot, merged);
-    return merged;
+    return cloneOptions(merged);
   }
 
   /** Whether a behaviour may be selected for this mascot. */
   public allows(mascot: string, behavior: string): boolean {
     const options = this.optionsFor(mascot);
     if (options.denyBehaviors?.includes(behavior)) return false;
-    if (options.allowBehaviors && !options.allowBehaviors.includes(behavior)) return false;
+    if (options.allowBehaviors && options.allowBehaviors.length > 0 && !options.allowBehaviors.includes(behavior)) return false;
     return true;
   }
 
@@ -557,21 +588,23 @@ export class AnimationConfig {
   /** Round-trip view of the raw file shape, for a settings UI. */
   public toJSON(): AnimationConfigFile {
     const mascots: Record<string, MascotAnimationOptions> = {};
-    for (const [name, options] of this.perMascot) mascots[name] = options;
-    return {
+    for (const [name, options] of this.perMascot) mascots[name] = cloneOptions(options);
+    const result: AnimationConfigFile = {
       version: 1,
-      defaults: this.defaults,
+      defaults: cloneOptions(this.defaults),
       mascots,
-      reducedMotion: this.reduced,
+      reducedMotion: cloneOptions(this.reduced),
       respectReducedMotion: this.respectReduced,
     };
+    if (!this.respectBuiltin) result.ignoreBuiltin = true;
+    return result;
   }
 
   /** One-line summary written into the observation log with every spawn. */
   public describe(mascot: string): string {
     const options = this.optionsFor(mascot);
     const parts = [
-      `source=${this.source}`,
+      `source=${this.source}${this.respectBuiltin ? " +builtin" : " no-builtin"}`,
       `durationScale=${options.durationScale ?? 1}`,
       `scale=${options.scale ?? 1}`,
       `cap=${options.maxBehaviorTicks ?? 0}`,
@@ -644,4 +677,21 @@ export class AnimationConfig {
     if (this.reducedActive) lines.push("reducedMotion: active (OS preference)");
     return lines;
   }
+}
+
+function cloneOptions(options: MascotAnimationOptions): MascotAnimationOptions {
+  return {
+    ...options,
+    allowBehaviors: options.allowBehaviors ? [...options.allowBehaviors] : undefined,
+    denyBehaviors: options.denyBehaviors ? [...options.denyBehaviors] : undefined,
+    pacerExemptBehaviors: options.pacerExemptBehaviors ? [...options.pacerExemptBehaviors] : undefined,
+    exitToPoolBehaviors: options.exitToPoolBehaviors ? [...options.exitToPoolBehaviors] : undefined,
+    behaviorWeights: options.behaviorWeights ? { ...options.behaviorWeights } : undefined,
+    actionDurations: options.actionDurations
+      ? Object.fromEntries(Object.entries(options.actionDurations).map(([key, value]) => [key, Array.isArray(value) ? [...value] : value]))
+      : undefined,
+    partnerWeights: options.partnerWeights ? { ...options.partnerWeights } : undefined,
+    zone: options.zone ? { ...options.zone } : undefined,
+    spawn: options.spawn ? { ...options.spawn } : undefined,
+  };
 }

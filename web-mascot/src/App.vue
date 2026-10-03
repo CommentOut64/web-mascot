@@ -39,8 +39,15 @@ async function spawnPet(name: string) {
   if (!petContainer.value) return;
   console.log(`Spawning ${name}...`);
   const engine = new MascotEngine(petContainer.value, name);
-  await engine.init();
   activeEngines.push(engine);
+  try {
+    await engine.init();
+  } catch (error) {
+    const index = activeEngines.indexOf(engine);
+    if (index >= 0) activeEngines.splice(index, 1);
+    engine.destroy();
+    console.error(`Failed to spawn ${name}`, error);
+  }
 }
 
 function clearPets() {

@@ -31,14 +31,14 @@ const render = () => {
 
 // ↓ 生产宿主的写法
 attach({
-  sink: (batch) => {
+  sinks: [(batch) => {
     batches.push(batch);
     // 真实项目在这里上报：fetch("/api/pet-log", { method: "POST", body: JSON.stringify(batch) })
     render();
-  },
+  }],
 });
 
-configure({ packBaseUrl: "/assets/packs" });
+configure({ assets: "/assets/packs" });
 const container = document.createElement("div");
 container.id = "anchor";
 document.body.appendChild(container);

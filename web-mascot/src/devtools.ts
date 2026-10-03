@@ -1,18 +1,18 @@
-import { MascotEngine } from "./core/MascotEngine";
-import { loggerFor } from "./core/Logger";
-import { addLogSink, allowDevEndpoint, silenceDevEndpoint, startMascotLogRecorder, stopMascotLogRecorder } from "./dev/MascotLogRecorder";
-import type { MascotLogSink } from "./dev/MascotLogRecorder";
+import { MascotEngine } from "./core/MascotEngine.js";
+import { loggerFor } from "./core/Logger.js";
+import { addLogSink, allowDevEndpoint, silenceDevEndpoint, startMascotLogRecorder, stopMascotLogRecorder } from "./dev/MascotLogRecorder.js";
+import type { MascotLogSink } from "./dev/MascotLogRecorder.js";
 
-export { setLogSink, addLogSink } from "./dev/MascotLogRecorder";
-export type { MascotLogSink, MascotLogBatch } from "./dev/MascotLogRecorder";
+export { setLogSink, addLogSink } from "./dev/MascotLogRecorder.js";
+export type { MascotLogSink, MascotLogBatch } from "./dev/MascotLogRecorder.js";
 export {
   isRecording,
   resetMascotLogRecorder,
   startMascotLogRecorder,
   stopMascotLogRecorder,
-} from "./dev/MascotLogRecorder";
-export { configureLogging, disableLogging, loggingState, consoleSink, loggerFor } from "./core/Logger";
-export type { LogLevel, LogSink, LogRecord, LogChannel, LogOptions } from "./core/Logger";
+} from "./dev/MascotLogRecorder.js";
+export { configureLogging, disableLogging, loggingState, consoleSink, loggerFor } from "./core/Logger.js";
+export type { LogLevel, LogSink, LogRecord, LogChannel, LogOptions } from "./core/Logger.js";
 
 /**
  * Development entry point of the web-mascot library.

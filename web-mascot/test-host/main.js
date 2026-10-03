@@ -4,7 +4,7 @@
  *
  * Everything it proves:
  *   - the `web-mascot` entry point resolves (see the alias in vite.test-host.config.ts)
- *   - `configure({ packBaseUrl })` redirects asset loading away from `/mascot_pack`
+ *   - `configure({ assets })` redirects asset loading away from `/mascot_pack`
  *   - `createMascot()` mounts a pet into a host-owned element
  *   - `destroy()` removes it again without leaving DOM behind
  */
@@ -18,7 +18,7 @@ const log = (message) => {
 
 // Deliberately NOT the library's own asset path: the host decides where the packs
 // live. If spriteUrl were still hardcoded to /mascot_pack, every image would 404.
-configure({ packBaseUrl: "/assets/packs" });
+configure({ assets: "/assets/packs" });
 
 const container = document.getElementById("anchor");
 log(`packBaseUrl = /assets/packs, container = #${container.id}`);

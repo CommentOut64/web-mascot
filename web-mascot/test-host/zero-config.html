@@ -2,7 +2,7 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <title>web-mascot 零配置宿主（验证用）</title>
+    <title>web-mascot 未打包宿主（验证用，仅覆盖裸 ESM 路径）</title>
     <style>
       body {
         font-family: system-ui, sans-serif;
@@ -22,10 +22,17 @@
     </style>
   </head>
   <body>
-    <h1>零配置宿主</h1>
+    <h1>未打包宿主（no-bundler）</h1>
     <p>
-      这个页面 <strong>完全不调用 <code>configure()</code></strong>，也不告诉引擎资源在哪。
+      这个页面 <strong>完全不调用 <code>configure()</code></strong>，也不告诉引擎资源在哪：
       精灵必须从包自身推导出的地址加载，否则全部 404。
+    </p>
+    <p>
+      <strong>范围说明</strong>：这里验证的只是「模块文件被原样服务」这一种环境 —— 裸说明符被别名到
+      <code>dist/index.js</code>，并由 <code>vite.test-host.config.ts</code> 手工把
+      <code>dist/mascot_pack</code> 挂在推导出的路径上。<strong>它不代表打包器宿主的行为</strong>：
+      经 Vite / Webpack 预构建后，推导值会指向构建产物目录而全部 404，那时必须
+      <code>configure({ assets })</code>（见 README「30 秒上手」）。
     </p>
     <div id="anchor">锚点：宠物属于这里</div>
     <p id="status">loading…</p>

@@ -1,4 +1,4 @@
-import type { Hotspot } from "./Hotspot";
+import type { Hotspot } from "./Hotspot.js";
 
 export interface Pose {
   image: string;
@@ -46,10 +46,14 @@ export interface BehaviorReference {
   name: string;
   frequency: number;
   condition?: string;
+  /** Stable position in behaviors.xml, preserving duplicate names. */
+  id?: number;
 }
 
 export interface Behavior {
   name: string;
+  /** Stable position in behaviors.xml, preserving duplicate names. */
+  id?: number;
   frequency: number;
   hidden: boolean;
   condition?: string; // <--- ADDED THIS to support parent <Condition> wrapper
