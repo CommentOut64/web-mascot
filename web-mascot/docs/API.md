@@ -101,7 +101,7 @@ npm run build:lib     # 等价于 vue-tsc && vite build && tsc -p tsconfig.lib.j
 | `dist/devtools.js` | 开发工具入口（含记录器） |
 | `dist/chunks/MascotEngine-*.js` | 两个入口共享的引擎实现 |
 | `dist/types/**/*.d.ts` | 类型声明（由 `tsc` 直接产出） |
-| `dist/animation.config.json` | 默认动画配置档，可经 `web-mascot/animation.config.json` 导入 |
+| `dist/animation.config.json` | 内置默认档的副本（构建时由 `src/core/animationPreset.ts` 生成），可经 `web-mascot/animation.config.json` 导入 |
 | `dist/mascot_pack/**` | 精灵资源（由 Vite 从 `public/` 拷入）。每个 pack 还带自己的 `LICENSE` 与 `LICENSE-CC-BY-NC-SA-4.0.txt` |
 | `src/**` | 库源码，随包提供：既是 GPL 要求的对应源码，也让 sourcemap 能解析到真实文件 |
 
@@ -170,7 +170,8 @@ function configure(options: MascotConfig): void
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `assets` | `string?` | 含每个 pack 目录的基址，**不带结尾斜杠**。**打包环境必须给出**；只在未打包环境下可省略（那时才用推导值 `PACK_BASE_URL`）。**当前是全局设置**：页面内所有宠物共用一个资源根 |
-| `animationConfigUrl` | `string?` | 动画配置文件 URL。省略则完全不发起请求，各 pack 使用自身设置 |
+| `animationConfigUrl` | `string?` | 动画配置文件 URL。省略则每页探测一次默认路径 `/animation.config.json`；文件不存在不报错，内置预设继续生效 |
+| `ignoreBuiltin` | `boolean?` | 设为 `true` 丢弃内置预设，回到 pack 原生行为（无 pacer、无权重覆盖、无长序列豁免）。默认 `false`。与 `animationConfigUrl` 正交：它拿掉的是**最底层**，不会禁用文件 |
 | `runtime` | `RuntimeOptions?` | 仿真调参，见 3.5 |
 
 日志**不在这里**配置：观测日志走 `web-mascot/devtools` 的 `attach()`，库诊断走 `configureLogging()`（见第 4 节）。
@@ -180,6 +181,7 @@ function configure(options: MascotConfig): void
 - `assets` 在**创建每只宠物时被快照**：之后再调用 `configure()` 不会影响已存在的宠物，也不会让同一页面里的宠物读到不同 pack。
 - `animationConfigUrl` 遵循同一规则（快照于首次生效）。这不影响 `runtime`——运行参数是**每 tick 读取**的，改了立刻对已有宠物生效。
 - 全部字段可选，且多次调用会合并；只传 `runtime` 不会清掉之前的 `assets`。
+- `ignoreBuiltin` 是**页面级**偏好：设过之后，后续加载的配置文件也不会把它顶掉；文件里的 `ignoreBuiltin` 只在页面没有显式设置时生效。
 
 > **当前限制与路线图**：`assets` 是**全局**的（`MascotEngine.packBaseUrl` 是静态字段），所以"内置的 Neuron + 你自己放在别处的 MyPet"目前要求两者的 pack 目录位于同一个资源根下（把内置 pack 拷到你的静态目录即可）。**按宠物单独指定资源根在路线图上**，届时 `MascotOptions` 会新增可选的 `assets`，优先级为 per-mascot > 全局 > 推导默认值——纯追加，不会影响现在写好的代码。
 
@@ -243,6 +245,8 @@ function createMascot(options: MascotOptions): Promise<Mascot>
 ### 3.6 动画配置里的节奏字段
 
 这些不在 `configure()` 里，而是写在**动画配置文件**（`animationConfigUrl` 指向的 JSON，或引擎默认请求的 `/animation.config.json`）的 `defaults` / `mascots` 中。列在这里是因为它们与 3.5 的运行参数容易混淆：**3.5 改的是引擎物理，这里改的是行为选择**。
+
+生效优先级：`内置预设 → defaults → reducedMotion → mascots.<名字>`（逐字段合并，对象型字段按 key 叠加）。引擎**自带一套默认预设**（`src/core/animationPreset.ts`，同一份数据生成随包的 `dist/animation.config.json`）；`ignoreBuiltin: true` 把最底层整层拿掉，等价于 0.0.3 之前"什么都不配"的行为。
 
 | 字段 | 说明 |
 | --- | --- |
@@ -463,7 +467,7 @@ const mascot = await createMascot({ container: document.querySelector("#pet-root
 
 ## 8. 发布状态与许可
 
-`version` 为 `0.0.2`。接口尚未承诺语义化版本稳定性：0.x 允许破坏性变更，其中 `MascotEngine` / `AnimationConfig` / `BroadcastManager` 属于**明确不稳定**的高级用法（见 3.4）。
+`version` 为 `0.0.3`。接口尚未承诺语义化版本稳定性：0.x 允许破坏性变更，其中 `MascotEngine` / `AnimationConfig` / `BroadcastManager` 属于**明确不稳定**的高级用法（见 3.4）。
 
 许可拆成两部分，不要混：
 

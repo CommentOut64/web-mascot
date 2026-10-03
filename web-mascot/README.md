@@ -63,6 +63,8 @@ const [neuron, eviling] = await Promise.all([
 > **注**：模块通过 `import.meta.url` 推导出的资源基址（`PACK_BASE_URL`）只在**未打包、且包目录被原样服务**的环境下有效（裸 ESM，或原样镜像 `dist/` 的 CDN）。经打包器预构建后，推导值会指向构建产物路径（如 `node_modules/.vite/deps/mascot_pack`、`/_astro/mascot_pack`），所有 pack 请求都会 404，因此必须如上文显式配置。
 >
 > 另外，`DEFAULT_PACK_BASE_URL`（`"/mascot_pack"`）只在推导**彻底失败**时才兜底；打包环境里推导是「成功但错误」，兜底不会生效——所以「把精灵放到 `/mascot_pack`」这件事本身还不够，必须显式 `configure()`。
+>
+> **动画行为不需要配置**：引擎自带一套偏活跃的默认预设（普通静止约 8 秒即被推动，长静止动画允许完整播完）。想退回 pack 原生行为（无 pacer、无权重覆盖、无长序列豁免），加一句 `configure({ ignoreBuiltin: true })`；想微调就在静态根放一份 `animation.config.json`，字段说明见 [ANIMATION_CONFIG.md](ANIMATION_CONFIG.md)。
 
 ---
 
@@ -72,7 +74,7 @@ const [neuron, eviling] = await Promise.all([
 | --- | --- |
 | `web-mascot` | 主入口：创建、挂载、销毁宠物 |
 | `web-mascot/devtools` | 开发工具：观测日志（记录宠物去了哪里）与库自身诊断日志 |
-| `web-mascot/animation.config.json` | 默认动画配置档，可拷到你的静态目录后按需修改 |
+| `web-mascot/animation.config.json` | 内置默认档的可拷贝副本（引擎已内建同样的值，通常不需要；要改就在静态根放一份） |
 | `web-mascot/mascot_pack/*` | 按真实路径取包内精灵（自定义 loader、上传 CDN、`new URL()`） |
 
 > `web-mascot/mascot_pack/*` 是**打包器/Node 的模块解析**能力；浏览器运行时不会解析裸说明符。页面里请用绝对 URL，例如 `/mascot_pack/Neuron/img/shime1.png`。
@@ -185,7 +187,9 @@ const pet = await createMascot({ container: document.body, pack: "MyPet" });
 
 ## 状态
 
-`0.0.2` — 接口尚未承诺语义化版本稳定性（0.x 允许破坏性变更）。
+`0.0.3` — 接口尚未承诺语义化版本稳定性（0.x 允许破坏性变更）。
+
+**0.0.3 的行为变更**：引擎开始自带默认动画预设（`src/core/animationPreset.ts`），因此**什么都不配置的宿主现在也是这套偏活跃的节奏**，不再是 pack 原生；要回到原生的宿主加 `configure({ ignoreBuiltin: true })`。随包的 `dist/animation.config.json` 改为构建期由同一份数据生成，不再单独维护。
 
 当前只内置 Neuron / Eviling 两只宠物。计划中的方向：通用 Shimeji 规范兼容、按宠物指定资源根、运行时导入用户自己的模型。反馈与问题请提到 [issues](https://github.com/CommentOut64/web-mascot/issues)。
 
