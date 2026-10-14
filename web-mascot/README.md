@@ -187,7 +187,7 @@ const pet = await createMascot({ container: document.body, pack: "MyPet" });
 
 ## 状态
 
-`0.0.3` — 接口尚未承诺语义化版本稳定性（0.x 允许破坏性变更）。
+`0.0.4` — 接口尚未承诺语义化版本稳定性（0.x 允许破坏性变更）。
 
 **0.0.3 的行为变更**：引擎开始自带默认动画预设（`src/core/animationPreset.ts`），因此**什么都不配置的宿主现在也是这套偏活跃的节奏**，不再是 pack 原生；要回到原生的宿主加 `configure({ ignoreBuiltin: true })`。随包的 `dist/animation.config.json` 改为构建期由同一份数据生成，不再单独维护。
 

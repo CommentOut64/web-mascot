@@ -1,6 +1,6 @@
 {
   "name": "web-mascot",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "private": false,
   "type": "module",
   "description": "Embeddable browser mascot engine: run Shimeji-format mascot packs inside any web page (NeurolingsCE-Qt web port).",
