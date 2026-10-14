@@ -56,6 +56,7 @@ export class ViewportHost {
           background: transparent !important;
           filter: none !important;
           user-select: none !important;
+          pointer-events: auto;
         }
         .relay-placeholder {
           position: fixed;
@@ -76,6 +77,7 @@ export class ViewportHost {
           height: auto !important;
           max-width: none !important;
           max-height: none !important;
+          pointer-events: none !important;
         }
       `;
       shadow.appendChild(style);

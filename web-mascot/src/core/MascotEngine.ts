@@ -273,7 +273,8 @@ export class MascotEngine {
   /** Every live mascot, so `mascot.totalCount` means something to the packs. */
   private static liveEngines = new Set<MascotEngine>();
   /** Sprite URLs already fetched, shared by every mascot of the same pack. */
-  private static preloaded = new Set<string>();  /** Observation points; the log recorder subscribes instead of polling. */
+  private static preloaded =
+    new Set<string>(); /** Observation points; the log recorder subscribes instead of polling. */
   private static observers = new Set<EngineObserver>();
   private static nextId = 1;
   /** Animation customisation, shared by every mascot (see AnimationConfig). */
@@ -455,28 +456,45 @@ export class MascotEngine {
   private lastRenderedPose: Pose | null = null;
 
   public handleExternalScroll(delta: number, documentScroll = true): void {
-    if (this.destroyed || this.isDragging || this.pauseReasons.size > 0 ||
-        !Number.isFinite(delta) || delta === 0) return;
+    if (
+      this.destroyed ||
+      this.isDragging ||
+      this.pauseReasons.size > 0 ||
+      !Number.isFinite(delta) ||
+      delta === 0
+    )
+      return;
     if (documentScroll) this.pendingScrollShift += delta / this.spriteScale;
     const surface = this.surfaceAt();
-    if ((surface === "floor" && documentScroll && delta > 0) ||
-        surface === "left-wall" || surface === "right-wall" || surface === "ceiling") {
+    if (
+      (surface === "floor" && documentScroll && delta > 0) ||
+      surface === "left-wall" ||
+      surface === "right-wall" ||
+      surface === "ceiling"
+    ) {
       this.scrollDetachPending = surface;
     }
   }
 
   public setClickThrough(enabled: boolean): void {
     if (this.elRoot) {
-      this.elRoot.style.pointerEvents = enabled ? "none" : "auto";
-      this.elRoot.style.opacity = enabled ? "0.85" : "1";
+      this.elRoot.style.pointerEvents = "none";
+    }
+    if (this.elImg) {
+      this.elImg.style.pointerEvents = enabled ? "none" : "auto";
     }
   }
 
-  public resetToSpawn(): void {
-    this.applySpawnPosition();
+  public resetToSpawn(indexOverride?: number): void {
+    this.endDrag();
+    this.interaction.finalize();
+    this.actionStack = [];
+    this.vx = 0;
+    this.vy = 0;
+    this.applySpawnPosition(indexOverride);
+    this.resetScrollTracking();
     this.setBehavior("Fall", "manual-reset");
     this.actionExpansionsThisTick = 0;
-    this.advanceActionTree();
     this.prevX = this.x;
     this.prevY = this.y;
     this.renderNow();
@@ -486,7 +504,10 @@ export class MascotEngine {
     // Commit the frame the user actually saw. The simulation may be between two
     // logic ticks, so serialising logical x/y here otherwise creates a one-frame
     // position jump when the next tab restores the snapshot.
-    if (Number.isFinite(this.lastRenderedX) && Number.isFinite(this.lastRenderedY)) {
+    if (
+      Number.isFinite(this.lastRenderedX) &&
+      Number.isFinite(this.lastRenderedY)
+    ) {
       this.x = this.lastRenderedX;
       this.y = this.lastRenderedY;
     }
@@ -520,34 +541,84 @@ export class MascotEngine {
     const area = this.area();
     const pose = this.lastRenderedPose;
     const surface = this.surfaceAt();
-    const action = this.currentBehavior && this.config?.actions[this.currentBehavior.name];
-    const interaction = this.interaction.available || this.actionStack.some((f) => !!f.server || !!f.client) ||
-      !!action && this.actionTreeMatches(action, (node) => this.isScanMove(node) || this.isInteract(node) ||
-        Boolean(node.attributes?.Affordance));
+    const action =
+      this.currentBehavior && this.config?.actions[this.currentBehavior.name];
+    const interaction =
+      this.interaction.available ||
+      this.actionStack.some((f) => !!f.server || !!f.client) ||
+      (!!action &&
+        this.actionTreeMatches(
+          action,
+          (node) =>
+            this.isScanMove(node) ||
+            this.isInteract(node) ||
+            Boolean(node.attributes?.Affordance),
+        ));
     const snapshot: RelaySnapshot = {
-      schemaVersion: 2, pack: this.mascotName, x: this.lastRenderedX, y: this.lastRenderedY,
+      schemaVersion: 2,
+      pack: this.mascotName,
+      x: this.lastRenderedX,
+      y: this.lastRenderedY,
       area: { ...area },
-      anchorX: surface && this.borderIsOn("left", { x: this.x, y: this.y }) ? "left" :
-        surface && this.borderIsOn("right", { x: this.x, y: this.y }) ? "right" : "free",
-      anchorY: surface === "floor" ? "floor" : surface === "ceiling" ? "ceiling" : "free",
-      interaction, vx: this.vx, vy: this.vy, lookRight: this.lookRight,
-      behaviorName: this.currentBehavior?.name ?? "StandUp", behaviorId: this.currentBehavior?.id,
-      behaviorTicks: this.behaviorTicks, stillTicks: this.stillTicks, anchorStillTicks: this.anchorStillTicks,
+      anchorX:
+        surface && this.borderIsOn("left", { x: this.x, y: this.y })
+          ? "left"
+          : surface && this.borderIsOn("right", { x: this.x, y: this.y })
+            ? "right"
+            : "free",
+      anchorY:
+        surface === "floor"
+          ? "floor"
+          : surface === "ceiling"
+            ? "ceiling"
+            : "free",
+      interaction,
+      vx: this.vx,
+      vy: this.vy,
+      lookRight: this.lookRight,
+      behaviorName: this.currentBehavior?.name ?? "StandUp",
+      behaviorId: this.currentBehavior?.id,
+      behaviorTicks: this.behaviorTicks,
+      stillTicks: this.stillTicks,
+      anchorStillTicks: this.anchorStillTicks,
       frames: this.actionStack.map((f) => ({
-        parentIndex: f.parentIndex, referenceDepth: f.referenceDepth,
-        nodeType: f.node.type, nodeName: f.node.name, nodeClassName: f.node.className,
-        childIndex: f.childIndex, vars: { ...f.vars }, resolved: { ...f.resolved },
-        elapsed: f.elapsed, poseIndex: f.poseIndex, poseTick: f.poseTick,
+        parentIndex: f.parentIndex,
+        referenceDepth: f.referenceDepth,
+        nodeType: f.node.type,
+        nodeName: f.node.name,
+        nodeClassName: f.node.className,
+        childIndex: f.childIndex,
+        vars: { ...f.vars },
+        resolved: { ...f.resolved },
+        elapsed: f.elapsed,
+        poseIndex: f.poseIndex,
+        poseTick: f.poseTick,
         animationIndex: f.node.animations?.indexOf(f.animation!) ?? -1,
-        stallTicks: f.stallTicks, progressX: f.progressX, progressY: f.progressY, durationLimit: f.durationLimit,
+        stallTicks: f.stallTicks,
+        progressX: f.progressX,
+        progressY: f.progressY,
+        durationLimit: f.durationLimit,
       })),
     };
     // Use the last actual bitmap, including image-less holds, for the loading placeholder.
-    if (this.elImg.style.visibility !== "hidden" && this.elImg.getAttribute("src") && pose) {
-      const image = this.elImg.getAttribute("src")!.slice((this.packBaseUrl + "/img").length);
-      snapshot.visual = { image, imageAnchor: { ...pose.imageAnchor }, lookRight: this.lookRight,
-        screenX: snapshot.x * this.spriteScale, screenY: snapshot.y * this.spriteScale,
-        scale: this.spriteScale, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight };
+    if (
+      this.elImg.style.visibility !== "hidden" &&
+      this.elImg.getAttribute("src") &&
+      pose
+    ) {
+      const image = this.elImg
+        .getAttribute("src")!
+        .slice((this.packBaseUrl + "/img").length);
+      snapshot.visual = {
+        image,
+        imageAnchor: { ...pose.imageAnchor },
+        lookRight: this.lookRight,
+        screenX: snapshot.x * this.spriteScale,
+        screenY: snapshot.y * this.spriteScale,
+        scale: this.spriteScale,
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+      };
     }
     return snapshot;
   }
@@ -570,8 +641,14 @@ export class MascotEngine {
     this.vx = 0;
     this.vy = 0;
     const surface = this.surfaceAt();
-    const name = surface === "floor" ? "StandUp" : surface === "ceiling" ? "HoldOntoCeiling" :
-      surface === "left-wall" || surface === "right-wall" ? "HoldOntoWall" : "Fall";
+    const name =
+      surface === "floor"
+        ? "StandUp"
+        : surface === "ceiling"
+          ? "HoldOntoCeiling"
+          : surface === "left-wall" || surface === "right-wall"
+            ? "HoldOntoWall"
+            : "Fall";
     this.setBehavior(name, "relay-reset");
     this.actionExpansionsThisTick = 0;
     this.advanceActionTree();
@@ -581,49 +658,130 @@ export class MascotEngine {
   }
 
   public restoreRelaySnapshot(snapshot: RelaySnapshot): boolean {
-    if (!this.config || snapshot.schemaVersion !== 2 || snapshot.pack !== this.mascotName) return false;
+    if (
+      !this.config ||
+      snapshot.schemaVersion !== 2 ||
+      snapshot.pack !== this.mascotName
+    )
+      return false;
     const source = snapshot.area;
-    if (!source || ![snapshot.x, snapshot.y, snapshot.vx, snapshot.vy,
-      source.left, source.top, source.right, source.bottom].every(Number.isFinite) ||
-      source.right <= source.left || source.bottom <= source.top) return false;
+    if (
+      !source ||
+      ![
+        snapshot.x,
+        snapshot.y,
+        snapshot.vx,
+        snapshot.vy,
+        source.left,
+        source.top,
+        source.right,
+        source.bottom,
+      ].every(Number.isFinite) ||
+      source.right <= source.left ||
+      source.bottom <= source.top
+    )
+      return false;
     const area = this.area();
     const point = relayPosition(snapshot, area);
-    const behavior = this.config.behaviors.find((b) => b.name === snapshot.behaviorName &&
-      (snapshot.behaviorId === undefined || b.id === snapshot.behaviorId));
+    const behavior = this.config.behaviors.find(
+      (b) =>
+        b.name === snapshot.behaviorName &&
+        (snapshot.behaviorId === undefined || b.id === snapshot.behaviorId),
+    );
     const frames: ActionFrame[] = [];
-    let valid = !!behavior && Array.isArray(snapshot.frames) && snapshot.frames.length > 0 &&
-      [snapshot.behaviorTicks, snapshot.stillTicks, snapshot.anchorStillTicks].every(
-        (n) => Number.isInteger(n) && n >= 0);
-    if (valid) for (const [index, saved] of snapshot.frames.entries()) {
-      let node = index === 0 ? this.config.actions[behavior!.name] :
-        frames[index - 1].node.children?.[saved.parentIndex];
-      if (!Number.isInteger(saved.parentIndex) || !Number.isInteger(saved.referenceDepth) ||
-        saved.referenceDepth < 0 || saved.referenceDepth > MAX_ACTION_EXPANSIONS_PER_TICK ||
-        ![saved.childIndex, saved.elapsed, saved.poseIndex, saved.poseTick, saved.stallTicks].every(
-          (n) => Number.isInteger(n) && n >= 0) || !saved.vars || !saved.resolved) { valid = false; break; }
-      for (let depth = 0; depth < saved.referenceDepth && node; depth++) {
-        node = node.type === "ActionReference" ? this.config.actions[node.referenceName || ""] : undefined;
+    let valid =
+      !!behavior &&
+      Array.isArray(snapshot.frames) &&
+      snapshot.frames.length > 0 &&
+      [
+        snapshot.behaviorTicks,
+        snapshot.stillTicks,
+        snapshot.anchorStillTicks,
+      ].every((n) => Number.isInteger(n) && n >= 0);
+    if (valid)
+      for (const [index, saved] of snapshot.frames.entries()) {
+        let node =
+          index === 0
+            ? this.config.actions[behavior!.name]
+            : frames[index - 1].node.children?.[saved.parentIndex];
+        if (
+          !Number.isInteger(saved.parentIndex) ||
+          !Number.isInteger(saved.referenceDepth) ||
+          saved.referenceDepth < 0 ||
+          saved.referenceDepth > MAX_ACTION_EXPANSIONS_PER_TICK ||
+          ![
+            saved.childIndex,
+            saved.elapsed,
+            saved.poseIndex,
+            saved.poseTick,
+            saved.stallTicks,
+          ].every((n) => Number.isInteger(n) && n >= 0) ||
+          !saved.vars ||
+          !saved.resolved
+        ) {
+          valid = false;
+          break;
+        }
+        for (let depth = 0; depth < saved.referenceDepth && node; depth++) {
+          node =
+            node.type === "ActionReference"
+              ? this.config.actions[node.referenceName || ""]
+              : undefined;
+        }
+        if (
+          !node ||
+          node.type !== saved.nodeType ||
+          node.name !== saved.nodeName ||
+          node.className !== saved.nodeClassName
+        ) {
+          valid = false;
+          break;
+        }
+        const poses =
+          node.animations?.[saved.animationIndex]?.poses ?? node.poses;
+        if (
+          (saved.durationLimit !== null &&
+            (!Number.isFinite(saved.durationLimit) ||
+              saved.durationLimit < 0)) ||
+          (node.children && saved.childIndex > node.children.length) ||
+          (poses?.length && saved.poseIndex >= poses.length) ||
+          (saved.animationIndex !== -1 &&
+            !node.animations?.[saved.animationIndex])
+        ) {
+          valid = false;
+          break;
+        }
+        const resolved = { ...saved.resolved };
+        const target = mapRelayPoint(
+          typeof resolved.TargetX === "number" ? resolved.TargetX : source.left,
+          typeof resolved.TargetY === "number" ? resolved.TargetY : source.top,
+          source,
+          area,
+        );
+        if (typeof resolved.TargetX === "number") resolved.TargetX = target.x;
+        if (typeof resolved.TargetY === "number") resolved.TargetY = target.y;
+        frames.push({
+          node,
+          parentIndex: saved.parentIndex,
+          referenceDepth: saved.referenceDepth,
+          childIndex: saved.childIndex,
+          vars: { ...saved.vars },
+          resolved,
+          live: {},
+          liveTick: -1,
+          durationLimit: saved.durationLimit,
+          elapsed: saved.elapsed,
+          poseIndex: saved.poseIndex,
+          poseTick: saved.poseTick,
+          stallTicks: saved.stallTicks,
+          progressX: NaN,
+          progressY: NaN,
+          server: null,
+          client: null,
+          animation: node.animations?.[saved.animationIndex],
+          bornTick: this.tickCount,
+        });
       }
-      if (!node || node.type !== saved.nodeType || node.name !== saved.nodeName ||
-        node.className !== saved.nodeClassName) { valid = false; break; }
-      const poses = node.animations?.[saved.animationIndex]?.poses ?? node.poses;
-      if (saved.durationLimit !== null && (!Number.isFinite(saved.durationLimit) || saved.durationLimit < 0) ||
-        node.children && saved.childIndex > node.children.length ||
-        poses?.length && saved.poseIndex >= poses.length ||
-        saved.animationIndex !== -1 && !node.animations?.[saved.animationIndex]) { valid = false; break; }
-      const resolved = { ...saved.resolved };
-      const target = mapRelayPoint(
-        typeof resolved.TargetX === "number" ? resolved.TargetX : source.left,
-        typeof resolved.TargetY === "number" ? resolved.TargetY : source.top, source, area);
-      if (typeof resolved.TargetX === "number") resolved.TargetX = target.x;
-      if (typeof resolved.TargetY === "number") resolved.TargetY = target.y;
-      frames.push({ node, parentIndex: saved.parentIndex, referenceDepth: saved.referenceDepth,
-        childIndex: saved.childIndex, vars: { ...saved.vars }, resolved, live: {}, liveTick: -1,
-        durationLimit: saved.durationLimit, elapsed: saved.elapsed, poseIndex: saved.poseIndex,
-        poseTick: saved.poseTick, stallTicks: saved.stallTicks,
-        progressX: NaN, progressY: NaN, server: null, client: null,
-        animation: node.animations?.[saved.animationIndex], bornTick: this.tickCount });
-    }
     // Commit only after validation. Old handles must never survive a replacement.
     this.releaseStack();
     this.interaction.finalize();
@@ -641,7 +799,9 @@ export class MascotEngine {
     this.behaviorUsability.clear();
 
     if (!valid || snapshot.interaction) {
-      this.interactionCooldownUntil = this.tickCount + MascotEngine.animationConfig.interactionCooldown(this.mascotName);
+      this.interactionCooldownUntil =
+        this.tickCount +
+        MascotEngine.animationConfig.interactionCooldown(this.mascotName);
       this.resetForRelay();
     } else {
       this.vx = snapshot.vx;
@@ -656,12 +816,22 @@ export class MascotEngine {
     this.accumulator = 0;
     this.lastTime = performance.now();
 
-    if (valid && !snapshot.interaction && !this.currentPose()?.image && snapshot.visual) {
+    if (
+      valid &&
+      !snapshot.interaction &&
+      !this.currentPose()?.image &&
+      snapshot.visual
+    ) {
       const visual = snapshot.visual;
       this.elImg.src = this.spriteUrl(visual.image);
       const flip = visual.lookRight ? -1 : 1;
       this.elImg.style.transform = `translate(${-flip * visual.imageAnchor.x * this.spriteScale}px, ${-visual.imageAnchor.y * this.spriteScale}px) scaleX(${flip * this.spriteScale}) scaleY(${this.spriteScale})`;
-      this.lastRenderedPose = { image: visual.image, imageAnchor: { ...visual.imageAnchor }, velocity: { x: 0, y: 0 }, duration: 1 };
+      this.lastRenderedPose = {
+        image: visual.image,
+        imageAnchor: { ...visual.imageAnchor },
+        velocity: { x: 0, y: 0 },
+        duration: 1,
+      };
     }
     this.render(false);
     return true;
@@ -673,7 +843,8 @@ export class MascotEngine {
 
   /** One page-level dispatcher handles events for all mascots. */
   private static installGlobalEvents(): void {
-    if (MascotEngine.globalEventsInstalled || typeof window === "undefined") return;
+    if (MascotEngine.globalEventsInstalled || typeof window === "undefined")
+      return;
     MascotEngine.globalEventsInstalled = true;
     window.addEventListener("mousemove", (event) => {
       for (const engine of MascotEngine.liveEngines) {
@@ -692,14 +863,21 @@ export class MascotEngine {
             if (engine.isDragging) engine.applyDragAnchor();
           }
         }
-        if (!engine.isDragging) engine.elRoot.style.cursor = engine.hotspotUnderCursor(event.clientX, event.clientY) ? "pointer" : "grab";
+        if (!engine.isDragging)
+          engine.elRoot.style.cursor = engine.hotspotUnderCursor(
+            event.clientX,
+            event.clientY,
+          )
+            ? "pointer"
+            : "grab";
       }
     });
     window.addEventListener("mouseup", (event) => {
       for (const engine of MascotEngine.liveEngines) {
         engine.cursorButtons = event.buttons;
         // ShijimaWidget::mouseReleaseEvent(): click or throw, decided by the gesture.
-        if (engine.pressActive) engine.finishPress(event.clientX, event.clientY);
+        if (engine.pressActive)
+          engine.finishPress(event.clientX, event.clientY);
       }
     });
     document.addEventListener("visibilitychange", () => {
@@ -822,10 +1000,14 @@ export class MascotEngine {
    * This is the entry point a settings UI would use; it wins over the file until
    * `loadAnimationConfig()` is called again with `force`.
    */
-  public static setAnimationConfig(file: unknown, source = "(programmatic)"): AnimationConfig {
+  public static setAnimationConfig(
+    file: unknown,
+    source = "(programmatic)",
+  ): AnimationConfig {
     // An explicit object that carries the flag also updates the page-level
     // preference; otherwise the last `configure({ ignoreBuiltin })` stays in force.
-    const flag = (file as { ignoreBuiltin?: unknown } | null | undefined)?.ignoreBuiltin;
+    const flag = (file as { ignoreBuiltin?: unknown } | null | undefined)
+      ?.ignoreBuiltin;
     if (typeof flag === "boolean") MascotEngine.builtinPreference = flag;
     MascotEngine.animationConfig = new AnimationConfig(file, source);
     MascotEngine.animationConfigSetExplicitly = true;
@@ -865,14 +1047,19 @@ export class MascotEngine {
    */
   public static loadAnimationConfig(url?: string): Promise<void> {
     if (url) MascotEngine.animationConfigUrl = url;
-    const target = MascotEngine.animationConfigUrl ?? MascotEngine.ANIMATION_CONFIG_URL;
-    if (MascotEngine.animationConfigLoad) return MascotEngine.animationConfigLoad;
+    const target =
+      MascotEngine.animationConfigUrl ?? MascotEngine.ANIMATION_CONFIG_URL;
+    if (MascotEngine.animationConfigLoad)
+      return MascotEngine.animationConfigLoad;
     MascotEngine.animationConfigLoad = (async () => {
       try {
         const controller = new AbortController();
         const timer = window.setTimeout(() => controller.abort(), 3000);
         try {
-          const response = await fetch(target, { cache: "no-store", signal: controller.signal });
+          const response = await fetch(target, {
+            cache: "no-store",
+            signal: controller.signal,
+          });
           const contentType = response.headers.get("content-type") ?? "";
           if (!response.ok || !contentType.includes("json")) return;
           const file: unknown = await response.json();
@@ -904,10 +1091,15 @@ export class MascotEngine {
   private static watchReducedMotion() {
     MascotEngine.animationConfig.refreshReducedMotion();
     if (MascotEngine.reducedMotionWatcher) return;
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    if (
+      typeof window === "undefined" ||
+      typeof window.matchMedia !== "function"
+    )
+      return;
     try {
       const query = window.matchMedia("(prefers-reduced-motion: reduce)");
-      const listener = () => MascotEngine.animationConfig.setReducedMotion(query.matches);
+      const listener = () =>
+        MascotEngine.animationConfig.setReducedMotion(query.matches);
       query.addEventListener("change", listener);
       MascotEngine.reducedMotionWatcher = () => {
         query.removeEventListener("change", listener);
@@ -919,7 +1111,9 @@ export class MascotEngine {
   }
 
   /** Re-read the file, discarding both the cache and any programmatic override. */
-  public static async reloadAnimationConfig(url?: string): Promise<AnimationConfig> {
+  public static async reloadAnimationConfig(
+    url?: string,
+  ): Promise<AnimationConfig> {
     MascotEngine.animationConfigLoad = null;
     MascotEngine.animationConfigSetExplicitly = false;
     if (url) MascotEngine.animationConfigUrl = url;
@@ -935,15 +1129,24 @@ export class MascotEngine {
     this.label = `${this.id}-${mascotName}`;
     this.elRoot = document.createElement("div");
     Object.assign(this.elRoot.style, {
-      position: "fixed", left: "0px", top: "0px", pointerEvents: "auto",
-      cursor: "grab", zIndex: "1", userSelect: "none", visibility: "hidden",
+      position: "fixed",
+      left: "0px",
+      top: "0px",
+      pointerEvents: "none",
+      cursor: "grab",
+      zIndex: "1",
+      userSelect: "none",
+      visibility: "hidden",
       // A definite box as well: the root carries a transform and nothing else, so
       // without this it has a zero-size hit box and is invisible to hit testing.
-      width: `${SPRITE_WIDTH}px`, height: `${SPRITE_WIDTH}px`,
+      width: `${SPRITE_WIDTH}px`,
+      height: `${SPRITE_WIDTH}px`,
     });
     this.elImg = document.createElement("img");
     this.elImg.style.position = "absolute";
     this.elImg.style.visibility = "hidden";
+    this.elImg.style.pointerEvents = "auto";
+    this.elImg.style.cursor = "inherit";
     this.elImg.ondragstart = () => false;
     // Give the sprite a *definite* size from its bitmap instead of relying on
     // intrinsic sizing to inflate a shrink-to-fit box.
@@ -977,7 +1180,11 @@ export class MascotEngine {
     // Customisation is read first so the very first tick already obeys it.
     await MascotEngine.loadAnimationConfig();
     options?.signal?.throwIfAborted();
-    this.config = await XMLParser.loadConfig(this.mascotName, this.packBaseUrl, options?.signal);
+    this.config = await XMLParser.loadConfig(
+      this.mascotName,
+      this.packBaseUrl,
+      options?.signal,
+    );
     // Both awaits above are network-bound, so `destroy()` can legitimately have run
     // in between. Continuing would re-register a dead engine and re-attach its DOM,
     // leaving a zombie mascot that nothing can ever remove.
@@ -1016,18 +1223,31 @@ export class MascotEngine {
     // Do not expose the fixed box while the first real bitmap is still pending.
     // This prevents the browser's empty-image placeholder from flashing at (0, 0).
     this.elRoot.style.visibility = options?.startPaused ? "hidden" : "visible";
-    this.emit({ kind: "spawn", detail: `viewport=${window.innerWidth}x${window.innerHeight}` });
+    this.emit({
+      kind: "spawn",
+      detail: `viewport=${window.innerWidth}x${window.innerHeight}`,
+    });
     if (restoredSnapshot) {
-
-      this.emit({ kind: "milestone", name: "relay-resume", detail: `behavior=${this.currentBehavior?.name}`, x: this.x, y: this.y, leaf: this.leafLabel() });
+      this.emit({
+        kind: "milestone",
+        name: "relay-resume",
+        detail: `behavior=${this.currentBehavior?.name}`,
+        x: this.x,
+        y: this.y,
+        leaf: this.leafLabel(),
+      });
     }
     this.lastTime = performance.now();
     if (document.hidden) this.setPauseReason("hidden", true);
-    const shouldCoordinate = options?.enablePageCoordinator ?? !MascotEngine.extensionMode;
+    const shouldCoordinate =
+      options?.enablePageCoordinator ?? !MascotEngine.extensionMode;
     if (shouldCoordinate) {
-      this.unregisterPage = registerMascotPage((owner) => this.setPauseReason("background-page", !owner));
+      this.unregisterPage = registerMascotPage((owner) =>
+        this.setPauseReason("background-page", !owner),
+      );
     }
-    if (this.pauseReasons.size === 0) this.loopId = requestAnimationFrame((t) => this.loop(t));
+    if (this.pauseReasons.size === 0)
+      this.loopId = requestAnimationFrame((t) => this.loop(t));
   }
 
   /** URL of a pack sprite. */
@@ -1059,7 +1279,9 @@ export class MascotEngine {
   /** Await the actual first bitmap; never remove a placeholder for an undecoded image. */
   private async warmFirstPose(): Promise<void> {
     const pose = this.currentPose();
-    const src = pose?.image ? this.spriteUrl(pose.image) : this.elImg.getAttribute("src");
+    const src = pose?.image
+      ? this.spriteUrl(pose.image)
+      : this.elImg.getAttribute("src");
     if (!src) return;
     this.elImg.src = src;
     let timer = 0;
@@ -1067,12 +1289,18 @@ export class MascotEngine {
       await Promise.race([
         this.elImg.decode(),
         new Promise<never>((_, reject) => {
-          timer = window.setTimeout(() => reject(new Error("First sprite decode timed out")), 1500);
+          timer = window.setTimeout(
+            () => reject(new Error("First sprite decode timed out")),
+            1500,
+          );
         }),
       ]);
-      if (!this.elImg.naturalWidth) throw new Error("First sprite has no bitmap");
+      if (!this.elImg.naturalWidth)
+        throw new Error("First sprite has no bitmap");
       this.applySpriteIntrinsicSize();
-    } finally { window.clearTimeout(timer); }
+    } finally {
+      window.clearTimeout(timer);
+    }
   }
 
   /**
@@ -1085,7 +1313,8 @@ export class MascotEngine {
     const img = this.elImg;
     const width = img.naturalWidth || SPRITE_WIDTH;
     const height = img.naturalHeight || SPRITE_WIDTH;
-    if (img.style.width === `${width}px` && img.style.height === `${height}px`) return;
+    if (img.style.width === `${width}px` && img.style.height === `${height}px`)
+      return;
     img.style.width = `${width}px`;
     img.style.height = `${height}px`;
     // Mirror the size onto the wrapper so it has a non-zero hit box as well: the
@@ -1161,17 +1390,36 @@ export class MascotEngine {
       cancelAnimationFrame(this.loopId);
 
       this.resetScrollTracking();
-      this.emit({ kind: "milestone", name: "paused", detail: reason, x: this.x, y: this.y, leaf: this.leafLabel() });
+      this.emit({
+        kind: "milestone",
+        name: "paused",
+        detail: reason,
+        x: this.x,
+        y: this.y,
+        leaf: this.leafLabel(),
+      });
     } else {
       this.resetScrollTracking();
-      this.emit({ kind: "milestone", name: "resumed", detail: reason, x: this.x, y: this.y, leaf: this.leafLabel() });
+      this.emit({
+        kind: "milestone",
+        name: "resumed",
+        detail: reason,
+        x: this.x,
+        y: this.y,
+        leaf: this.leafLabel(),
+      });
       this.resumeLoop();
     }
   }
 
   private isOnScreen() {
     const rect = (this.container ?? this.elRoot).getBoundingClientRect();
-    return rect.bottom > 0 && rect.right > 0 && rect.top < window.innerHeight && rect.left < window.innerWidth;
+    return (
+      rect.bottom > 0 &&
+      rect.right > 0 &&
+      rect.top < window.innerHeight &&
+      rect.left < window.innerWidth
+    );
   }
 
   private resumeLoop() {
@@ -1247,7 +1495,17 @@ export class MascotEngine {
     let reported: EngineEvent = event;
     if (scale !== 1) {
       const source = event as unknown as Record<string, unknown>;
-      const keys = ["x", "y", "px", "py", "dx", "dy", "step", "targetX", "targetY"];
+      const keys = [
+        "x",
+        "y",
+        "px",
+        "py",
+        "dx",
+        "dy",
+        "step",
+        "targetX",
+        "targetY",
+      ];
       let converted: Record<string, unknown> | null = null;
       for (const key of keys) {
         if (typeof source[key] !== "number") continue;
@@ -1296,7 +1554,10 @@ export class MascotEngine {
    * geometry, so the local point is simply the virtual cursor minus the sprite's
    * virtual top-left. The hotspot origins then compare directly, at any drawn size.
    */
-  private spritePoint(clientX: number, clientY: number): { x: number; y: number } | null {
+  private spritePoint(
+    clientX: number,
+    clientY: number,
+  ): { x: number; y: number } | null {
     const pose = this.currentPose();
     if (!pose) return null;
     // `x`/`y` and pointer coordinates are both in the viewport frame.
@@ -1304,7 +1565,9 @@ export class MascotEngine {
     const width = this.elImg.naturalWidth || SPRITE_WIDTH;
     const shift = this.hostShift();
     const left =
-      (this.lookRight ? this.x - (width - pose.imageAnchor.x) : this.x - pose.imageAnchor.x) + shift.x;
+      (this.lookRight
+        ? this.x - (width - pose.imageAnchor.x)
+        : this.x - pose.imageAnchor.x) + shift.x;
     const top = this.y - pose.imageAnchor.y + shift.y;
     return { x: cursor.x - left, y: cursor.y - top };
   }
@@ -1325,7 +1588,8 @@ export class MascotEngine {
    * transform and the host's.
    */
   private hostShift(force = false): { x: number; y: number } {
-    if (!force && this.hostShiftCache.tick === this.tickCount) return this.hostShiftCache;
+    if (!force && this.hostShiftCache.tick === this.tickCount)
+      return this.hostShiftCache;
     const scale = this.spriteScale;
     const rect = this.elRoot.getBoundingClientRect();
     this.hostShiftCache = {
@@ -1348,54 +1612,61 @@ export class MascotEngine {
     if (!hotspot) return null;
     // A hotspot is a deliberate visitor action, so it is not filtered by the random
     // selection knobs — but an explicit "never show this" is still honoured.
-    if (MascotEngine.animationConfig.denies(this.mascotName, hotspot.behavior)) return null;
+    if (MascotEngine.animationConfig.denies(this.mascotName, hotspot.behavior))
+      return null;
     return hotspot;
   }
 
   private stackPath() {
     return this.actionStack
-      .map((frame) => frame.node.name ?? frame.node.className ?? frame.node.type)
+      .map(
+        (frame) => frame.node.name ?? frame.node.className ?? frame.node.type,
+      )
       .join(" > ");
   }
 
   private bindEvents() {
     const signal = this.eventsAbortController.signal;
 
-    this.elRoot.addEventListener("mousedown", (e) => {
-      if (e.button !== 0) return;
-      // A press has to be mapped through the *drawn* position, so measure any host CSS
-      // offset now instead of reusing this tick's cached value.
-      this.hostShift(true);
-      // ShijimaWidget::pointInside(): the press only belongs to the mascot when it
-      // lands on an opaque pixel of the frame it is showing, so the transparent
-      // corners of the 128 px box are not a handle.
-      if (!this.isOpaqueAt(e.clientX, e.clientY)) return;
-      this.pressActive = true;
-      this.pressStartAt = performance.now();
-      this.pressClientX = e.clientX;
-      this.pressClientY = e.clientY;
-      this.pressMaxMovement = 0;
-      this.hotspotHoldTriggered = false;
-      // The press is itself a pointer report. Qt reads `QCursor::pos()` every tick, so
-      // its cursor is always current; here the cursor would otherwise stay where the
-      // last `mousemove` left it — a mascot that walked under a resting pointer would
-      // look like it had been dragged away from the press point.
-      this.cursorX = e.clientX;
-      this.cursorY = e.clientY;
-      this.cursorButtons = e.buttons;
-      // libshijima animation::handle_dragging(): a press inside a hotspot runs that
-      // behaviour instead of picking the mascot up. The gesture policy decides *when*
-      // (long press or click), and moving past the hold tolerance turns the press into
-      // a pickup anyway (MascotWidgetInteraction::mouseMoveEvent).
-      const hotspot = this.hotspotUnderCursor(e.clientX, e.clientY);
-      if (hotspot) {
-        this.hotspotHold = hotspot;
-        this.elRoot.style.cursor = "pointer";
-        return;
-      }
-      this.hotspotHold = null;
-      this.beginDrag(e.clientX, e.clientY);
-    }, { signal });
+    this.elRoot.addEventListener(
+      "mousedown",
+      (e) => {
+        if (e.button !== 0) return;
+        // A press has to be mapped through the *drawn* position, so measure any host CSS
+        // offset now instead of reusing this tick's cached value.
+        this.hostShift(true);
+        // ShijimaWidget::pointInside(): the press only belongs to the mascot when it
+        // lands on an opaque pixel of the frame it is showing, so the transparent
+        // corners of the 128 px box are not a handle.
+        if (!this.isOpaqueAt(e.clientX, e.clientY)) return;
+        this.pressActive = true;
+        this.pressStartAt = performance.now();
+        this.pressClientX = e.clientX;
+        this.pressClientY = e.clientY;
+        this.pressMaxMovement = 0;
+        this.hotspotHoldTriggered = false;
+        // The press is itself a pointer report. Qt reads `QCursor::pos()` every tick, so
+        // its cursor is always current; here the cursor would otherwise stay where the
+        // last `mousemove` left it — a mascot that walked under a resting pointer would
+        // look like it had been dragged away from the press point.
+        this.cursorX = e.clientX;
+        this.cursorY = e.clientY;
+        this.cursorButtons = e.buttons;
+        // libshijima animation::handle_dragging(): a press inside a hotspot runs that
+        // behaviour instead of picking the mascot up. The gesture policy decides *when*
+        // (long press or click), and moving past the hold tolerance turns the press into
+        // a pickup anyway (MascotWidgetInteraction::mouseMoveEvent).
+        const hotspot = this.hotspotUnderCursor(e.clientX, e.clientY);
+        if (hotspot) {
+          this.hotspotHold = hotspot;
+          this.elRoot.style.cursor = "pointer";
+          return;
+        }
+        this.hotspotHold = null;
+        this.beginDrag(e.clientX, e.clientY);
+      },
+      { signal },
+    );
 
     // Page-level input is dispatched once for all mascots by installGlobalEvents().
   }
@@ -1423,7 +1694,10 @@ export class MascotEngine {
   }
 
   /** A client (screen) point in virtual units. */
-  private toVirtual(clientX: number, clientY: number): { x: number; y: number } {
+  private toVirtual(
+    clientX: number,
+    clientY: number,
+  ): { x: number; y: number } {
     const scale = this.spriteScale;
     return { x: clientX / scale, y: clientY / scale };
   }
@@ -1437,14 +1711,26 @@ export class MascotEngine {
    */
   private simulationCursorVirtual(): { x: number; y: number } {
     const cursor = this.toVirtual(this.cursorX, this.cursorY);
-    return this.dragGrab ? { x: cursor.x + this.dragGrab.x, y: cursor.y + this.dragGrab.y } : cursor;
+    return this.dragGrab
+      ? { x: cursor.x + this.dragGrab.x, y: cursor.y + this.dragGrab.y }
+      : cursor;
   }
 
   /** `environment.cursor` for the pack expressions: position and per-tick delta,
    *  both in virtual units. */
-  private cursorInVirtualUnits(): { x: number; y: number; dx: number; dy: number } {
+  private cursorInVirtualUnits(): {
+    x: number;
+    y: number;
+    dx: number;
+    dy: number;
+  } {
     const cursor = this.simulationCursorVirtual();
-    return { x: cursor.x, y: cursor.y, dx: this.cursorTickDX, dy: this.cursorTickDY };
+    return {
+      x: cursor.x,
+      y: cursor.y,
+      dx: this.cursorTickDX,
+      dy: this.cursorTickDY,
+    };
   }
 
   /** Release a held mascot: the grab offset goes away, so the pointer is the cursor
@@ -1523,7 +1809,8 @@ export class MascotEngine {
   private updatePressMovement(): void {
     if (!this.pressActive) return;
     const distance =
-      Math.abs(this.cursorX - this.pressClientX) + Math.abs(this.cursorY - this.pressClientY);
+      Math.abs(this.cursorX - this.pressClientX) +
+      Math.abs(this.cursorY - this.pressClientY);
     this.pressMaxMovement = Math.max(this.pressMaxMovement, distance);
     if (this.isDragging || !this.hotspotHold) return;
     if (distance <= HOLD_MOVEMENT_TOLERANCE_PX) return;
@@ -1569,7 +1856,8 @@ export class MascotEngine {
     // A release that follows a completed hold simply stops patting; only a short,
     // still release is a click (`MascotHoldGesture::qualifiesAsClick`).
     if (triggeredHold || !hadCandidate) return;
-    if (elapsed > CLICK_DURATION_MS || movement > CLICK_MOVEMENT_TOLERANCE_PX) return;
+    if (elapsed > CLICK_DURATION_MS || movement > CLICK_MOVEMENT_TOLERANCE_PX)
+      return;
     const hotspot = this.hotspotUnderCursor(clientX, clientY);
     if (!hotspot) return;
     this.emitHotspot("click", hotspot);
@@ -1605,11 +1893,15 @@ export class MascotEngine {
     const img = this.elImg;
     const width = img.naturalWidth || SPRITE_WIDTH;
     const height = img.naturalHeight || SPRITE_WIDTH;
-    if (point.x < 0 || point.y < 0 || point.x > width || point.y > height) return false;
+    if (point.x < 0 || point.y < 0 || point.x > width || point.y > height)
+      return false;
     const data = this.frameAlpha();
     if (!data) return true;
     // `spritePoint()` is in drawn (possibly mirrored) space; the bitmap is not.
-    const x = Math.min(width - 1, Math.max(0, Math.round(this.lookRight ? width - point.x : point.x)));
+    const x = Math.min(
+      width - 1,
+      Math.max(0, Math.round(this.lookRight ? width - point.x : point.x)),
+    );
     const y = Math.min(height - 1, Math.max(0, Math.round(point.y)));
     return data.data[(y * data.width + x) * 4 + 3] !== 0;
   }
@@ -1622,7 +1914,8 @@ export class MascotEngine {
     this.alphaData = null;
     const img = this.elImg;
     if (!src || !img.complete || img.naturalWidth === 0) return null;
-    const canvas = this.alphaCanvas ?? (this.alphaCanvas = document.createElement("canvas"));
+    const canvas =
+      this.alphaCanvas ?? (this.alphaCanvas = document.createElement("canvas"));
     canvas.width = img.naturalWidth;
     canvas.height = img.naturalHeight;
     const context = canvas.getContext("2d", { willReadFrequently: true });
@@ -1641,11 +1934,16 @@ export class MascotEngine {
   /** Resolve a configuration Metric against one viewport axis. A bare number is a
    *  page pixel value, so it is divided by the sprite scale to reach virtual units;
    *  percentages and `left`/`right`/`top`/`bottom`/`center` follow the viewport. */
-  private metric(value: number | string | undefined, axis: "x" | "y", fallback: number): number {
+  private metric(
+    value: number | string | undefined,
+    axis: "x" | "y",
+    fallback: number,
+  ): number {
     if (value === undefined) return fallback;
     const extent = axis === "x" ? this.virtualWidth : this.virtualHeight;
     const scale = this.spriteScale;
-    if (typeof value === "number") return Number.isFinite(value) ? value / scale : fallback;
+    if (typeof value === "number")
+      return Number.isFinite(value) ? value / scale : fallback;
     const text = String(value).trim().toLowerCase();
     if (text.endsWith("%")) {
       const percent = Number(text.slice(0, -1));
@@ -1675,13 +1973,16 @@ export class MascotEngine {
 
   /** Start position from the configuration: top or floor, any x, and several
    *  mascots are spread apart instead of stacking on one spot. */
-  private applySpawnPosition() {
+  private applySpawnPosition(indexOverride?: number) {
     const spawn = MascotEngine.animationConfig.spawn(this.mascotName);
     const area = this.area();
     const base = this.metric(spawn.x, "x", (area.left + area.right) / 2);
-    const index = MascotEngine.liveEngines.size;
+    const index = indexOverride ?? MascotEngine.liveEngines.size;
     const stagger = (spawn.staggerPx ?? 0) / this.spriteScale;
-    const offset = index === 0 || stagger === 0 ? 0 : (index % 2 === 1 ? 1 : -1) * Math.ceil(index / 2) * stagger;
+    const offset =
+      index === 0 || stagger === 0
+        ? 0
+        : (index % 2 === 1 ? 1 : -1) * Math.ceil(index / 2) * stagger;
     this.x = Math.min(area.right, Math.max(area.left, base + offset));
     this.y =
       spawn.vertical === "floor"
@@ -1690,37 +1991,80 @@ export class MascotEngine {
   }
 
   /** Is `point` on one of the work-area borders? */
-  private borderIsOn(side: "top" | "right" | "bottom" | "left", point: { x: number; y: number }, area = this.area()) {
+  private borderIsOn(
+    side: "top" | "right" | "bottom" | "left",
+    point: { x: number; y: number },
+    area = this.area(),
+  ) {
     const tolerance = 1;
     if (side === "top" || side === "bottom") {
       const y = side === "top" ? area.top : area.bottom;
-      return Math.abs(point.y - y) < tolerance && point.x >= area.left && point.x <= area.right;
+      return (
+        Math.abs(point.y - y) < tolerance &&
+        point.x >= area.left &&
+        point.x <= area.right
+      );
     }
     const x = side === "left" ? area.left : area.right;
-    return Math.abs(point.x - x) < tolerance && point.y >= area.top && point.y <= area.bottom;
+    return (
+      Math.abs(point.x - x) < tolerance &&
+      point.y >= area.top &&
+      point.y <= area.bottom
+    );
   }
 
   private environment() {
     const area = this.area();
-    const border = (side: "top" | "right" | "bottom" | "left") => ({ isOn: (point: { x: number; y: number }) => this.borderIsOn(side, point, area) });
+    const border = (side: "top" | "right" | "bottom" | "left") => ({
+      isOn: (point: { x: number; y: number }) =>
+        this.borderIsOn(side, point, area),
+    });
     const workArea = {
       ...area,
       width: area.right - area.left,
       height: area.bottom - area.top,
-      topBorder: border("top"), rightBorder: border("right"),
-      bottomBorder: border("bottom"), leftBorder: border("left"),
-      isOn: (point: { x: number; y: number }) => ["top", "right", "bottom", "left"].some((side) => this.borderIsOn(side as "top" | "right" | "bottom" | "left", point, area)),
+      topBorder: border("top"),
+      rightBorder: border("right"),
+      bottomBorder: border("bottom"),
+      leftBorder: border("left"),
+      isOn: (point: { x: number; y: number }) =>
+        ["top", "right", "bottom", "left"].some((side) =>
+          this.borderIsOn(
+            side as "top" | "right" | "bottom" | "left",
+            point,
+            area,
+          ),
+        ),
     };
     return {
-      floor: { isOn: (point: { x: number; y: number }) => this.borderIsOn("bottom", point, area) },
-      ceiling: { isOn: (point: { x: number; y: number }) => this.borderIsOn("top", point, area) },
-      wall: { isOn: (point: { x: number; y: number }) => this.borderIsOn("left", point, area) || this.borderIsOn("right", point, area) },
+      floor: {
+        isOn: (point: { x: number; y: number }) =>
+          this.borderIsOn("bottom", point, area),
+      },
+      ceiling: {
+        isOn: (point: { x: number; y: number }) =>
+          this.borderIsOn("top", point, area),
+      },
+      wall: {
+        isOn: (point: { x: number; y: number }) =>
+          this.borderIsOn("left", point, area) ||
+          this.borderIsOn("right", point, area),
+      },
       workArea,
       screen: { ...workArea },
       activeIE: {
-        visible: false, left: 0, right: 0, top: 0, bottom: 0, width: 0, height: 0,
-        topBorder: { isOn: () => false }, bottomBorder: { isOn: () => false },
-        leftBorder: { isOn: () => false }, rightBorder: { isOn: () => false }, isOn: () => false,
+        visible: false,
+        left: 0,
+        right: 0,
+        top: 0,
+        bottom: 0,
+        width: 0,
+        height: 0,
+        topBorder: { isOn: () => false },
+        bottomBorder: { isOn: () => false },
+        leftBorder: { isOn: () => false },
+        rightBorder: { isOn: () => false },
+        isOn: () => false,
       },
       // The cursor is a sprite-unit quantity for the packs: `Pinched` picks its held
       // pose from `#{FootX < mascot.environment.cursor.x-50}`, `ChaseMouse` targets
@@ -1756,7 +2100,10 @@ export class MascotEngine {
    * target that is re-rolled every tick makes the mascot jitter around it
    * ("stuck halfway up the wall") instead of travelling to it.
    */
-  private resolveVars(attributes: Record<string, string>, inherited: Record<string, unknown> = {}) {
+  private resolveVars(
+    attributes: Record<string, string>,
+    inherited: Record<string, unknown> = {},
+  ) {
     const resolved: Record<string, unknown> = { ...inherited };
     // Two passes: an attribute may reference another attribute of the same
     // <ActionReference> (TargetX="#{...cursor.x+Gap}" Gap="${...}"), which only
@@ -1766,7 +2113,10 @@ export class MascotEngine {
         if (/^#\{/.test(raw)) continue; // dynamic (every frame)
         if (/^\$\{/.test(raw)) {
           try {
-            resolved[key] = this.run(raw, this.mascotScope({ ...attributes, ...resolved }));
+            resolved[key] = this.run(
+              raw,
+              this.mascotScope({ ...attributes, ...resolved }),
+            );
           } catch {
             if (!(key in resolved)) resolved[key] = raw;
           }
@@ -1792,7 +2142,10 @@ export class MascotEngine {
     for (const [key, value] of Object.entries(raw)) {
       if (key in frame.resolved || !/^\$\{/.test(value)) continue;
       try {
-        frame.resolved[key] = this.run(value, this.mascotScope({ ...raw, ...frame.resolved }));
+        frame.resolved[key] = this.run(
+          value,
+          this.mascotScope({ ...raw, ...frame.resolved }),
+        );
       } catch {
         frame.resolved[key] = value;
       }
@@ -1846,7 +2199,10 @@ export class MascotEngine {
     return typeof value === "string" ? value : String(value);
   }
 
-  private varNumber(frame: ActionFrame | undefined, key: string): number | null {
+  private varNumber(
+    frame: ActionFrame | undefined,
+    key: string,
+  ): number | null {
     const value = this.varValue(frame, key);
     return typeof value === "number" && Number.isFinite(value) ? value : null;
   }
@@ -1863,7 +2219,10 @@ export class MascotEngine {
     return expression.replace(/^\$\{|^#\{|\}$/g, "").trim();
   }
 
-  private evaluate(expression: string | undefined, frame?: ActionFrame): unknown {
+  private evaluate(
+    expression: string | undefined,
+    frame?: ActionFrame,
+  ): unknown {
     if (!expression) return undefined;
     try {
       return this.run(expression, this.context(frame));
@@ -1881,7 +2240,10 @@ export class MascotEngine {
     }
   }
 
-  private evaluateCondition(condition: string | undefined, frame?: ActionFrame) {
+  private evaluateCondition(
+    condition: string | undefined,
+    frame?: ActionFrame,
+  ) {
     if (!condition) return true;
     return Boolean(this.evaluate(condition, frame));
   }
@@ -1891,12 +2253,18 @@ export class MascotEngine {
     return typeof value === "number" && Number.isFinite(value) ? value : null;
   }
 
-  private newFrame(node: ActionNode, vars: Record<string, string> = {}, resolved: Record<string, unknown> = {}, parentIndex = -1, referenceDepth = 0): ActionFrame {
+  private newFrame(
+    node: ActionNode,
+    vars: Record<string, string> = {},
+    resolved: Record<string, unknown> = {},
+    parentIndex = -1,
+    referenceDepth = 0,
+  ): ActionFrame {
     const frame: ActionFrame = {
       node,
       parentIndex,
       referenceDepth,
-      childIndex: 0,      // libshijima layers the action's own attributes under the <ActionReference>
+      childIndex: 0, // libshijima layers the action's own attributes under the <ActionReference>
       // overlay, so a condition may read either of them.
       vars: { ...(node.attributes || {}), ...vars },
       resolved,
@@ -1928,7 +2296,10 @@ export class MascotEngine {
     const label = `${frame.node.name ?? frame.node.className ?? "?"}|${frame.node.type}`;
     if (this.isScanMove(frame.node)) {
       const probe = affordance.trim();
-      const scan = MascotEngine.broadcasts.probe(probe, { x: this.x, y: this.y });
+      const scan = MascotEngine.broadcasts.probe(probe, {
+        x: this.x,
+        y: this.y,
+      });
       frame.client = MascotEngine.broadcasts.tryConnect(
         probe,
         { x: this.x, y: this.y },
@@ -1950,7 +2321,10 @@ export class MascotEngine {
       });
       return;
     }
-    frame.server = MascotEngine.broadcasts.startBroadcast(affordance.trim(), { x: this.x, y: this.y });
+    frame.server = MascotEngine.broadcasts.startBroadcast(affordance.trim(), {
+      x: this.x,
+      y: this.y,
+    });
     const vars = { ...frame.vars };
     delete vars.Affordance;
     frame.vars = vars;
@@ -1990,8 +2364,14 @@ export class MascotEngine {
     }
     this.behaviorInitsThisTick++;
     const behavior =
-      this.config.behaviors.find((entry) => entry.name === name && (behaviorId === undefined || entry.id === behaviorId)) ||
-      (this.config.actions[name] ? { name, frequency: 100, hidden: false, nextBehaviors: [] } : undefined);
+      this.config.behaviors.find(
+        (entry) =>
+          entry.name === name &&
+          (behaviorId === undefined || entry.id === behaviorId),
+      ) ||
+      (this.config.actions[name]
+        ? { name, frequency: 100, hidden: false, nextBehaviors: [] }
+        : undefined);
     const selected =
       behavior ||
       this.config.behaviors.find((entry) => entry.name === "StandUp") ||
@@ -2012,7 +2392,11 @@ export class MascotEngine {
     }
     // libshijima activate_queued_behavior(): running the behaviour a live handshake
     // asked for marks that handshake as started.
-    if (this.interaction.available && !this.interaction.started && this.interaction.behavior === selected.name) {
+    if (
+      this.interaction.available &&
+      !this.interaction.started &&
+      this.interaction.behavior === selected.name
+    ) {
       this.interaction.started = true;
     }
     if (
@@ -2025,7 +2409,9 @@ export class MascotEngine {
     // Frames that are being replaced stop advertising and let go of scan targets.
     this.releaseStack();
     this.currentBehavior = selected;
-    this.interactionVisualActive = !!action && this.actionTreeMatches(action, (node) => this.isInteract(node));
+    this.interactionVisualActive =
+      !!action &&
+      this.actionTreeMatches(action, (node) => this.isInteract(node));
     if (this.interactionVisualActive) {
       // Remove the standalone frame at the moment the interaction starts. The
       // partner's interaction sprite must not be paired with this stale frame.
@@ -2057,7 +2443,10 @@ export class MascotEngine {
     try {
       // Page projection follows paint frames, not the slower physics clock.
       this.applyScrollIntent();
-      while (this.accumulator >= runtime.tickMs) { this.tick(); this.accumulator -= runtime.tickMs; }
+      while (this.accumulator >= runtime.tickMs) {
+        this.tick();
+        this.accumulator -= runtime.tickMs;
+      }
       // libshijima interpolates the anchor of *move* actions between subticks, but the
       // dragged action opts out (`dragged::requests_interpolation() == false`): a held
       // mascot is painted exactly where the cursor is, so it cannot trail behind a fast
@@ -2080,7 +2469,8 @@ export class MascotEngine {
         });
       }
     }
-    if (!this.destroyed) this.loopId = requestAnimationFrame((t) => this.loop(t));
+    if (!this.destroyed)
+      this.loopId = requestAnimationFrame((t) => this.loop(t));
   }
 
   private tick() {
@@ -2090,7 +2480,8 @@ export class MascotEngine {
     // (`MascotHoldGesture::leftButtonIsDown`), and a press held long enough becomes
     // the hotspot's hold behaviour.
     if (this.pressActive) {
-      if ((this.cursorButtons & 1) === 0) this.finishPress(this.cursorX, this.cursorY);
+      if ((this.cursorButtons & 1) === 0)
+        this.finishPress(this.cursorX, this.cursorY);
       else {
         this.updatePressMovement();
         this.maintainHotspotHold();
@@ -2109,8 +2500,20 @@ export class MascotEngine {
     // quantities. The clamp is a screen-pixel budget, so a pointer that teleports —
     // a synthetic click, a window move, a remote session — cannot fling the mascot.
     const cursorStepLimit = MAX_CURSOR_STEP / this.spriteScale;
-    this.cursorTickDX = Math.max(-cursorStepLimit, Math.min(cursorStepLimit, (this.cursorX - this.lastTickCursorX) / this.spriteScale));
-    this.cursorTickDY = Math.max(-cursorStepLimit, Math.min(cursorStepLimit, (this.cursorY - this.lastTickCursorY) / this.spriteScale));
+    this.cursorTickDX = Math.max(
+      -cursorStepLimit,
+      Math.min(
+        cursorStepLimit,
+        (this.cursorX - this.lastTickCursorX) / this.spriteScale,
+      ),
+    );
+    this.cursorTickDY = Math.max(
+      -cursorStepLimit,
+      Math.min(
+        cursorStepLimit,
+        (this.cursorY - this.lastTickCursorY) / this.spriteScale,
+      ),
+    );
     this.lastTickCursorX = this.cursorX;
     this.lastTickCursorY = this.cursorY;
     if (this.isDragging) {
@@ -2145,7 +2548,8 @@ export class MascotEngine {
     // Track how long the mascot has actually been standing still; the pacer keys
     // off this rather than behaviour age, so a "walk then sit" sequence is not
     // punished for the time its walk already used up.
-    const moved = Math.abs(this.x - beforeX) + Math.abs(this.y - beforeY) > 0.05;
+    const moved =
+      Math.abs(this.x - beforeX) + Math.abs(this.y - beforeY) > 0.05;
     this.stillTicks = moved ? 0 : this.stillTicks + 1;
     this.anchorStillTicks = moved ? 0 : this.anchorStillTicks + 1;
     if (moved) this.wantMovement = false;
@@ -2171,7 +2575,8 @@ export class MascotEngine {
         claimed = server;
         // initBroadcast() deletes `Affordance` from the frame's vars once it has
         // advertised, so the name is read back off the action node.
-        claimedAffordance = frame.node.attributes?.Affordance ?? frame.node.name ?? "";
+        claimedAffordance =
+          frame.node.attributes?.Affordance ?? frame.node.name ?? "";
       }
       if (!server.didMeetUp) continue;
       this.interaction = server.interaction();
@@ -2187,7 +2592,10 @@ export class MascotEngine {
       return;
     }
     if (this.servingClaimSince === 0) this.servingClaimSince = this.tickCount;
-    if (this.tickCount - this.servingClaimSince >= runtime.broadcastServeTimeoutTicks) {
+    if (
+      this.tickCount - this.servingClaimSince >=
+      runtime.broadcastServeTimeoutTicks
+    ) {
       this.emit({
         kind: "milestone",
         name: "broadcast-serve-timeout",
@@ -2215,7 +2623,10 @@ export class MascotEngine {
     const server = frame?.server;
     if (!server || !server.isClaimed) return false;
     if (this.servingClaimSince === 0) return true;
-    return this.tickCount - this.servingClaimSince < runtime.broadcastServeTimeoutTicks;
+    return (
+      this.tickCount - this.servingClaimSince <
+      runtime.broadcastServeTimeoutTicks
+    );
   }
 
   /**
@@ -2239,7 +2650,8 @@ export class MascotEngine {
     // exists so the page never looks asleep, but a mascot that is waiting to be
     // hugged is not idle — and pulling it away here is exactly what drops the scan.
     // The wait is bounded by runtime.broadcastServeTimeoutTicks, so this cannot last.
-    if (this.holdingClaim(this.actionStack[this.actionStack.length - 1])) return;
+    if (this.holdingClaim(this.actionStack[this.actionStack.length - 1]))
+      return;
     const pacer = animation.forcedSwitchTicks(this.mascotName);
     if (
       pacer > 0 &&
@@ -2257,7 +2669,8 @@ export class MascotEngine {
       return;
     }
     const cap = animation.maxBehaviorTicks(this.mascotName);
-    if (cap > 0 && this.behaviorTicks >= cap) this.switchBehavior("behavior-cap");
+    if (cap > 0 && this.behaviorTicks >= cap)
+      this.switchBehavior("behavior-cap");
   }
 
   private switchBehavior(reason: string) {
@@ -2280,7 +2693,11 @@ export class MascotEngine {
     if (!node || !frame) return false;
     if (node.type === "Move") return true;
     if (this.isScanMove(node)) return true;
-    if (this.varNumber(frame, "TargetX") !== null || this.varNumber(frame, "TargetY") !== null) return true;
+    if (
+      this.varNumber(frame, "TargetX") !== null ||
+      this.varNumber(frame, "TargetY") !== null
+    )
+      return true;
     const pose = this.currentPose();
     return !!pose && (pose.velocity.x !== 0 || pose.velocity.y !== 0);
   }
@@ -2323,10 +2740,15 @@ export class MascotEngine {
     // resets the velocity before this observation runs.
     const pose = this.currentPose();
     const budget =
-      Math.abs(this.vx) + Math.abs(this.vy) +
-      Math.abs(this.tickStartVX) + Math.abs(this.tickStartVY) +
+      Math.abs(this.vx) +
+      Math.abs(this.vy) +
+      Math.abs(this.tickStartVX) +
+      Math.abs(this.tickStartVY) +
       (pose ? Math.abs(pose.velocity.x) + Math.abs(pose.velocity.y) : 0);
-    const explained = this.isDragging || this.offsetJumped || step <= budget + runtime.suspectStepPx;
+    const explained =
+      this.isDragging ||
+      this.offsetJumped ||
+      step <= budget + runtime.suspectStepPx;
     this.offsetJumped = false;
     if (step > runtime.suspectStepPx && !explained) {
       this.emit({
@@ -2347,7 +2769,11 @@ export class MascotEngine {
 
   private activeAnimation(frame: ActionFrame): AnimationVariant | undefined {
     const animations = frame.node.animations || [];
-    return animations.find((animation) => this.evaluateCondition(animation.condition, frame)) || animations[0];
+    return (
+      animations.find((animation) =>
+        this.evaluateCondition(animation.condition, frame),
+      ) || animations[0]
+    );
   }
 
   private advanceActionTree(): void {
@@ -2370,22 +2796,46 @@ export class MascotEngine {
     if (node.type === "ActionReference") {
       // A reference carries its own Condition; it has to be honoured before the
       // reference is expanded, otherwise it is silently dropped inside a Sequence.
-      if (node.condition && !this.evaluateCondition(node.condition, frame)) { this.popActionStack(); return; }
-      if (!node.referenceName) { this.popActionStack(); return; }
+      if (node.condition && !this.evaluateCondition(node.condition, frame)) {
+        this.popActionStack();
+        return;
+      }
+      if (!node.referenceName) {
+        this.popActionStack();
+        return;
+      }
       const referenced = this.config.actions[node.referenceName];
-      if (!referenced) { this.popActionStack(); return; }
+      if (!referenced) {
+        this.popActionStack();
+        return;
+      }
       const attributes = node.attributes || {};
       const vars = { ...frame.vars, ...attributes };
-      const resolved = { ...frame.resolved, ...this.resolveVars(attributes, frame.resolved) };
+      const resolved = {
+        ...frame.resolved,
+        ...this.resolveVars(attributes, frame.resolved),
+      };
       this.clampTravelTarget(resolved);
-      const next = this.newFrame(referenced, vars, resolved, frame.parentIndex, frame.referenceDepth + 1);
+      const next = this.newFrame(
+        referenced,
+        vars,
+        resolved,
+        frame.parentIndex,
+        frame.referenceDepth + 1,
+      );
       // libshijima: stay::tick() runs for Duration ticks, defaulting to 250;
       // animate ends with its animation and move ends at its target. On top of
       // that the animation configuration may pin an explicit duration to any
       // action, and may scale the pack's own holds.
-      const override = MascotEngine.animationConfig.durationTicks(this.mascotName, node.referenceName);
+      const override = MascotEngine.animationConfig.durationTicks(
+        this.mascotName,
+        node.referenceName,
+      );
       if (override !== null) next.durationLimit = override;
-      else if (referenced.type === "Stay") next.durationLimit = this.scaledTicks(this.varNumber(next, "Duration") ?? runtime.stayDurationTicks);
+      else if (referenced.type === "Stay")
+        next.durationLimit = this.scaledTicks(
+          this.varNumber(next, "Duration") ?? runtime.stayDurationTicks,
+        );
       else next.durationLimit = null;
       this.actionStack[this.actionStack.length - 1] = next;
       const initialVX = this.varNumber(next, "InitialVX");
@@ -2397,24 +2847,38 @@ export class MascotEngine {
       return this.advanceActionTree();
     }
 
-    if (node.condition && !this.evaluateCondition(node.condition, frame)) { this.popActionStack(); return; }
+    if (node.condition && !this.evaluateCondition(node.condition, frame)) {
+      this.popActionStack();
+      return;
+    }
     if (node.type === "Sequence" || node.type === "Select") {
       // `actionDurations` may name a container action too (`HoldOntoWall` is a
       // Sequence around a 500–1500 tick Stay, `ClimbAlongWall` a Sequence around a
       // climb). The limit has to be enforced here as well, otherwise pinning a
       // sequence silently does nothing and only the leaf actions respond.
       frame.elapsed++;
-      if (frame.durationLimit !== null && frame.elapsed >= frame.durationLimit) {
+      if (
+        frame.durationLimit !== null &&
+        frame.elapsed >= frame.durationLimit
+      ) {
         this.popActionStack();
         return;
       }
     }
     if (node.type === "Select") {
-      if (frame.childIndex > 0) { this.popActionStack(); return; }
-      const index = (node.children || []).findIndex((candidate) => this.evaluateCondition(candidate.condition, frame));
+      if (frame.childIndex > 0) {
+        this.popActionStack();
+        return;
+      }
+      const index = (node.children || []).findIndex((candidate) =>
+        this.evaluateCondition(candidate.condition, frame),
+      );
       const child = node.children?.[index];
       frame.childIndex = 1;
-      if (child) this.actionStack.push(this.newFrame(child, { ...frame.vars }, { ...frame.resolved }, index));
+      if (child)
+        this.actionStack.push(
+          this.newFrame(child, { ...frame.vars }, { ...frame.resolved }, index),
+        );
       else this.popActionStack();
       return this.advanceActionTree();
     }
@@ -2422,11 +2886,25 @@ export class MascotEngine {
       const children = node.children || [];
       while (frame.childIndex < children.length) {
         const child = children[frame.childIndex++];
-        if (child.condition !== undefined && !this.evaluateCondition(child.condition, frame)) continue;
-        this.actionStack.push(this.newFrame(child, { ...frame.vars }, { ...frame.resolved }, frame.childIndex - 1));
+        if (
+          child.condition !== undefined &&
+          !this.evaluateCondition(child.condition, frame)
+        )
+          continue;
+        this.actionStack.push(
+          this.newFrame(
+            child,
+            { ...frame.vars },
+            { ...frame.resolved },
+            frame.childIndex - 1,
+          ),
+        );
         return this.advanceActionTree();
       }
-      if (node.loop) { frame.childIndex = 0; return this.advanceActionTree(); }
+      if (node.loop) {
+        frame.childIndex = 0;
+        return this.advanceActionTree();
+      }
       this.popActionStack();
       return;
     }
@@ -2490,7 +2968,12 @@ export class MascotEngine {
 
     // An interaction action only runs while the partner handshake is live; without
     // it the action ends immediately (libshijima interact::tick).
-    if (this.isInteract(node) && (!this.interaction.available || !this.interaction.started || !this.interaction.ongoing)) {
+    if (
+      this.isInteract(node) &&
+      (!this.interaction.available ||
+        !this.interaction.started ||
+        !this.interaction.ongoing)
+    ) {
       this.popActionStack();
       return;
     }
@@ -2500,7 +2983,9 @@ export class MascotEngine {
       // of them can immediately re-initiate: without it two mascots that finish a hug
       // standing next to each other connect again on the very next pick and chain
       // hugs back to back (measured gaps of 0.1 s).
-      this.interactionCooldownUntil = this.tickCount + MascotEngine.animationConfig.interactionCooldown(this.mascotName);
+      this.interactionCooldownUntil =
+        this.tickCount +
+        MascotEngine.animationConfig.interactionCooldown(this.mascotName);
     }
 
     // libshijima dragged::subtick() — the pack's own `Pinched` action (Class
@@ -2514,7 +2999,8 @@ export class MascotEngine {
         this.setBehavior("Thrown", "drag-release");
         return;
       }
-      if (Math.abs(this.cursorTickDX) >= DRAG_STILL_EPSILON) this.dragStillTicks = 0;
+      if (Math.abs(this.cursorTickDX) >= DRAG_STILL_EPSILON)
+        this.dragStillTicks = 0;
       else this.dragStillTicks++;
       if (this.dragStillTicks >= runtime.dragResistTicks) {
         this.emit({
@@ -2537,7 +3023,11 @@ export class MascotEngine {
     // cursor `dragged::subtick()` used — which is also why the difference grows while
     // the struggle runs: nothing writes the anchor any more, so the pointer walks away
     // from it.
-    if (this.isResistAction(node) && Math.abs(this.simulationCursorVirtual().x - this.x) >= runtime.dragResistAbortPx) {
+    if (
+      this.isResistAction(node) &&
+      Math.abs(this.simulationCursorVirtual().x - this.x) >=
+        runtime.dragResistAbortPx
+    ) {
       // Handed back to being held: dragged::init() restarts its timer.
       this.dragStillTicks = 0;
       this.setBehavior("Dragged", "resist-abort");
@@ -2555,7 +3045,8 @@ export class MascotEngine {
     // knockback/fall chain collapsed to three ticks, so "flung away" never happened.
     if (frame.bornTick === this.tickCount) return;
     const animation = this.activeAnimation(frame);
-    if (animation && frame.animation !== animation) {      // libshijima get_animation() restarts the animation when the chosen variant
+    if (animation && frame.animation !== animation) {
+      // libshijima get_animation() restarts the animation when the chosen variant
       // changes (`anim_idx != i` → `start_time = mascot->time`). Without that reset
       // the pose index from a longer variant survives into a shorter one and
       // `poses[index]` is undefined — the packs do have such variants (the `Pinched`
@@ -2565,23 +3056,39 @@ export class MascotEngine {
       frame.poseTick = 0;
     }
     const poses = animation?.poses || node.poses || [];
-    if (!poses.length) { this.popActionStack(); return; }
+    if (!poses.length) {
+      this.popActionStack();
+      return;
+    }
     // A Stay action reached without going through an <ActionReference> still gets
     // libshijima's default hold time instead of looping for ever, and any action
     // named in the animation configuration gets its configured duration.
     if (frame.durationLimit === null) {
-      const override = MascotEngine.animationConfig.durationTicks(this.mascotName, node.name);
+      const override = MascotEngine.animationConfig.durationTicks(
+        this.mascotName,
+        node.name,
+      );
       if (override !== null) frame.durationLimit = override;
-      else if (node.type === "Stay") frame.durationLimit = this.scaledTicks(this.varNumber(frame, "Duration") ?? runtime.stayDurationTicks);
+      else if (node.type === "Stay")
+        frame.durationLimit = this.scaledTicks(
+          this.varNumber(frame, "Duration") ?? runtime.stayDurationTicks,
+        );
     }
     frame.elapsed++;
     frame.poseTick++;
-    if (frame.durationLimit !== null && frame.elapsed >= frame.durationLimit && !this.holdingClaim(frame)) {
+    if (
+      frame.durationLimit !== null &&
+      frame.elapsed >= frame.durationLimit &&
+      !this.holdingClaim(frame)
+    ) {
       this.popActionStack();
       return;
     }
     const pose = poses[frame.poseIndex] ?? poses[0];
-    if (!pose) { this.popActionStack(); return; }
+    if (!pose) {
+      this.popActionStack();
+      return;
+    }
     if (frame.poseTick >= Math.max(1, pose.duration)) {
       frame.poseTick = 0;
       frame.poseIndex++;
@@ -2606,7 +3113,9 @@ export class MascotEngine {
         // An action heading for a target, carrying an explicit Duration, or driven
         // by the physics loop keeps looping its animation. Only an action that
         // cannot continue on its own ends together with its animation.
-        const endsByPhysics = this.isFallLike(node) || (this.isJumpLike(node) && this.hasTarget(frame));
+        const endsByPhysics =
+          this.isFallLike(node) ||
+          (this.isJumpLike(node) && this.hasTarget(frame));
         // A connected ScanMove gets its target from the interaction handle, not from
         // a pack attribute, so `hasTarget()` is false for it — yet it is exactly the
         // action that has to keep running until it reaches the partner. Ending it
@@ -2614,7 +3123,8 @@ export class MascotEngine {
         // cycle die after ~0.6 s, i.e. a hug only ever completed when the two mascots
         // were already almost touching. libshijima's scanmove is a move action: it
         // ends on arrival, or when the interaction goes away (handled above).
-        const drivenByInteraction = this.isScanMove(node) && !!frame.client?.connected;
+        const drivenByInteraction =
+          this.isScanMove(node) && !!frame.client?.connected;
         // The dragged action loops its animation for as long as the mascot is held;
         // only its own timer (see above) ends it.
         if (
@@ -2628,7 +3138,9 @@ export class MascotEngine {
         ) {
           // libshijima interact::tick(): a finished interaction animation hands over
           // to the behaviour named by its Behavior attribute, otherwise it ends.
-          const handover = this.isInteract(node) ? this.varString(frame, "Behavior") : "";
+          const handover = this.isInteract(node)
+            ? this.varString(frame, "Behavior")
+            : "";
           if (handover) {
             this.setBehavior(handover, "interact-behavior");
             return;
@@ -2658,7 +3170,9 @@ export class MascotEngine {
     return poses[frame.poseIndex] || poses[0];
   }
 
-  private currentLeaf() { return this.actionStack[this.actionStack.length - 1]?.node; }
+  private currentLeaf() {
+    return this.actionStack[this.actionStack.length - 1]?.node;
+  }
 
   private borderTypeSatisfied(type: string | undefined) {
     const env = this.environment();
@@ -2693,7 +3207,10 @@ export class MascotEngine {
    *  while the movement code sees no target made the action impossible to
    *  finish, which left the mascot pressed against a border for ever. */
   private hasTarget(frame: ActionFrame | undefined) {
-    return this.varNumber(frame, "TargetX") !== null || this.varNumber(frame, "TargetY") !== null;
+    return (
+      this.varNumber(frame, "TargetX") !== null ||
+      this.varNumber(frame, "TargetY") !== null
+    );
   }
 
   /** libshijima's action classes for the drag: `Pinched` is `...Dragged` (follows
@@ -2708,7 +3225,10 @@ export class MascotEngine {
 
   /** `com.group_finity.mascot.action.Offset` — an instant anchor translation. */
   private isOffsetAction(node: ActionNode | undefined) {
-    return !!node && (node.className?.endsWith(".Offset") === true || node.name === "Offset");
+    return (
+      !!node &&
+      (node.className?.endsWith(".Offset") === true || node.name === "Offset")
+    );
   }
 
   /** Affordance actions. The scan side (`ScanMove`) walks to somebody else's
@@ -2726,13 +3246,18 @@ export class MascotEngine {
     return !!node?.className?.endsWith(".Breed");
   }
 
-  private actionTreeMatches(node: ActionNode, predicate: (candidate: ActionNode) => boolean, visited = new Set<ActionNode>()): boolean {
+  private actionTreeMatches(
+    node: ActionNode,
+    predicate: (candidate: ActionNode) => boolean,
+    visited = new Set<ActionNode>(),
+  ): boolean {
     if (visited.has(node)) return false;
     visited.add(node);
     if (predicate(node)) return true;
     if (node.type === "ActionReference" && node.referenceName) {
       const referenced = this.config?.actions[node.referenceName];
-      if (referenced && this.actionTreeMatches(referenced, predicate, visited)) return true;
+      if (referenced && this.actionTreeMatches(referenced, predicate, visited))
+        return true;
     }
     for (const child of node.children || []) {
       if (this.actionTreeMatches(child, predicate, visited)) return true;
@@ -2755,7 +3280,10 @@ export class MascotEngine {
     return result;
   }
 
-  private firstBorderInTree(node: ActionNode, visited: Set<ActionNode>): string | null {
+  private firstBorderInTree(
+    node: ActionNode,
+    visited: Set<ActionNode>,
+  ): string | null {
     if (visited.has(node)) return null;
     visited.add(node);
     const own = node.attributes?.BorderType;
@@ -2780,22 +3308,47 @@ export class MascotEngine {
   }
 
   /** A border the mascot is standing on right now, other than the one it just lost. */
-  private currentBorderAt(lost: string | undefined): "Floor" | "Wall" | "Ceiling" | null {
+  private currentBorderAt(
+    lost: string | undefined,
+  ): "Floor" | "Wall" | "Ceiling" | null {
     const surface = this.surfaceAt();
-    const border = surface === "floor" ? "Floor" : surface === "ceiling" ? "Ceiling" : surface ? "Wall" : null;
+    const border =
+      surface === "floor"
+        ? "Floor"
+        : surface === "ceiling"
+          ? "Ceiling"
+          : surface
+            ? "Wall"
+            : null;
     if (border && border !== lost) return border;
     const point = { x: this.x, y: this.y };
     const area = this.area();
-    if (lost !== "Floor" && this.borderIsOn("bottom", point, area)) return "Floor";
-    if (lost !== "Wall" && (this.borderIsOn("left", point, area) || this.borderIsOn("right", point, area))) return "Wall";
-    if (lost !== "Ceiling" && this.borderIsOn("top", point, area)) return "Ceiling";
+    if (lost !== "Floor" && this.borderIsOn("bottom", point, area))
+      return "Floor";
+    if (
+      lost !== "Wall" &&
+      (this.borderIsOn("left", point, area) ||
+        this.borderIsOn("right", point, area))
+    )
+      return "Wall";
+    if (lost !== "Ceiling" && this.borderIsOn("top", point, area))
+      return "Ceiling";
     return null;
   }
 
   /** The surface currently supporting the anchor, preserving the active side at corners. */
-  private surfaceAt(point = { x: this.x, y: this.y }, area = this.area()): Surface | null {
+  private surfaceAt(
+    point = { x: this.x, y: this.y },
+    area = this.area(),
+  ): Surface | null {
     const leaf = this.currentLeaf();
-    if (this.isDragging || this.isFallLike(leaf) || this.isJumpLike(leaf) || this.isDraggedAction(leaf)) return null;
+    if (
+      this.isDragging ||
+      this.isFallLike(leaf) ||
+      this.isJumpLike(leaf) ||
+      this.isDraggedAction(leaf)
+    )
+      return null;
     const floor = this.borderIsOn("bottom", point, area);
     const left = this.borderIsOn("left", point, area);
     const right = this.borderIsOn("right", point, area);
@@ -2803,7 +3356,8 @@ export class MascotEngine {
     const required = this.currentLeaf()?.borderType;
 
     if (required === "Floor" && floor) return "floor";
-    if (required === "Wall" && (left || right)) return left ? "left-wall" : "right-wall";
+    if (required === "Wall" && (left || right))
+      return left ? "left-wall" : "right-wall";
     if (required === "Ceiling" && ceiling) return "ceiling";
 
     if (this.lastSurface === "floor" && floor) return "floor";
@@ -2843,7 +3397,10 @@ export class MascotEngine {
     if (this.y >= area.bottom) {
       // A rising viewport floor is support, not a downward physical impact.
       this.y = this.prevY = area.bottom;
-      if (this.isFallLike(this.currentLeaf()) || this.isJumpLike(this.currentLeaf())) {
+      if (
+        this.isFallLike(this.currentLeaf()) ||
+        this.isJumpLike(this.currentLeaf())
+      ) {
         this.vx = this.vy = 0;
         this.setBehavior("StandUp", "scroll-floor-support");
         this.advanceActionTree();
@@ -2851,7 +3408,8 @@ export class MascotEngine {
     }
     this.constrainToWorkArea();
     this.prevY = Math.min(area.bottom, this.prevY);
-    if (this.currentBehavior?.name !== "Fall") this.prevY = Math.max(area.top, this.prevY);
+    if (this.currentBehavior?.name !== "Fall")
+      this.prevY = Math.max(area.top, this.prevY);
   }
 
   /** Can this behaviour actually move the mascot? Used to guarantee that the
@@ -2871,13 +3429,20 @@ export class MascotEngine {
   }
 
   /** Structural part of `canTravel`: does the tree contain a Move / a ScanMove? */
-  private travelStructure(behaviorName: string): { moves: boolean; scans: boolean } {
+  private travelStructure(behaviorName: string): {
+    moves: boolean;
+    scans: boolean;
+  } {
     const cached = this.travelCache.get(behaviorName);
     if (cached) return cached;
     const action = this.config?.actions[behaviorName];
     const structure = {
-      moves: action ? this.actionTreeMatches(action, (node) => node.type === "Move") : false,
-      scans: action ? this.actionTreeMatches(action, (node) => this.isScanMove(node)) : false,
+      moves: action
+        ? this.actionTreeMatches(action, (node) => node.type === "Move")
+        : false,
+      scans: action
+        ? this.actionTreeMatches(action, (node) => this.isScanMove(node))
+        : false,
     };
     this.travelCache.set(behaviorName, structure);
     return structure;
@@ -2895,7 +3460,8 @@ export class MascotEngine {
         (node) =>
           this.isScanMove(node) ||
           this.isInteract(node) ||
-          (typeof node.attributes?.Affordance === "string" && node.attributes.Affordance !== ""),
+          (typeof node.attributes?.Affordance === "string" &&
+            node.attributes.Affordance !== ""),
       );
     }
     this.partnerCache.set(behaviorName, needs);
@@ -2935,7 +3501,9 @@ export class MascotEngine {
    * `partnerWeights.reachable` boost exactly the hugs that can actually happen.
    */
   private partnerReachable(): boolean {
-    const scan = MascotEngine.animationConfig.scanDistancePx(this.mascotName) / this.spriteScale;
+    const scan =
+      MascotEngine.animationConfig.scanDistancePx(this.mascotName) /
+      this.spriteScale;
     for (const other of MascotEngine.liveEngines) {
       if (other === this) continue;
       if (Math.abs(other.y - this.y) > 1) continue;
@@ -2947,12 +3515,16 @@ export class MascotEngine {
 
   /** A behavior can only be offered when its action is present and this engine
    *  can actually carry it out. */
-  private behaviorUsable(behavior: Behavior) {    const cached = this.behaviorUsability.get(behavior.name);
+  private behaviorUsable(behavior: Behavior) {
+    const cached = this.behaviorUsability.get(behavior.name);
     if (cached !== undefined) return cached;
     const action = this.config?.actions[behavior.name];
     let usable = !!action;
     if (action) {
-      if (this.actionTreeMatches(action, (node) => this.isUnsupportedAction(node))) usable = false;
+      if (
+        this.actionTreeMatches(action, (node) => this.isUnsupportedAction(node))
+      )
+        usable = false;
     }
     this.behaviorUsability.set(behavior.name, usable);
     return usable;
@@ -2974,7 +3546,10 @@ export class MascotEngine {
 
   /** Apply the configuration's duration multiplier to a pack hold time. */
   private scaledTicks(ticks: number): number {
-    return Math.max(1, Math.round(ticks * MascotEngine.animationConfig.scale(this.mascotName)));
+    return Math.max(
+      1,
+      Math.round(ticks * MascotEngine.animationConfig.scale(this.mascotName)),
+    );
   }
 
   /**
@@ -2986,13 +3561,18 @@ export class MascotEngine {
    * somewhere" kind, and those are what would otherwise cross the whole page.
    */
   private clampTravelTarget(resolved: Record<string, unknown>) {
-    const limit = MascotEngine.animationConfig.maxTravelPx(this.mascotName) / this.spriteScale;
+    const limit =
+      MascotEngine.animationConfig.maxTravelPx(this.mascotName) /
+      this.spriteScale;
     if (limit <= 0) return;
     const area = this.area();
     const targetX = resolved.TargetX;
     if (typeof targetX !== "number" || !Number.isFinite(targetX)) return;
     if (targetX <= area.left + 0.5 || targetX >= area.right - 0.5) return;
-    resolved.TargetX = Math.max(this.x - limit, Math.min(this.x + limit, targetX));
+    resolved.TargetX = Math.max(
+      this.x - limit,
+      Math.min(this.x + limit, targetX),
+    );
   }
 
   private updatePhysics() {
@@ -3039,11 +3619,14 @@ export class MascotEngine {
       if (!target) return;
       const beforeX = this.x;
       if (pose && pose.velocity.x !== 0) {
-        this.lookRight = pose.velocity.x > 0 ? target.x < this.x : target.x > this.x;
+        this.lookRight =
+          pose.velocity.x > 0 ? target.x < this.x : target.x > this.x;
         this.x += (this.lookRight ? -1 : 1) * pose.velocity.x;
       }
 
-      const passed = (beforeX <= target.x && this.x >= target.x) || (beforeX >= target.x && this.x <= target.x);
+      const passed =
+        (beforeX <= target.x && this.x >= target.x) ||
+        (beforeX >= target.x && this.x <= target.x);
       if (passed) {
         this.x = target.x;
         handle.notifyArrival();
@@ -3069,15 +3652,24 @@ export class MascotEngine {
     if (this.isFallLike(leaf)) {
       // Starting Fall on an already supported floor is not an airborne impact.
       // Upward launches must still leave the floor before gravity takes over.
-      if (this.y === this.area().bottom && this.vy >= 0 && this.borderTypeSatisfied("Floor")) {
+      if (
+        this.y === this.area().bottom &&
+        this.vy >= 0 &&
+        this.borderTypeSatisfied("Floor")
+      ) {
         this.vx = this.vy = 0;
         this.setBehavior("StandUp", "floor-supported");
         this.advanceActionTree();
         return;
       }
-      const resistanceX = this.evaluateNumber(leaf.attributes?.RegistanceX, frame) ?? runtime.resistanceX;
-      const resistanceY = this.evaluateNumber(leaf.attributes?.RegistanceY, frame) ?? runtime.resistanceY;
-      const gravity = this.evaluateNumber(leaf.attributes?.Gravity, frame) ?? runtime.gravity;
+      const resistanceX =
+        this.evaluateNumber(leaf.attributes?.RegistanceX, frame) ??
+        runtime.resistanceX;
+      const resistanceY =
+        this.evaluateNumber(leaf.attributes?.RegistanceY, frame) ??
+        runtime.resistanceY;
+      const gravity =
+        this.evaluateNumber(leaf.attributes?.Gravity, frame) ?? runtime.gravity;
       this.vx -= this.vx * resistanceX;
       this.vy += gravity - this.vy * resistanceY;
       const beforeX = this.x;
@@ -3092,7 +3684,8 @@ export class MascotEngine {
       const dx = targetX - this.x;
       const dy = targetY - this.y - Math.abs(dx);
       const distance = Math.hypot(dx, dy);
-      const speed = this.evaluateNumber(leaf.attributes?.VelocityParam, frame) ?? 20;
+      const speed =
+        this.evaluateNumber(leaf.attributes?.VelocityParam, frame) ?? 20;
       this.lookRight = dx > 0;
       if (distance <= speed) {
         this.x = targetX;
@@ -3108,8 +3701,8 @@ export class MascotEngine {
         this.popActionStack();
         return;
       }
-      this.x += speed * dx / distance;
-      this.y += speed * dy / distance;
+      this.x += (speed * dx) / distance;
+      this.y += (speed * dy) / distance;
       this.guardStall(frame);
       return;
     }
@@ -3117,8 +3710,10 @@ export class MascotEngine {
     // A pose velocity translates the anchor whatever the action's Type is: the
     // packs use Type="Embedded" (ScanMove / WalkWithIE) for actions that really
     // do move, so movement cannot be decided by Type alone.
-    const translates = !!pose && (pose.velocity.x !== 0 || pose.velocity.y !== 0);
-    const moves = !!pose && (leaf.type === "Move" || leaf.type === "Animate" || translates);
+    const translates =
+      !!pose && (pose.velocity.x !== 0 || pose.velocity.y !== 0);
+    const moves =
+      !!pose && (leaf.type === "Move" || leaf.type === "Animate" || translates);
     if (moves) {
       const beforeX = this.x;
       const beforeY = this.y;
@@ -3131,12 +3726,18 @@ export class MascotEngine {
       // `lookRight ? rightBorder : leftBorder`, so a mascot clinging to the left wall
       // while facing right loses ClimbHalfwayAlongWall/ClimbAlongWall entirely.
       if (targetY !== null) {
-        if (this.borderIsOn("left", { x: this.x, y: this.y })) this.lookRight = false;
-        if (this.borderIsOn("right", { x: this.x, y: this.y })) this.lookRight = true;
+        if (this.borderIsOn("left", { x: this.x, y: this.y }))
+          this.lookRight = false;
+        if (this.borderIsOn("right", { x: this.x, y: this.y }))
+          this.lookRight = true;
       }
       this.x += (this.lookRight ? -1 : 1) * pose.velocity.x;
       this.y += pose.velocity.y;
-      if (targetX !== null && ((beforeX <= targetX && this.x >= targetX) || (beforeX >= targetX && this.x <= targetX))) {
+      if (
+        targetX !== null &&
+        ((beforeX <= targetX && this.x >= targetX) ||
+          (beforeX >= targetX && this.x <= targetX))
+      ) {
         this.x = targetX;
         this.emit({
           kind: "milestone",
@@ -3149,7 +3750,11 @@ export class MascotEngine {
         this.popActionStack();
         return;
       }
-      if (targetY !== null && ((beforeY <= targetY && this.y >= targetY) || (beforeY >= targetY && this.y <= targetY))) {
+      if (
+        targetY !== null &&
+        ((beforeY <= targetY && this.y >= targetY) ||
+          (beforeY >= targetY && this.y <= targetY))
+      ) {
         this.y = targetY;
         this.emit({
           kind: "milestone",
@@ -3165,8 +3770,11 @@ export class MascotEngine {
       // A pack's explicit walk-to-wall sequence already advances to ClimbWall
       // above. Ordinary floor movement into a side starts its wall-climb behavior.
       const area = this.area();
-      if (leaf.borderType === "Floor" &&
-          (this.x < beforeX && this.x <= area.left || this.x > beforeX && this.x >= area.right)) {
+      if (
+        leaf.borderType === "Floor" &&
+        ((this.x < beforeX && this.x <= area.left) ||
+          (this.x > beforeX && this.x >= area.right))
+      ) {
         this.constrainToWorkArea();
         this.lookRight = this.x === area.right;
         this.vx = this.vy = 0;
@@ -3192,12 +3800,20 @@ export class MascotEngine {
     // `ClimbWall` is Type="Move" and already re-normalised every tick.
     const clinging = this.currentLeaf();
     if (clinging?.borderType === "Wall") {
-      if (this.borderIsOn("left", { x: this.x, y: this.y })) this.lookRight = false;
-      if (this.borderIsOn("right", { x: this.x, y: this.y })) this.lookRight = true;
+      if (this.borderIsOn("left", { x: this.x, y: this.y }))
+        this.lookRight = false;
+      if (this.borderIsOn("right", { x: this.x, y: this.y }))
+        this.lookRight = true;
     }
     // Guard every action that is supposed to travel, not just target-seekers: a
     // mascot pushed into a border by a pose velocity is stuck just as badly.
-    if (targetX !== null || targetY !== null || translates || leaf.type === "Move") this.guardStall(frame);
+    if (
+      targetX !== null ||
+      targetY !== null ||
+      translates ||
+      leaf.type === "Move"
+    )
+      this.guardStall(frame);
   }
 
   /** Closed sides/bottom; only the ordinary Fall behavior may leave through the top.
@@ -3215,7 +3831,10 @@ export class MascotEngine {
     if (this.y > area.bottom) {
       this.y = area.bottom;
       if (this.vy > 0) this.vy = 0;
-    } else if (this.y < area.top && (this.isDragging || this.currentBehavior?.name !== "Fall")) {
+    } else if (
+      this.y < area.top &&
+      (this.isDragging || this.currentBehavior?.name !== "Fall")
+    ) {
       this.y = area.top;
       if (this.vy < 0) this.vy = 0;
     }
@@ -3227,12 +3846,21 @@ export class MascotEngine {
     const area = this.area();
     const dx = this.x - beforeX;
     const dy = this.y - beforeY;
-    let time = dy > 0 && beforeY < area.bottom && this.y >= area.bottom
-      ? (area.bottom - beforeY) / dy : Infinity;
+    let time =
+      dy > 0 && beforeY < area.bottom && this.y >= area.bottom
+        ? (area.bottom - beforeY) / dy
+        : Infinity;
     let surface: Surface | null = null;
-    for (const [side, edge] of [["left-wall", area.left], ["right-wall", area.right]] as const) {
-      if (side === "left-wall" ? dx >= 0 || beforeX < edge || this.x > edge
-        : dx <= 0 || beforeX > edge || this.x < edge) continue;
+    for (const [side, edge] of [
+      ["left-wall", area.left],
+      ["right-wall", area.right],
+    ] as const) {
+      if (
+        side === "left-wall"
+          ? dx >= 0 || beforeX < edge || this.x > edge
+          : dx <= 0 || beforeX > edge || this.x < edge
+      )
+        continue;
       const hit = (edge - beforeX) / dx;
       const y = beforeY + dy * hit;
       if (hit < time && y >= area.top && y < area.bottom) {
@@ -3240,7 +3868,12 @@ export class MascotEngine {
         surface = side;
       }
     }
-    if (this.currentBehavior?.name !== "Fall" && dy < 0 && beforeY >= area.top && this.y <= area.top) {
+    if (
+      this.currentBehavior?.name !== "Fall" &&
+      dy < 0 &&
+      beforeY >= area.top &&
+      this.y <= area.top
+    ) {
       const hit = (area.top - beforeY) / dy;
       const x = beforeX + dx * hit;
       if (hit < time && x >= area.left && x <= area.right) {
@@ -3256,7 +3889,10 @@ export class MascotEngine {
     this.vx = this.vy = 0;
     this.lookRight = surface === "right-wall";
     this.lastSurface = surface;
-    this.setBehavior(surface === "ceiling" ? "HoldOntoCeiling" : "HoldOntoWall", "airborne-border-contact");
+    this.setBehavior(
+      surface === "ceiling" ? "HoldOntoCeiling" : "HoldOntoWall",
+      "airborne-border-contact",
+    );
     this.advanceActionTree();
     return true;
   }
@@ -3264,14 +3900,24 @@ export class MascotEngine {
   /** Intersect this downward movement with the floor, including side collisions. */
   private landOnFloor(beforeX: number, beforeY: number): boolean {
     const area = this.area();
-    if (this.y <= beforeY || beforeY >= area.bottom || this.y < area.bottom) return false;
+    if (this.y <= beforeY || beforeY >= area.bottom || this.y < area.bottom)
+      return false;
     const fraction = (area.bottom - beforeY) / (this.y - beforeY);
-    const impactX = Math.max(area.left, Math.min(area.right, beforeX + (this.x - beforeX) * fraction));
+    const impactX = Math.max(
+      area.left,
+      Math.min(area.right, beforeX + (this.x - beforeX) * fraction),
+    );
     this.x = impactX;
     this.y = area.bottom;
     this.vx = this.vy = 0;
-    this.emit({ kind: "milestone", name: "land", detail: "downward floor crossing",
-      x: this.x, y: this.y, leaf: this.leafLabel() });
+    this.emit({
+      kind: "milestone",
+      name: "land",
+      detail: "downward floor crossing",
+      x: this.x,
+      y: this.y,
+      leaf: this.leafLabel(),
+    });
     return true;
   }
 
@@ -3289,9 +3935,14 @@ export class MascotEngine {
     for (const reference of forcePool ? [] : next) {
       if (!this.evaluateCondition(reference.condition)) continue;
       if (!animation.allows(mascot, reference.name)) continue;
-      const behavior = this.config.behaviors.find((entry) => entry.name === reference.name);
+      const behavior = this.config.behaviors.find(
+        (entry) => entry.name === reference.name,
+      );
       if (behavior && !this.behaviorUsable(behavior)) continue;
-      const frequency = this.effectiveWeight(reference.name, reference.frequency);
+      const frequency = this.effectiveWeight(
+        reference.name,
+        reference.frequency,
+      );
       // A weight of 0 means "not now" (a cooldown, or an explicit 0 override), and the
       // <NextBehavior> pass used to add it anyway.
       if (frequency <= 0) continue;
@@ -3305,10 +3956,18 @@ export class MascotEngine {
         const override = animation.weightOverride(mascot, behavior.name);
         // Without an override the pack's own rule applies (Frequency > 0). An
         // override may also switch a Frequency="0" behaviour on, or one off.
-        if (override !== undefined ? override <= 0 : behavior.frequency <= 0) continue;
+        if (override !== undefined ? override <= 0 : behavior.frequency <= 0)
+          continue;
         if (!animation.allows(mascot, behavior.name)) continue;
-        if (!this.evaluateCondition(behavior.condition) || !this.behaviorUsable(behavior)) continue;
-        const frequency = this.effectiveWeight(behavior.name, behavior.frequency);
+        if (
+          !this.evaluateCondition(behavior.condition) ||
+          !this.behaviorUsable(behavior)
+        )
+          continue;
+        const frequency = this.effectiveWeight(
+          behavior.name,
+          behavior.frequency,
+        );
         if (frequency <= 0) continue;
         candidates.push({ name: behavior.name, id: behavior.id, frequency });
       }
@@ -3316,7 +3975,9 @@ export class MascotEngine {
     if (!candidates.length) {
       // Everything was filtered out by the configuration; fall back to the pack's
       // own list so a restrictive config cannot leave the mascot frozen.
-      const idle = this.config.behaviors.find((entry) => entry.name === "StandUp") ?? this.config.behaviors[0];
+      const idle =
+        this.config.behaviors.find((entry) => entry.name === "StandUp") ??
+        this.config.behaviors[0];
       if (idle) this.setBehavior(idle.name, "no-candidates");
       return;
     }
@@ -3326,7 +3987,9 @@ export class MascotEngine {
     let pool = candidates;
     if (this.wantMovement) {
       this.wantMovement = false;
-      const travel = candidates.filter((candidate) => this.canTravel(candidate.name));
+      const travel = candidates.filter((candidate) =>
+        this.canTravel(candidate.name),
+      );
       if (travel.length > 0) pool = travel;
     }
     // Only offer behaviours that can actually run where the mascot is standing.
@@ -3341,16 +4004,27 @@ export class MascotEngine {
     if (standingOn) {
       const runnable = pool.filter((candidate) => {
         const start = this.firstBorderOf(candidate.name);
-        return start === null || start === FLEXIBLE_BORDER || start === standingOn;
+        return (
+          start === null || start === FLEXIBLE_BORDER || start === standingOn
+        );
       });
       if (runnable.length > 0) pool = runnable;
     }
-    const total = pool.reduce((sum, candidate) => sum + Math.max(0, candidate.frequency), 0);
-    if (total <= 0) { this.setBehavior(pool[0].name, reason, pool[0].id); return; }
+    const total = pool.reduce(
+      (sum, candidate) => sum + Math.max(0, candidate.frequency),
+      0,
+    );
+    if (total <= 0) {
+      this.setBehavior(pool[0].name, reason, pool[0].id);
+      return;
+    }
     let random = Math.random() * total;
     for (const candidate of pool) {
       random -= candidate.frequency;
-      if (random <= 0) { this.setBehavior(candidate.name, reason, candidate.id); return; }
+      if (random <= 0) {
+        this.setBehavior(candidate.name, reason, candidate.id);
+        return;
+      }
     }
     this.setBehavior(candidates[0].name, reason, candidates[0].id);
   }
@@ -3362,7 +4036,9 @@ export class MascotEngine {
     // kSubtickCount (= 4) times per tick, which is why its motion is smooth.
     // Interpolating the paint between ticks reproduces that here; without it the
     // mascot moves one whole tick of travel at a time and a fall reads as a jump.
-    const progress = interpolate ? Math.max(0, Math.min(1, this.accumulator / runtime.tickMs)) : 1;
+    const progress = interpolate
+      ? Math.max(0, Math.min(1, this.accumulator / runtime.tickMs))
+      : 1;
     const x = this.prevX + (this.x - this.prevX) * progress;
     const y = this.prevY + (this.y - this.prevY) * progress;
     this.lastRenderedX = x;
@@ -3389,7 +4065,8 @@ export class MascotEngine {
       // Hiding/clearing here makes normal 4-10 frame animations flash on every pose.
       this.elImg.src = src;
     }
-    if (this.elImg.complete && this.elImg.naturalWidth > 0) this.elImg.style.visibility = "visible";
+    if (this.elImg.complete && this.elImg.naturalWidth > 0)
+      this.elImg.style.visibility = "visible";
     // A cached bitmap already reports its size, so the box is correct on the
     // very first painted frame; the `load` listener covers a cold cache.
     if (this.elImg.naturalWidth > 0) this.applySpriteIntrinsicSize();

@@ -207,8 +207,8 @@ export class MascotGroup {
   }
 
   public resetToSpawn(): void {
-    for (const engine of this.activeEngines) {
-      engine.resetToSpawn();
+    for (let i = 0; i < this.activeEngines.length; i++) {
+      this.activeEngines[i].resetToSpawn(i);
     }
   }
 
