@@ -77,17 +77,19 @@ document.addEventListener("DOMContentLoaded", () => {
       enabled: true,
       mascotMode: "both",
       clickThrough: false,
-      debugLog: true,
+      debugLog: false,
       scrollInteraction: false,
       autoHideScrollbar: false,
       blacklist: [],
     },
     (items) => {
       if (enabledToggle) enabledToggle.checked = Boolean(items.enabled);
-      if (clickthroughToggle) clickthroughToggle.checked = Boolean(items.clickThrough);
+      if (clickthroughToggle)
+        clickthroughToggle.checked = Boolean(items.clickThrough);
       if (debuglogToggle) debuglogToggle.checked = Boolean(items.debugLog);
       if (scrollToggle) scrollToggle.checked = Boolean(items.scrollInteraction);
-      if (autohideScrollbarToggle) autohideScrollbarToggle.checked = Boolean(items.autoHideScrollbar);
+      if (autohideScrollbarToggle)
+        autohideScrollbarToggle.checked = Boolean(items.autoHideScrollbar);
       blacklistHosts = Array.isArray(items.blacklist) ? items.blacklist : [];
 
       modeRadios.forEach((radio) => {
@@ -95,7 +97,7 @@ document.addEventListener("DOMContentLoaded", () => {
       });
 
       updateBlacklistButton();
-    }
+    },
   );
 
   // Handle blacklist toggle
@@ -134,7 +136,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Handle auto hide scrollbar toggle
   autohideScrollbarToggle?.addEventListener("change", () => {
-    chrome.storage.local.set({ autoHideScrollbar: autohideScrollbarToggle.checked });
+    chrome.storage.local.set({
+      autoHideScrollbar: autohideScrollbarToggle.checked,
+    });
   });
 
   // Handle mascot mode selection
@@ -194,5 +198,28 @@ document.addEventListener("DOMContentLoaded", () => {
         btnResetPos.textContent = originalText;
       }
     });
+  });
+
+  // Credits modal control
+  const btnCredits = document.getElementById(
+    "btn-credits",
+  ) as HTMLButtonElement | null;
+  const creditsModal = document.getElementById("credits-modal");
+  const btnCloseCredits = document.getElementById(
+    "btn-close-credits",
+  ) as HTMLButtonElement | null;
+
+  btnCredits?.addEventListener("click", () => {
+    creditsModal?.classList.remove("hidden");
+  });
+
+  btnCloseCredits?.addEventListener("click", () => {
+    creditsModal?.classList.add("hidden");
+  });
+
+  creditsModal?.addEventListener("click", (e) => {
+    if (e.target === creditsModal) {
+      creditsModal.classList.add("hidden");
+    }
   });
 });

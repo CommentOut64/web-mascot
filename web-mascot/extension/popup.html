@@ -16,14 +16,19 @@
           <span class="subtitle">网页桌面宠物</span>
         </div>
       </div>
-      <span class="version" id="version-badge">v0.0.3</span>
+      <div class="header-right">
+        <button id="btn-credits" class="btn-icon-credits" title="版权与作者署名" aria-label="版权与作者署名">
+          <span>©</span>
+        </button>
+        <span class="version" id="version-badge">v0.0.4</span>
+      </div>
     </header>
 
     <main class="content">
       <!-- 基础开关组 -->
       <section class="section switches-group">
         <div class="switch-row">
-          <span class="label">全局启用桌宠</span>
+          <span class="label">启用桌宠</span>
           <label class="toggle-switch">
             <input type="checkbox" id="enabled-toggle" checked>
             <span class="slider"></span>
@@ -42,7 +47,7 @@
         <div class="switch-row">
           <div class="label-with-tip">
             <span class="label">自动隐藏页面滚动条</span>
-            <span class="tip">自动探测网页滚动条并隐藏外观（保留正常滚动，支持热切换）</span>
+            <span class="tip">自动探测网页滚动条并隐藏外观</span>
           </div>
           <label class="toggle-switch">
             <input type="checkbox" id="autohide-scrollbar-toggle">
@@ -55,14 +60,14 @@
             <span class="tip">在 F12 控制台中输出启动与交互日志</span>
           </div>
           <label class="toggle-switch">
-            <input type="checkbox" id="debuglog-toggle" checked>
+            <input type="checkbox" id="debuglog-toggle">
             <span class="slider"></span>
           </label>
         </div>
         <div class="switch-row">
           <div class="label-with-tip">
             <span class="label">页面滚动互动 <span class="tag-experimental">实验性</span></span>
-            <span class="tip">向下滚动让地面宠物脱离，挂墙或挂顶会松手；下落保留文档滚动效果，滚动不额外施力（默认关闭）</span>
+            <span class="tip">向下滚动让地面宠物脱离，挂墙或挂顶会松手（部分网页会失效）</span>
           </div>
           <label class="toggle-switch">
             <input type="checkbox" id="scroll-toggle">
@@ -106,7 +111,7 @@
             <input type="radio" name="mode" value="both">
             <div class="pack-card">
               <span class="pack-name">双宠 Neuron + Eviling</span>
-              <span class="pack-desc">两只宠物同屏漫步，支持拥抱、扔宠等亲密互动</span>
+              <span class="pack-desc">两只宠物同屏漫步，支持拥抱等亲密互动</span>
             </div>
           </label>
         </div>
@@ -115,27 +120,30 @@
       <!-- 快捷操作按钮组 -->
       <section class="section btn-grid">
         <button id="btn-restart" class="btn btn-secondary">
-          <span>🔄 重启全部桌宠</span>
+          <span>重启全部桌宠</span>
         </button>
         <button id="btn-reset-pos" class="btn btn-primary">
-          <span>📍 重置宠物位置</span>
+          <span>重置宠物位置</span>
         </button>
       </section>
-
-      <!-- 署名与开源声明 (CC-BY-NC-SA 4.0 合规) -->
-      <section class="section info-section">
-        <details class="credits-details">
-          <summary class="credits-summary">版权与作者署名 (Credits & License)</summary>
-          <div class="credits-body">
-            <p><strong>底层引擎</strong>：GPL-3.0-or-later (<a href="https://github.com/CommentOut64/web-mascot" target="_blank">web-mascot</a>)</p>
-            <p><strong>美术立绘</strong>：Paccha (<a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" target="_blank">CC-BY-NC-SA-4.0</a>)</p>
-            <p><strong>动作配置</strong>：@promote. & @dalekcraft</p>
-            <p><strong>角色原案致谢</strong>：@Monikaphobia</p>
-            <p class="disclaimer"><strong>免责声明</strong>：本插件为非官方非商业粉丝作品。Neuro-sama 及相关角色版权归其所有者所有。</p>
-          </div>
-        </details>
-      </section>
     </main>
+
+    <!-- 版权与署名弹窗 -->
+    <div id="credits-modal" class="modal-overlay hidden">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3 class="modal-title">版权与作者署名</h3>
+          <button id="btn-close-credits" class="modal-close" aria-label="关闭">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p><strong>底层引擎</strong>：GPL-3.0-or-later (<a href="https://github.com/CommentOut64/web-mascot" target="_blank" rel="noreferrer">web-mascot</a>)</p>
+          <p><strong>美术立绘</strong>：Paccha (<a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" target="_blank" rel="noreferrer">CC-BY-NC-SA-4.0</a>)</p>
+          <p><strong>动作配置</strong>：@promote. & @dalekcraft</p>
+          <p><strong>角色原案致谢</strong>：@Monikaphobia</p>
+          <p class="disclaimer"><strong>免责声明</strong>：本插件为非官方非商业粉丝作品。Neuro-sama 及相关角色版权归其所有者所有。</p>
+        </div>
+      </div>
+    </div>
   </div>
   <script type="module" src="./popup.ts"></script>
 </body>

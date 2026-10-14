@@ -20,7 +20,7 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
 } else {
   (window as unknown as Record<string, boolean>)[EXTENSION_KEY] = true;
 
-  const EXT_VERSION = "0.0.3";
+  const EXT_VERSION = "0.0.4";
 
   const host = new ViewportHost("web-mascot-extension-root");
   const group = new MascotGroup();
@@ -39,7 +39,7 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
   let isEnabled = true;
   let mascotMode = "both"; // "Neuron" | "Eviling" | "both"
   let isClickThrough = false;
-  let isDebugLog = true;
+  let isDebugLog = false;
   let isScrollInteraction = false;
   let isAutoHideScrollbar = false;
   let blacklistHosts: string[] = [];
@@ -580,7 +580,7 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
           enabled: true,
           mascotMode: "both",
           clickThrough: false,
-          debugLog: true,
+          debugLog: false,
           scrollInteraction: false,
           autoHideScrollbar: false,
           blacklist: [],
@@ -591,12 +591,15 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
             return;
           }
           isEnabled = Boolean(items.enabled);
-          mascotMode = typeof items.mascotMode === "string" ? items.mascotMode : "both";
+          mascotMode =
+            typeof items.mascotMode === "string" ? items.mascotMode : "both";
           isClickThrough = Boolean(items.clickThrough);
           isDebugLog = Boolean(items.debugLog);
           isScrollInteraction = Boolean(items.scrollInteraction);
           isAutoHideScrollbar = Boolean(items.autoHideScrollbar);
-          blacklistHosts = Array.isArray(items.blacklist) ? items.blacklist : [];
+          blacklistHosts = Array.isArray(items.blacklist)
+            ? items.blacklist
+            : [];
           settingsReady = true;
 
           log("⚙️ 读取已保存配置:", {
