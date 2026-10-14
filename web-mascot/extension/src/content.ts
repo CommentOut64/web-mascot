@@ -45,8 +45,7 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
   const BACKGROUND_EVICT_MS = 30000;
   let relayPlaceholders: HTMLElement[] = [];
 
-  // Extension viewport is fixed, disable built-in scroll shifts by default
-  
+  // The content script supplies actual scroll signals for this fixed viewport.
   MascotEngine.extensionMode = true;
 
   /**
@@ -150,68 +149,34 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
    */
   const getPacksForMode = packsForMode;
 
-  /**
-   * Universal Scroll & Wheel Detection:
-   * Captures wheel and scroll events across window and internal overflow containers,
-   * triggering detachment & Fall for mascots on walls/ceilings, and LieDown / SitDown avoidance on the floor.
-   */
-  let lastScrollYMap = new WeakMap<EventTarget, number>();
+  /** Capture actual page/container movement; wheel intent alone is not movement. */
+  const lastScrollYMap = new WeakMap<EventTarget, number>();
   let lastWindowY = window.scrollY;
 
-  function notifyScrollToEngines(delta: number): void {
-    // Trackpads frequently emit sub-pixel / one-pixel deltas.  Do not discard
-    // those events: the wheel event is the only reliable signal on pages whose
-    // scroll container does not bubble a `scroll` event to the document.
-    if (
-      !isScrollInteraction ||
-      isOrphaned ||
-      !isLeaseHolder ||
-      !Number.isFinite(delta) ||
-      delta === 0
-    )
-      return;
-    for (const m of activeMascots) {
-      try {
-        m.engine.handleExternalScroll(delta);
-      } catch {
-        // ignore
-      }
+  function resetScrollInput(): void {
+    lastWindowY = window.scrollY;
+    for (const mascot of activeMascots) mascot.engine.resetScrollTracking();
+  }
+
+  document.addEventListener("scroll", (event: Event) => {
+    if (isOrphaned) return;
+    const target = event.target;
+    const documentScroll = target === document || target === window || target === document.scrollingElement;
+    let delta = 0;
+    if (documentScroll) {
+      delta = window.scrollY - lastWindowY;
+      lastWindowY = window.scrollY;
+    } else if (target instanceof HTMLElement) {
+      // Internal containers can release a wall grip, but do not shift the
+      // document position of a mascot standing on the viewport floor.
+      const previous = lastScrollYMap.get(target) ?? 0;
+      delta = target.scrollTop - previous;
+      lastScrollYMap.set(target, target.scrollTop);
     }
-  }
-
-  function setupUniversalScroll(): void {
-    // Drive reactions from the resulting scroll position only. A wheel event
-    // is merely an intent signal and is also emitted at a scroll boundary;
-    // using it directly makes the mascot fall while the page remains still.
-    document.addEventListener(
-      "scroll",
-      (e: Event) => {
-        if (!isScrollInteraction || isOrphaned || !isLeaseHolder) return;
-        const target = e.target;
-        let delta = 0;
-        if (
-          target === document ||
-          target === window ||
-          target === document.documentElement ||
-          target === document.body
-        ) {
-          delta = window.scrollY - lastWindowY;
-          lastWindowY = window.scrollY;
-        } else if (target instanceof HTMLElement) {
-          const prev = lastScrollYMap.get(target) ?? target.scrollTop;
-          delta = target.scrollTop - prev;
-          lastScrollYMap.set(target, target.scrollTop);
-        }
-        if (delta !== 0) {
-          notifyScrollToEngines(delta);
-        }
-      },
-      { capture: true, passive: true },
-    );
-  }
-
-  // Initialize universal scroll & wheel listener
-  setupUniversalScroll();
+    // Update baselines even while interactions are disabled or this page has no lease.
+    if (!isScrollInteraction || !isLeaseHolder || !Number.isFinite(delta) || delta === 0) return;
+    for (const mascot of activeMascots) mascot.engine.handleExternalScroll(delta, documentScroll);
+  }, { capture: true, passive: true });
 
   /**
    * 自动探测与隐藏页面滚动条管理模块
@@ -605,6 +570,7 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
       return;
     }
 
+    resetScrollInput();
     isLeaseHolder = true;
     leaseMode = mascotMode;
     currentLeaseEpoch = response.epoch;
@@ -1062,6 +1028,7 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
 
     if (changes.scrollInteraction !== undefined) {
       isScrollInteraction = Boolean(changes.scrollInteraction.newValue);
+      resetScrollInput();
       log(
         isScrollInteraction
           ? "🌪️ 页面滚动互动已开启 (实验性)"

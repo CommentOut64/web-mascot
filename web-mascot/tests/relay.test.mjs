@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import vm from "node:vm";
-import { build } from "esbuild";
+import { readFile } from "node:fs/promises";
+import { build, transform } from "esbuild";
 
 async function bundle(entry) {
   const result = await build({ entryPoints: [entry], bundle: true, write: false,
@@ -67,14 +68,310 @@ function engineFixture(options = {}) {
     createMascot: module.exports.createMascot, rafs: () => rafs };
 }
 
-test("resize immediately preserves floor contact and maps frozen targets before handoff", () => {
+test("resize leaves position, velocity and frozen targets untouched; new space starts a fall", () => {
   const f = engineFixture(); const engine = f.make();
+  f.config.actions.Stand.borderType = "Floor";
   engine.actionStack.at(-1).resolved.TargetX = 700;
   f.window.innerWidth = 1400; f.window.innerHeight = 620;
   f.events.get("resize")();
   const snapshot = engine.createRelaySnapshot();
-  assert.equal(snapshot.y, 620); assert.equal(snapshot.anchorY, "floor");
-  assert.equal(snapshot.x, 700); assert.equal(snapshot.frames.at(-1).resolved.TargetX, 980);
+  assert.equal(snapshot.y, 600); assert.equal(snapshot.anchorY, "free");
+  assert.equal(snapshot.x, 500); assert.equal(snapshot.frames.at(-1).resolved.TargetX, 700);
+  engine.tick(); assert.equal(engine.currentBehavior.name, "Fall");
+  assert.equal(engine.y, 600, "losing support must not relocate the anchor");
+  engine.tick(); assert.ok(engine.y > 600 && engine.y < 620);
+});
+
+function falling(f, x = 500, y = 300, vx = 0, vy = 0) {
+  const engine = f.make();
+  engine.x = x; engine.y = y; engine.prevX = x; engine.prevY = y;
+  engine.setBehavior("Fall", "test"); engine.actionExpansionsThisTick = 0; engine.advanceActionTree();
+  engine.vx = vx; engine.vy = vy;
+  return engine;
+}
+
+test("rapid opposing scrolls leave the entire airborne trajectory and action clock unchanged", () => {
+  const f = engineFixture(); const scrolling = falling(f, 500, -150, 3, -8);
+  const control = falling(f, 500, -150, 3, -8);
+  for (let i = 0; i < 40; i++) {
+    for (const delta of [1, -1, 120, -120, 900, -900]) scrolling.handleExternalScroll(delta);
+    scrolling.tick(); control.tick();
+    assert.deepEqual([scrolling.x, scrolling.y, scrolling.vx, scrolling.vy, scrolling.stackPath()],
+      [control.x, control.y, control.vx, control.vy, control.stackPath()]);
+  }
+});
+
+test("document scroll is accumulated and rebased while gravity alone changes document motion", () => {
+  const f = engineFixture(); const engine = f.make(); f.config.actions.Stand.borderType = "Floor";
+  engine.handleExternalScroll(1); engine.handleExternalScroll(119);
+  engine.applyScrollIntent();
+  assert.equal(engine.y, 480); assert.equal(engine.prevY, 480);
+  assert.equal(engine.vx, 0); assert.equal(engine.vy, 0); assert.equal(engine.currentLeaf().name, "Falling");
+  const control = falling(f, 500, 480);
+  let scrollY = 0;
+  for (let i = 0; i < 10; i++) {
+    const delta = i % 2 ? -20 : 40; scrollY += delta;
+    engine.handleExternalScroll(delta); engine.tick(); control.tick();
+    assert.ok(Math.abs(engine.y + scrollY - control.y) < 1e-9);
+    assert.deepEqual([engine.x, engine.vx, engine.vy, engine.stackPath()],
+      [control.x, control.vx, control.vy, control.stackPath()]);
+  }
+});
+
+test("camera translation preserves interpolation, velocity and animation age between physics ticks", () => {
+  const f = engineFixture(); const engine = falling(f, 500, 300, 3, 7);
+  engine.prevY = 290; engine.accumulator = 20; engine.render(true);
+  const before = engine.lastRenderedY; const state = engine.createRelaySnapshot();
+  engine.handleExternalScroll(0.25); engine.handleExternalScroll(9.75); engine.applyScrollIntent(); engine.render(true);
+  assert.equal(engine.lastRenderedY, before - 10);
+  assert.equal(engine.y - engine.prevY, 10);
+  assert.equal(engine.vy, 7); assert.equal(engine.vx, 3);
+  assert.deepEqual(engine.createRelaySnapshot().frames, state.frames);
+  engine.handleExternalScroll(-10); engine.applyScrollIntent(); engine.render(true);
+  assert.equal(engine.lastRenderedY, before);
+});
+
+test("smooth downward scroll remains active after the first tiny event and follows paint before physics", () => {
+  const f = engineFixture(); const engine = f.make();
+  engine.lastTime = 0; engine.accumulator = 0;
+  engine.handleExternalScroll(0.25); engine.loop(16);
+  assert.equal(engine.tickCount, 0); assert.equal(engine.lastRenderedY, 599.75);
+  assert.equal(engine.currentLeaf().name, "Falling");
+  engine.handleExternalScroll(3.75); engine.handleExternalScroll(8); engine.loop(32);
+  assert.equal(engine.lastRenderedY, 588); assert.equal(engine.vy, 0);
+  engine.handleExternalScroll(20); engine.loop(48);
+  assert.ok(engine.lastRenderedY < 570); assert.equal(engine.vy, 2);
+});
+
+test("opposing scroll before paint cancels instead of inventing a floor fall", () => {
+  const f = engineFixture(); const engine = f.make();
+  engine.handleExternalScroll(120); engine.handleExternalScroll(-120); engine.applyScrollIntent();
+  assert.equal(engine.y, 600); assert.equal(engine.currentBehavior.name, "StandUp");
+});
+
+test("camera movement onto the floor establishes support without a physical impact", () => {
+  const f = engineFixture(); const engine = falling(f, 500, 590, 0, 8);
+  const events = []; f.Engine.addObserver((_, event) => events.push(event));
+  engine.handleExternalScroll(-20); engine.tick();
+  assert.equal(engine.y, 600); assert.equal(engine.prevY, 600);
+  assert.equal(engine.currentBehavior.name, "StandUp");
+  assert.equal(events.filter(e => e.name === "land").length, 0);
+  engine.handleExternalScroll(40); engine.tick();
+  assert.ok(engine.y < 600); assert.equal(engine.currentLeaf().name, "Falling");
+});
+
+test("upward page scroll and internal container scroll preserve floor support", () => {
+  const f = engineFixture(); const engine = f.make(); f.config.actions.Stand.borderType = "Floor";
+  for (let i = 0; i < 20; i++) {
+    engine.handleExternalScroll(-120); engine.handleExternalScroll(120, false); engine.tick();
+    assert.equal(engine.currentBehavior.name, "StandUp"); assert.equal(engine.y, 600);
+  }
+});
+
+test("floor scroll converts screen pixels by scale and allows a large release above the viewport", () => {
+  const f = engineFixture(); const engine = f.make();
+  Object.defineProperty(engine, "spriteScale", { get: () => 2 });
+  engine.x = 250; engine.y = 300; engine.prevY = 300;
+  engine.handleExternalScroll(120); engine.applyScrollIntent();
+  assert.equal(engine.y, 240); assert.equal(engine.prevY, 240);
+  const other = f.make(); other.handleExternalScroll(900); other.applyScrollIntent();
+  assert.equal(other.y, -300); assert.equal(other.currentBehavior.name, "Fall");
+  other.tick(); assert.ok(other.y < 0 && other.y > -300);
+});
+
+test("floor release lands through the pack animation and starts anew only after regaining support", () => {
+  const f = engineFixture(); f.config.actions.Land = { ...f.leaf("Land", "Animate"), borderType: "Floor" };
+  f.config.actions.Fall.children.push(f.reference("Land"));
+  const engine = f.make(); const events = []; f.Engine.addObserver((_, event) => events.push(event));
+  engine.handleExternalScroll(120); engine.tick();
+  assert.equal(events.filter((e) => e.name === "land").length, 0);
+  for (let i = 0; i < 40 && engine.currentLeaf().name !== "Land"; i++) engine.tick();
+  assert.equal(engine.y, 600); assert.equal(engine.currentLeaf().name, "Land");
+  assert.equal(events.filter((e) => e.name === "land").length, 1);
+  engine.handleExternalScroll(60); engine.applyScrollIntent();
+  assert.equal(engine.y, 540); assert.equal(engine.currentLeaf().name, "Falling");
+});
+
+test("pause clears camera movement and changed support does not restart an existing fall", () => {
+  const f = engineFixture(); const engine = f.make();
+  engine.handleExternalScroll(120); engine.setPauseReason("hidden", true); engine.setPauseReason("hidden", false);
+  engine.applyScrollIntent(); assert.equal(engine.y, 600);
+  engine.handleExternalScroll(120); engine.setBehavior("Fall", "test"); engine.advanceActionTree();
+  engine.y = 400; engine.vy = 8; engine.applyScrollIntent();
+  assert.equal(engine.y, 280); assert.equal(engine.vy, 8);
+});
+
+test("internal container scroll releases wall/ceiling without translating the document or resetting fall", () => {
+  for (const [behavior, border, x, y] of [
+    ["HoldOntoWall", "Wall", 0, 250], ["HoldOntoWall", "Wall", 1000, 250],
+    ["HoldOntoCeiling", "Ceiling", 500, 0],
+  ]) {
+    const f = engineFixture(); const engine = f.make();
+    f.config.actions[border === "Wall" ? "GrabWall" : "GrabCeiling"].borderType = border;
+    engine.x = x; engine.y = y; engine.setBehavior(behavior, "test"); engine.advanceActionTree();
+    engine.handleExternalScroll(1, false); engine.applyScrollIntent();
+    assert.equal(engine.x, x); assert.equal(engine.y, y);
+    assert.equal(engine.currentBehavior.name, "Fall"); assert.equal(engine.surfaceAt(), null);
+    for (let i = 0; i < 8; i++) { engine.handleExternalScroll(i % 2 ? 120 : -120, false); engine.tick(); }
+    assert.equal(engine.x, x); assert.ok(engine.y > y); assert.equal(engine.currentBehavior.name, "Fall");
+  }
+});
+
+test("scroll input is discarded across dragging, reset and pause boundaries", () => {
+  const f = engineFixture(); const engine = f.make(); f.config.actions.GrabWall.borderType = "Wall";
+  engine.x = 0; engine.y = 200; engine.setBehavior("HoldOntoWall", "test"); engine.advanceActionTree();
+  engine.handleExternalScroll(120); engine.resetScrollTracking(); engine.applyScrollIntent();
+  assert.equal(engine.currentBehavior.name, "HoldOntoWall");
+  engine.isDragging = true; engine.handleExternalScroll(120); engine.isDragging = false;
+  engine.applyScrollIntent(); assert.equal(engine.currentBehavior.name, "HoldOntoWall");
+  engine.setPauseReason("hidden", true); engine.handleExternalScroll(120);
+  engine.setPauseReason("hidden", false); engine.applyScrollIntent();
+  assert.equal(engine.currentBehavior.name, "HoldOntoWall");
+});
+
+test("fall crosses floor once and continues the pack's landing sequence", () => {
+  const f = engineFixture();
+  f.config.actions.Land = { ...f.leaf("Land", "Animate"), borderType: "Floor" };
+  f.config.actions.Fall.children.push(f.reference("Land"));
+  const engine = falling(f, 500, 590, 10, 100);
+  const events = []; f.Engine.addObserver((_, event) => events.push(event));
+  engine.tick(); assert.equal(engine.y, 600); assert.equal(engine.vy, 0);
+  assert.equal(engine.currentLeaf().name, "Land");
+  assert.ok(engine.x > 500 && engine.x < 510, "landing uses the segment intersection");
+  for (let i = 0; i < 10; i++) engine.tick();
+  assert.equal(events.filter((e) => e.name === "land").length, 1);
+});
+
+test("throws can launch upward from the floor without premature landing", () => {
+  const f = engineFixture(); const engine = falling(f, 500, 600, 0, -20);
+  engine.tick(); assert.ok(engine.y < 600); assert.ok(engine.vy < 0);
+  assert.equal(engine.currentBehavior.name, "Fall");
+});
+
+test("starting Fall on the supported floor returns to standing without an impact animation", () => {
+  const f = engineFixture(); const engine = falling(f, 500, 600);
+  const events = []; f.Engine.addObserver((_, event) => events.push(event));
+  engine.tick();
+  assert.equal(engine.y, 600); assert.equal(engine.currentBehavior.name, "StandUp");
+  assert.equal(events.filter((e) => e.name === "land").length, 0);
+});
+
+test("fall catches a wall impact and only its top can overflow", () => {
+  for (const [x, vx, edge] of [[2, -20, 0], [998, 20, 1000]]) {
+    const f = engineFixture(); const engine = falling(f, x, 200, vx, 0);
+    engine.tick(); assert.equal(engine.x, edge); assert.equal(engine.vx, 0);
+    assert.ok(engine.y > 200); assert.equal(engine.currentLeaf().name, "GrabWall");
+    assert.equal(engine.currentBehavior.name, "HoldOntoWall");
+    assert.equal(engine.lookRight, edge === 1000);
+  }
+  const f = engineFixture(); const engine = falling(f, 500, -200, 0, 0);
+  engine.tick(); assert.ok(engine.y < 0); assert.ok(engine.vy > 0);
+});
+
+test("Thrown catches side/ceiling impacts while remaining within all four bounds", () => {
+  const f = engineFixture();
+  f.config.actions.Thrown = { name: "Thrown", type: "Sequence", children: [f.reference("Falling")] };
+  for (const [x, y, vx, vy] of [[2, 200, -50, 0], [998, 200, 50, 0], [500, 1, 0, -50]]) {
+    const engine = falling(f, x, y);
+    engine.setBehavior("Thrown", "test"); engine.advanceActionTree(); engine.vx = vx; engine.vy = vy;
+    engine.tick();
+    assert.ok(engine.x >= 0 && engine.x <= 1000 && engine.y >= 0 && engine.y <= 600);
+    if (vy < 0) { assert.equal(engine.y, 0); assert.equal(engine.vy, 0); }
+    else assert.equal(engine.vx, 0);
+    assert.equal(engine.currentLeaf().name, vy < 0 ? "GrabCeiling" : "GrabWall");
+  }
+  f.config.actions.Land = { ...f.leaf("Land", "Animate"), borderType: "Floor" };
+  f.config.actions.Thrown.children.push(f.reference("Land"));
+  const engine = falling(f, 500, 590);
+  engine.setBehavior("Thrown", "test"); engine.advanceActionTree(); engine.vy = 100;
+  engine.tick(); assert.equal(engine.y, 600); assert.equal(engine.currentLeaf().name, "Land");
+});
+
+test("ground movement, wall climbing, offsets and dragging keep four bounds", () => {
+  const f = engineFixture();
+  const engine = f.make();
+  f.config.actions.Stand.borderType = "Floor";
+  f.config.actions.Stand.poses = [{ ...f.config.actions.Stand.poses[0], velocity: { x: -30, y: 0 } }];
+  engine.x = 990; engine.tick(); assert.equal(engine.x, 1000); assert.equal(engine.y, 600);
+  engine.tick(); assert.equal(engine.currentBehavior.name, "StandUp");
+  f.config.actions.GrabWall.borderType = "Wall";
+  f.config.actions.GrabWall.poses = [{ ...f.config.actions.GrabWall.poses[0], velocity: { x: 0, y: -30 } }];
+  engine.x = 0; engine.y = 2; engine.setBehavior("HoldOntoWall", "test"); engine.advanceActionTree();
+  engine.tick(); assert.equal(engine.x, 0); assert.equal(engine.y, 0);
+  f.config.actions.Offset = { name: "Offset", type: "Embedded", className: "test.Offset" };
+  engine.setBehavior("Offset", "test");
+  engine.actionStack[0].vars = { X: "-500", Y: "-500" }; engine.tick();
+  assert.ok(engine.x >= 0 && engine.y >= 0);
+  engine.isDragging = true; engine.dragGrab = { x: 0, y: 0 }; engine.cursorX = -500; engine.cursorY = -500;
+  engine.applyDragAnchor(); assert.equal(engine.x, 0); assert.equal(engine.y, 0);
+  engine.cursorX = 2000; engine.cursorY = 2000;
+  engine.applyDragAnchor(); assert.equal(engine.x, 1000); assert.equal(engine.y, 600);
+});
+
+test("ordinary floor movement hitting a wall starts climbing, and scrolling releases the new climb", () => {
+  const f = engineFixture();
+  f.config.actions.Stand.borderType = "Floor";
+  f.config.actions.Stand.poses = [{ ...f.config.actions.Stand.poses[0], velocity: { x: -30, y: 0 } }];
+  f.config.actions.ClimbWall = { ...f.leaf("ClimbWall", "Move"), borderType: "Wall" };
+  f.config.actions.ClimbAlongWall = { name: "ClimbAlongWall", type: "Sequence", children: [f.reference("ClimbWall", { TargetY: "64" })] };
+  const engine = f.make(); engine.x = 990; engine.tick();
+  assert.equal(engine.x, 1000); assert.equal(engine.currentLeaf().name, "ClimbWall");
+  engine.handleExternalScroll(1, false); engine.tick();
+  assert.equal(engine.currentBehavior.name, "StandUp"); assert.equal(engine.x, 1000);
+  // At the floor corner, releasing support returns to standing without a fake impact.
+  assert.equal(engine.y, 600);
+});
+
+test("wall contact followed by scroll falls vertically to the floor without recapture", () => {
+  const f = engineFixture(); f.config.actions.GrabWall.borderType = "Wall";
+  f.config.actions.Land = { ...f.leaf("Land", "Animate"), borderType: "Floor" };
+  f.config.actions.Fall.children.push(f.reference("Land"));
+  const engine = falling(f, 998, 200, 40, 0); engine.tick();
+  assert.equal(engine.currentLeaf().name, "GrabWall");
+  engine.handleExternalScroll(-1); engine.tick();
+  assert.equal(engine.currentLeaf().name, "Falling"); assert.equal(engine.x, 1000);
+  for (let i = 0; i < 60 && engine.currentLeaf().name === "Falling"; i++) {
+    engine.handleExternalScroll(i % 2 ? 1 : -1); engine.tick();
+  }
+  assert.equal(engine.currentLeaf().name, "Land"); assert.equal(engine.y, 600);
+});
+
+test("floor impact takes precedence over a later wall impact", () => {
+  const f = engineFixture();
+  f.config.actions.Falling.attributes = { Gravity: "0", RegistanceX: "0", RegistanceY: "0" };
+  f.config.actions.Land = { ...f.leaf("Land", "Animate"), borderType: "Floor" };
+  f.config.actions.Fall.children.push(f.reference("Land"));
+  const engine = falling(f, 900, 599, 200, 100); engine.tick();
+  assert.equal(engine.currentLeaf().name, "Land"); assert.equal(engine.y, 600);
+});
+
+test("floor impact at a side collision lands inside the closed viewport", () => {
+  const f = engineFixture();
+  f.config.actions.Falling.attributes = { Gravity: "0", RegistanceX: "0", RegistanceY: "0" };
+  const engine = falling(f, 990, 590, 100, 100);
+  engine.tick(); assert.equal(engine.y, 600); assert.equal(engine.x, 1000);
+});
+
+test("shrinking the viewport contains position without producing an impact animation", () => {
+  const f = engineFixture(); const engine = falling(f, 900, 550, 3, 5);
+  const events = []; f.Engine.addObserver((_, event) => events.push(event));
+  engine.renderNow(); f.window.innerWidth = 800; f.window.innerHeight = 500; f.events.get("resize")();
+  assert.equal(engine.x, 800); assert.equal(engine.y, 500);
+  assert.equal(engine.vx, 0); assert.equal(engine.vy, 0);
+  engine.tick(); assert.equal(engine.currentBehavior.name, "StandUp");
+  assert.equal(events.filter((e) => e.name === "land").length, 0);
+});
+
+test("explicit target jump can still establish a wall grab", () => {
+  const f = engineFixture(); f.config.actions.GrabWall.borderType = "Wall";
+  f.config.actions.Jumping = { ...f.leaf("Jumping", "Embedded"), className: "test.Jump" };
+  f.config.actions.JumpToWall = { name: "JumpToWall", type: "Sequence", children: [
+    f.reference("Jumping", { TargetX: "0", TargetY: "200" }), f.reference("GrabWall"),
+  ] };
+  const engine = f.make(); engine.x = 5; engine.y = 200;
+  engine.setBehavior("JumpToWall", "test"); engine.advanceActionTree(); engine.tick();
+  assert.equal(engine.x, 0); assert.equal(engine.currentLeaf().name, "GrabWall");
+  assert.equal(engine.surfaceAt(), "left-wall");
 });
 
 test("floor/ceiling/walls follow changed work area; targets use the same mapping", () => {
@@ -321,4 +618,56 @@ test("timed-out visible handoff waits for acknowledgement and then permits recov
   const next = await b.send(3, "c", { type: "ACQUIRE_LEASE" });
   assert.equal(next.success, true);
   assert.equal(next.snapshots[0].marker, "late-valid");
+});
+
+test("content delivers the first container scroll and keeps baselines while disabled or unowned", async () => {
+  const source = await readFile("extension/src/content.ts", "utf8");
+  const start = source.indexOf("  const lastScrollYMap");
+  const end = source.indexOf("  /**", start);
+  let listener; const delivered = []; const sources = [];
+  class ScrollElement { scrollTop = 0; }
+  const window = { scrollY: 0 };
+  const document = { documentElement: {}, body: {}, addEventListener(_, callback) { listener = callback; } };
+  const context = vm.createContext({ window, document, HTMLElement: ScrollElement,
+    isOrphaned: false, isLeaseHolder: true, isScrollInteraction: false,
+    activeMascots: [{ engine: { handleExternalScroll: (delta, documentScroll) => { delivered.push(delta); sources.push(documentScroll); }, resetScrollTracking() {} } }] });
+  const compiled = await transform(source.slice(start, end), { loader: "ts" });
+  vm.runInContext(compiled.code, context);
+  window.scrollY = 400; listener({ target: document });
+  context.isScrollInteraction = true; window.scrollY = 401; listener({ target: document });
+  assert.deepEqual(delivered, [1]);
+  context.isLeaseHolder = false; window.scrollY = 800; listener({ target: document });
+  context.isLeaseHolder = true; window.scrollY = 802; listener({ target: document });
+  assert.deepEqual(delivered, [1, 2]);
+  const container = new ScrollElement(); container.scrollTop = 50; listener({ target: container });
+  assert.equal(delivered.at(-1), 50, "the first container event must not be swallowed");
+  assert.equal(sources.at(-1), false); assert.equal(sources[0], true);
+  container.scrollTop = 51; listener({ target: container });
+  assert.equal(delivered.at(-1), 1);
+  context.isLeaseHolder = false;
+  window.scrollY = 1200; container.scrollTop = 900;
+  listener({ target: document }); listener({ target: container });
+  context.isLeaseHolder = true;
+  vm.runInContext("resetScrollInput()", context);
+  listener({ target: document }); listener({ target: container });
+  assert.equal(delivered.length, 4, "resume establishes baselines without inventing a gesture");
+  window.scrollY = 1201; listener({ target: document });
+  assert.equal(delivered.at(-1), 1);
+});
+
+test("relay contains obsolete side/bottom overflow and preserves only Fall above the top", () => {
+  const f = engineFixture(); const source = falling(f, -200, 900, -3, 20);
+  source.renderNow(); const target = f.make();
+  assert.equal(target.restoreRelaySnapshot(source.createRelaySnapshot()), true);
+  assert.equal(target.x, 0); assert.equal(target.y, 600);
+  assert.equal(target.vx, 0); assert.equal(target.vy, 0);
+  target.tick(); assert.equal(target.currentBehavior.name, "StandUp");
+  source.x = 500; source.y = -200; source.vx = 0; source.vy = 20; source.renderNow();
+  assert.equal(target.restoreRelaySnapshot(source.createRelaySnapshot()), true);
+  assert.equal(target.y, -200); target.tick(); assert.ok(target.y < 0 && target.y > -200);
+  f.config.actions.Thrown = { name: "Thrown", type: "Sequence", children: [f.reference("Falling")] };
+  f.config.behaviors.push({ name: "Thrown", id: 90, nextBehaviors: [] });
+  source.setBehavior("Thrown", "test"); source.advanceActionTree(); source.y = -200; source.vy = -20; source.renderNow();
+  assert.equal(target.restoreRelaySnapshot(source.createRelaySnapshot()), true);
+  assert.equal(target.y, 0); assert.equal(target.vy, 0);
 });

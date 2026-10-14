@@ -337,14 +337,10 @@ export class MascotEngine {
   private loopId = 0;
   private pauseReasons = new Set<PauseReason>();
   private unregisterPage: (() => void) | null = null;
-  /** Scroll is an external intent; mascot coordinates remain viewport coordinates. */
   private lastScrollY = 0;
-  private scrollDirection: -1 | 0 | 1 = 0;
-  private scrollGestureDirection: -1 | 0 | 1 = 0;
-  /** Pending page movement, in virtual viewport units, waiting for the next tick. */
+  /** Camera translation in sprite units, separate from physical velocity. */
   private pendingScrollShift = 0;
-  private scrollStopPending = false;
-  private scrollHold: "none" | "resting" = "none";
+  private scrollDetachPending: Surface | null = null;
   private lastSurface: Surface | null = null;
   private cursorX = 0;
   private cursorY = 0;
@@ -411,14 +407,9 @@ export class MascotEngine {
   /** Change detection for the observation stream. */
   private observedPath = "";
   private observedImage = "";
-  private clampReported = false;
   private eventsAbortController = new AbortController();
-  private isScrolling = false;
-  private scrollDebounceTimer = 0;
-  /** Ignore layout scroll events immediately after relay restoration. */
-  private scrollIgnoreUntil = 0;
   /**
-   * One-shot timers that are not already covered by `scrollDebounceTimer`. `init()` and `setVisible()` schedule work that can fire
+   * One-shot timers from `init()` and `setVisible()` can fire
    * after `destroy()`, which used to let a torn-down mascot poke at a detached DOM
    * node (and at `this.visible`, which no longer means anything).
    */
@@ -461,38 +452,17 @@ export class MascotEngine {
   private lastRenderedX = 0;
   private lastRenderedY = 0;
   private lastRenderedPose: Pose | null = null;
-  private lastRenderedArea: Area | null = null;
 
-  public handleExternalScroll(delta: number): void {
-    if (this.destroyed || this.isDragging || !Number.isFinite(delta) || delta === 0) return;
-
-    if (Math.abs(delta) > 500) return; // Ignore impossible layout shifts
-    if (performance.now() < this.scrollIgnoreUntil) return; // Ignore scroll events during tab switch immunity
-
-    if (this.scrollStopPending) {
-      this.scrollStopPending = false;
-      this.scrollGestureDirection = 0;
-      if (this.scrollHold === "resting") {
-        this.scrollHold = "none";
-        if (this.currentBehavior?.name === "SitDown" && this.surfaceAt() === "floor") {
-          this.setBehavior("StandUp", "scroll-stop");
-        }
-      }
+  public handleExternalScroll(delta: number, documentScroll = true): void {
+    if (this.destroyed || this.isDragging || this.pauseReasons.size > 0 ||
+        !Number.isFinite(delta) || delta === 0) return;
+    if (documentScroll) this.pendingScrollShift += delta / this.spriteScale;
+    const surface = this.surfaceAt();
+    if ((surface === "floor" && documentScroll && delta > 0) ||
+        surface === "left-wall" || surface === "right-wall" || surface === "ceiling") {
+      this.scrollDetachPending = surface;
     }
-
-    this.pendingScrollShift += delta / this.spriteScale;
-    this.isScrolling = true;
-    this.scrollDirection = delta > 0 ? 1 : -1;
-    this.scrollStopPending = false;
-
-    window.clearTimeout(this.scrollDebounceTimer);
-    this.scrollDebounceTimer = window.setTimeout(() => {
-      this.isScrolling = false;
-      this.scrollDirection = 0;
-      this.scrollStopPending = true;
-    }, 160);
   }
-
 
   public resetToSpawn(): void {
     this.applySpawnPosition();
@@ -549,8 +519,8 @@ export class MascotEngine {
     const snapshot: RelaySnapshot = {
       schemaVersion: 2, pack: this.mascotName, x: this.lastRenderedX, y: this.lastRenderedY,
       area: { ...area },
-      anchorX: this.borderIsOn("left", { x: this.x, y: this.y }) ? "left" :
-        this.borderIsOn("right", { x: this.x, y: this.y }) ? "right" : "free",
+      anchorX: surface && this.borderIsOn("left", { x: this.x, y: this.y }) ? "left" :
+        surface && this.borderIsOn("right", { x: this.x, y: this.y }) ? "right" : "free",
       anchorY: surface === "floor" ? "floor" : surface === "ceiling" ? "ceiling" : "free",
       interaction, vx: this.vx, vy: this.vy, lookRight: this.lookRight,
       behaviorName: this.currentBehavior?.name ?? "StandUp", behaviorId: this.currentBehavior?.id,
@@ -661,7 +631,7 @@ export class MascotEngine {
     this.servingClaimSince = 0;
     this.wantMovement = false;
     this.behaviorUsability.clear();
-    this.clampToWorkArea();
+
     if (!valid || snapshot.interaction) {
       this.interactionCooldownUntil = this.tickCount + MascotEngine.animationConfig.interactionCooldown(this.mascotName);
       this.resetForRelay();
@@ -672,11 +642,12 @@ export class MascotEngine {
       this.stillTicks = snapshot.stillTicks;
       this.anchorStillTicks = snapshot.anchorStillTicks;
     }
+    this.constrainToWorkArea();
     this.prevX = this.x;
     this.prevY = this.y;
     this.accumulator = 0;
     this.lastTime = performance.now();
-    this.scrollIgnoreUntil = performance.now() + 100;
+
     if (valid && !snapshot.interaction && !this.currentPose()?.image && snapshot.visual) {
       const visual = snapshot.visual;
       this.elImg.src = this.spriteUrl(visual.image);
@@ -732,35 +703,19 @@ export class MascotEngine {
           }
           // MascotHoldGesture::cancelsForEvent(Hide): a hidden page drops the press.
           engine.cancelPress();
-          window.clearTimeout(engine.scrollDebounceTimer);
+
           engine.setPauseReason("hidden", true);
         } else engine.setPauseReason("hidden", false);
       }
     });
     window.addEventListener("resize", () => {
       for (const engine of MascotEngine.liveEngines) {
-        const source = engine.lastRenderedArea;
-        const area = engine.area();
-        if (source) {
-          const point = { x: engine.x, y: engine.y };
-          const mapped = mapRelayPoint(engine.x, engine.y, source, area);
-          engine.x = engine.borderIsOn("left", point, source) ? area.left :
-            engine.borderIsOn("right", point, source) ? area.right : mapped.x;
-          engine.y = engine.borderIsOn("bottom", point, source) ? area.bottom :
-            engine.borderIsOn("top", point, source) ? area.top : mapped.y;
-          for (const frame of engine.actionStack) {
-            const target = mapRelayPoint(
-              typeof frame.resolved.TargetX === "number" ? frame.resolved.TargetX : source.left,
-              typeof frame.resolved.TargetY === "number" ? frame.resolved.TargetY : source.top, source, area);
-            if (typeof frame.resolved.TargetX === "number") frame.resolved.TargetX = target.x;
-            if (typeof frame.resolved.TargetY === "number") frame.resolved.TargetY = target.y;
-          }
-        }
+        // Keep in-range positions and frozen targets; a shrinking boundary contains the anchor.
         engine.partnerCache.clear();
         engine.travelCache.clear();
         engine.borderStartCache.clear();
         engine.behaviorUsability.clear();
-        engine.clampToWorkArea();
+        engine.constrainToWorkArea();
         engine.prevX = engine.x;
         engine.prevY = engine.y;
         engine.renderNow();
@@ -771,17 +726,7 @@ export class MascotEngine {
         if (MascotEngine.extensionMode) continue;
         const delta = window.scrollY - engine.lastScrollY;
         engine.lastScrollY = window.scrollY;
-        if (delta === 0) continue;
-        engine.isScrolling = true;
-        engine.scrollDirection = delta > 0 ? 1 : -1;
-        engine.pendingScrollShift += delta / engine.spriteScale;
-        engine.scrollStopPending = false;
-        window.clearTimeout(engine.scrollDebounceTimer);
-        engine.scrollDebounceTimer = window.setTimeout(() => {
-          engine.isScrolling = false;
-          engine.scrollDirection = 0;
-          engine.scrollStopPending = true;
-        }, 160);
+        engine.handleExternalScroll(delta);
       }
     });
   }
@@ -1032,7 +977,6 @@ export class MascotEngine {
     let restoredSnapshot = false;
     if (options?.initialSnapshot) {
       restoredSnapshot = this.restoreRelaySnapshot(options.initialSnapshot);
-      if (restoredSnapshot) this.clampToWorkArea();
     }
     if (!restoredSnapshot) {
       this.applySpawnPosition();
@@ -1053,6 +997,7 @@ export class MascotEngine {
       this.setBehavior(startBehavior, "spawn");
       this.advanceActionTree();
     }
+    this.constrainToWorkArea();
     this.preloadSprites();
     await this.warmFirstPose();
     if (this.destroyed) return;
@@ -1064,7 +1009,7 @@ export class MascotEngine {
     this.elRoot.style.visibility = options?.startPaused ? "hidden" : "visible";
     this.emit({ kind: "spawn", detail: `viewport=${window.innerWidth}x${window.innerHeight}` });
     if (restoredSnapshot) {
-      this.scrollIgnoreUntil = performance.now() + 100;
+
       this.emit({ kind: "milestone", name: "relay-resume", detail: `behavior=${this.currentBehavior?.name}`, x: this.x, y: this.y, leaf: this.leafLabel() });
     }
     this.lastTime = performance.now();
@@ -1168,14 +1113,10 @@ export class MascotEngine {
     }
   }
 
-  private resetScrollTracking() {
+  public resetScrollTracking() {
     this.lastScrollY = window.scrollY;
-    this.scrollDirection = 0;
-    this.scrollGestureDirection = 0;
     this.pendingScrollShift = 0;
-    this.scrollStopPending = false;
-    this.isScrolling = false;
-    this.scrollHold = "none";
+    this.scrollDetachPending = null;
   }
 
   private setVisible(visible: boolean) {
@@ -1208,7 +1149,7 @@ export class MascotEngine {
 
     if (isPaused) {
       cancelAnimationFrame(this.loopId);
-      window.clearTimeout(this.scrollDebounceTimer);
+
       this.resetScrollTracking();
       this.emit({ kind: "milestone", name: "paused", detail: reason, x: this.x, y: this.y, leaf: this.leafLabel() });
     } else {
@@ -1240,7 +1181,7 @@ export class MascotEngine {
     this.intersectionObserver?.disconnect();
     this.intersectionObserver = null;
     this.eventsAbortController.abort();
-    window.clearTimeout(this.scrollDebounceTimer);
+
     for (const timer of this.pendingTimers) window.clearTimeout(timer);
     this.pendingTimers.clear();
     this.releaseStack();
@@ -1538,8 +1479,8 @@ export class MascotEngine {
    * `dragged::subtick()`: pin the anchor to `cursor + OffsetX/OffsetY`.
    *
    * Qt runs this once per *subtick* — every 10 ms, i.e. four times per logic frame —
-   * and assigns the anchor directly, with no clamp and no interpolation, so a held
-   * mascot can never drift away from the cursor however fast the pointer moves. The
+   * and assigns the anchor directly, without interpolation. The viewport bounds
+   * also apply to dragging. The
    * web engine ticks every 40 ms, so this is called from the tick *and* from every
    * pointer event, and `render()` skips interpolation while a drag is active.
    */
@@ -1563,6 +1504,7 @@ export class MascotEngine {
     const cursor = this.simulationCursorVirtual();
     this.x = cursor.x + offsetX;
     this.y = cursor.y + offsetY;
+    this.constrainToWorkArea();
   }
 
   /** Qt `ShijimaWidget::mouseMoveEvent()`: remember how far the pointer has travelled
@@ -1742,9 +1684,7 @@ export class MascotEngine {
     const tolerance = 1;
     if (side === "top" || side === "bottom") {
       const y = side === "top" ? area.top : area.bottom;
-      const crossed = side === "bottom" && point.y >= y;
-      const near = Math.abs(point.y - y) < tolerance;
-      return (crossed || near) && point.x >= area.left && point.x <= area.right;
+      return Math.abs(point.y - y) < tolerance && point.x >= area.left && point.x <= area.right;
     }
     const x = side === "left" ? area.left : area.right;
     return Math.abs(point.x - x) < tolerance && point.y >= area.top && point.y <= area.bottom;
@@ -2049,7 +1989,6 @@ export class MascotEngine {
     if (!selected) return;
     const action = this.config.actions[selected.name];
     const from = this.currentBehavior?.name ?? "";
-    this.clampReported = false;
     this.behaviorTicks = 0;
     // The pacer measures how long *this* behaviour has been standing still. Without
     // this reset an exhausted counter would switch behaviours on every tick, which
@@ -2106,6 +2045,8 @@ export class MascotEngine {
     // A mascot is decoration: one bad tick must not kill the animation loop and
     // leave it frozen for ever. Swallow the error, report it, and keep going.
     try {
+      // Page projection follows paint frames, not the slower physics clock.
+      this.applyScrollIntent();
       while (this.accumulator >= runtime.tickMs) { this.tick(); this.accumulator -= runtime.tickMs; }
       // libshijima interpolates the anchor of *move* actions between subticks, but the
       // dragged action opts out (`dragged::requests_interpolation() == false`): a held
@@ -2152,13 +2093,7 @@ export class MascotEngine {
     this.tickCount++;
     this.behaviorInitsThisTick = 0;
     this.actionExpansionsThisTick = 0;
-    const surfaceBeforeScroll = this.surfaceAt();
-    if (!this.isDragging && this.pendingScrollShift !== 0) {
-      this.y -= this.pendingScrollShift;
-      this.pendingScrollShift = 0;
-      this.clampToWorkArea();
-    }
-    this.applyScrollIntent(surfaceBeforeScroll);
+    this.applyScrollIntent();
     // Cursor velocity for this tick (see the field comment), in virtual units so the
     // packs' `InitialVX/InitialVY` and `cursor.dx/dy` expressions stay sprite-unit
     // quantities. The clamp is a screen-pixel budget, so a pointer that teleports —
@@ -2177,7 +2112,7 @@ export class MascotEngine {
       if (!this.isResistAction(frame?.node)) {
         // dragged::subtick(): the anchor is pinned to the local cursor plus the
         // action's offsets (OffsetX = 0, OffsetY = 120 in these packs) and assigned
-        // directly — Qt clamps nothing while a mascot is held.
+        // directly, then constrained to the viewport.
         this.applyDragAnchor();
         const cursor = this.simulationCursorVirtual();
         // dragged::subtick() keeps a held mascot facing left (the held sprites are
@@ -2193,7 +2128,9 @@ export class MascotEngine {
     this.tickStartVX = this.vx;
     this.tickStartVY = this.vy;
     if (!this.isDragging) this.updatePhysics();
+    this.constrainToWorkArea();
     this.advanceActionTree();
+    this.constrainToWorkArea();
     this.behaviorTicks++;
     // Track how long the mascot has actually been standing still; the pacer keys
     // off this rather than behaviour age, so a "walk then sit" sequence is not
@@ -2347,7 +2284,6 @@ export class MascotEngine {
     const path = this.stackPath();
     if (path !== this.observedPath) {
       this.observedPath = path;
-      this.clampReported = false;
       const node = this.currentLeaf();
       const frame = this.actionStack[this.actionStack.length - 1];
       this.emit({
@@ -2499,7 +2435,7 @@ export class MascotEngine {
       const offsetY = Math.trunc(this.varNumber(frame, "Y") ?? 0);
       this.x += offsetX;
       this.y += offsetY;
-      this.clampToWorkArea();
+
       if (offsetX !== 0 || offsetY !== 0) {
         // An offset is a deliberate instant move, so report it as a milestone and
         // keep the jump-suspect detector for movement nothing explains.
@@ -2848,6 +2784,8 @@ export class MascotEngine {
 
   /** The surface currently supporting the anchor, preserving the active side at corners. */
   private surfaceAt(point = { x: this.x, y: this.y }, area = this.area()): Surface | null {
+    const leaf = this.currentLeaf();
+    if (this.isDragging || this.isFallLike(leaf) || this.isJumpLike(leaf) || this.isDraggedAction(leaf)) return null;
     const floor = this.borderIsOn("bottom", point, area);
     const left = this.borderIsOn("left", point, area);
     const right = this.borderIsOn("right", point, area);
@@ -2870,48 +2808,40 @@ export class MascotEngine {
     return null;
   }
 
-  /** Detach from the current surface before starting Fall; Fall tests contact first. */
-  private detachAndFall(surface: Surface, reason: string) {
+  /** Rebase the viewport frame without feeding camera motion into the integrator. */
+  private applyScrollIntent() {
+    const pending = this.scrollDetachPending;
+    const shift = this.pendingScrollShift;
+    this.scrollDetachPending = null;
+    this.pendingScrollShift = 0;
+    if (this.isDragging || (!pending && shift === 0)) return;
+    const surface = this.surfaceAt();
+    if (pending && surface === pending && (surface !== "floor" || shift > 0)) {
+      // Only losing support starts Fall. Airborne scroll preserves the action clock.
+      this.vx = this.vy = 0;
+      this.lastSurface = null;
+      this.setBehavior("Fall", "scroll-detach");
+      this.advanceActionTree();
+    }
+    if (shift === 0) return;
+    // Translating both interpolation endpoints keeps the physical segment intact:
+    // documentY = viewportY + scrollY changes only through the mascot's own motion.
+    this.y -= shift;
+    this.prevY -= shift;
+    this.offsetJumped = true;
     const area = this.area();
-    const epsilon = 2;
-    // We DO NOT bounce off the floor here, because that forces a 1-frame mid-air glitch (平地摔).
-    // Instead, if it falls on the floor, it naturally lands on the next physics tick.
-    if (surface === "left-wall") this.x = Math.min(area.right, area.left + epsilon);
-    else if (surface === "right-wall") this.x = Math.max(area.left, area.right - epsilon);
-    else if (surface === "ceiling") this.y = Math.min(area.bottom, area.top + epsilon);
-    this.vx = 0;
-    this.vy = 0;
-    this.lastSurface = null;
-    this.setBehavior("Fall", reason);
-  }
-
-  /** Consume one scroll gesture or direction change after applying its page shift. */
-  private applyScrollIntent(surfaceBeforeScroll: Surface | null) {
-    if (this.isDragging) return;
-
-    if (this.scrollStopPending) {
-      this.scrollStopPending = false;
-      this.scrollGestureDirection = 0;
-      if (this.scrollHold === "resting") {
-        this.scrollHold = "none";
-        if (this.currentBehavior?.name === "SitDown" && this.surfaceAt() === "floor") {
-          this.setBehavior("StandUp", "scroll-stop");
-        }
+    if (this.y >= area.bottom) {
+      // A rising viewport floor is support, not a downward physical impact.
+      this.y = this.prevY = area.bottom;
+      if (this.isFallLike(this.currentLeaf()) || this.isJumpLike(this.currentLeaf())) {
+        this.vx = this.vy = 0;
+        this.setBehavior("StandUp", "scroll-floor-support");
+        this.advanceActionTree();
       }
     }
-
-    const direction = this.scrollDirection;
-    if (!this.isScrolling || direction === 0 || direction === this.scrollGestureDirection) return;
-    this.scrollGestureDirection = direction;
-    const surface = surfaceBeforeScroll ?? this.lastSurface ?? this.surfaceAt();
-    if (direction < 0 && surface === "floor") {
-      this.scrollHold = "resting";
-      if (this.currentBehavior?.name !== "SitDown") this.setBehavior("SitDown", "scroll-up-sitdown");
-      return;
-    }
-    this.scrollHold = "none";
-    if (direction > 0 && surface === "floor") return;
-    if (surface) this.detachAndFall(surface, direction > 0 ? "scroll-down-fall" : "scroll-up-surface-drop");
+    this.constrainToWorkArea();
+    this.prevY = Math.min(area.bottom, this.prevY);
+    if (this.currentBehavior?.name !== "Fall") this.prevY = Math.max(area.top, this.prevY);
   }
 
   /** Can this behaviour actually move the mascot? Used to guarantee that the
@@ -3102,7 +3032,7 @@ export class MascotEngine {
         this.lookRight = pose.velocity.x > 0 ? target.x < this.x : target.x > this.x;
         this.x += (this.lookRight ? -1 : 1) * pose.velocity.x;
       }
-      this.clampToWorkArea();
+
       const passed = (beforeX <= target.x && this.x >= target.x) || (beforeX >= target.x && this.x <= target.x);
       if (passed) {
         this.x = target.x;
@@ -3127,31 +3057,12 @@ export class MascotEngine {
     }
 
     if (this.isFallLike(leaf)) {
-      // libshijima fall::subtick() tests the landing *before* applying gravity and
-      // velocity, and only then moves. The order matters: testing afterwards lets
-      // one gravity step push the anchor off the edge it is sitting on, and the
-      // 1 px tolerance then rejects it. That asymmetry is why a right wall seemed
-      // to cling (a rightward throw is clamped back onto it) while the left wall and
-      // the ceiling did not.
-      const environment = this.environment();
-      const point = { x: this.x, y: this.y };
-      const onFloor = environment.floor.isOn(point);
-      const onCeiling = environment.ceiling.isOn(point);
-      const onWall = environment.wall.isOn(point);
-      const landingOnCeiling = onCeiling && this.currentBehavior?.name !== "Fall";
-      const onEdge = onFloor || onWall || landingOnCeiling;
-      if (onEdge) {
+      // Starting Fall on an already supported floor is not an airborne impact.
+      // Upward launches must still leave the floor before gravity takes over.
+      if (this.y === this.area().bottom && this.vy >= 0 && this.borderTypeSatisfied("Floor")) {
         this.vx = this.vy = 0;
-        if (onFloor) this.y = this.area().bottom;
-        this.emit({
-          kind: "milestone",
-          name: "land",
-          detail: `fall ended at ${onFloor ? "floor" : landingOnCeiling ? "ceiling" : "wall"}`,
-          x: this.x,
-          y: this.y,
-          leaf: this.leafLabel(),
-        });
-        this.popActionStack();
+        this.setBehavior("StandUp", "floor-supported");
+        this.advanceActionTree();
         return;
       }
       const resistanceX = this.evaluateNumber(leaf.attributes?.RegistanceX, frame) ?? runtime.resistanceX;
@@ -3159,9 +3070,12 @@ export class MascotEngine {
       const gravity = this.evaluateNumber(leaf.attributes?.Gravity, frame) ?? runtime.gravity;
       this.vx -= this.vx * resistanceX;
       this.vy += gravity - this.vy * resistanceY;
+      const beforeX = this.x;
+      const beforeY = this.y;
       this.x += this.vx;
       this.y += this.vy;
-      this.clampToWorkArea();
+      if (this.grabImpactSurface(beforeX, beforeY)) return;
+      if (this.landOnFloor(beforeX, beforeY)) this.popActionStack();
       return;
     }
     if (this.isJumpLike(leaf) && targetX !== null && targetY !== null) {
@@ -3238,8 +3152,20 @@ export class MascotEngine {
         this.popActionStack();
         return;
       }
+      // A pack's explicit walk-to-wall sequence already advances to ClimbWall
+      // above. Ordinary floor movement into a side starts its wall-climb behavior.
+      const area = this.area();
+      if (leaf.borderType === "Floor" &&
+          (this.x < beforeX && this.x <= area.left || this.x > beforeX && this.x >= area.right)) {
+        this.constrainToWorkArea();
+        this.lookRight = this.x === area.right;
+        this.vx = this.vy = 0;
+        this.setBehavior("ClimbAlongWall", "floor-wall-contact");
+        this.advanceActionTree();
+        return;
+      }
     }
-    this.clampToWorkArea();
+
     // A mascot clinging to a *wall* faces away from it, for every running action —
     // the guard is the action's own BorderType, so a floor/ceiling pose keeps
     // whatever facing its behaviour chose, and `Fall`/`Dragged` (no BorderType) are
@@ -3264,38 +3190,83 @@ export class MascotEngine {
     if (targetX !== null || targetY !== null || translates || leaf.type === "Move") this.guardStall(frame);
   }
 
-  /** Clamp the viewport-space anchor into its work area. */
-  private clampToWorkArea() {
+  /** Closed sides/bottom; only the ordinary Fall behavior may leave through the top.
+   * Thrown and jump behaviors can contain a Falling leaf too, so the leaf alone
+   * must never grant the top exception. Contact does not change the action. */
+  private constrainToWorkArea(): void {
     const area = this.area();
-    const wasX = this.x;
-    const wasY = this.y;
-    this.x = Math.max(area.left, Math.min(area.right, this.x));
-
-    const isAirborne = /Jump|Fall|Thrown|Dragged/i.test(this.currentBehavior?.name || "");
-    this.y = isAirborne
-        ? Math.min(area.bottom, this.y)
-        : Math.max(area.top, Math.min(area.bottom, this.y));
-
-    const moved = Math.abs(this.x - wasX) + Math.abs(this.y - wasY);
-    if (moved > 0.5 && !this.clampReported) {
-      this.clampReported = true;
-      this.emit({
-        kind: "milestone",
-        name: "clamp",
-        detail: `(${this.toPage(wasX).toFixed(1)},${this.toPage(wasY).toFixed(1)}) -> (${this.toPage(this.x).toFixed(1)},${this.toPage(this.y).toFixed(1)})`,
-        x: this.x,
-        y: this.y,
-        leaf: this.leafLabel(),
-      });
+    if (this.x < area.left) {
+      this.x = area.left;
+      if (this.vx < 0) this.vx = 0;
+    } else if (this.x > area.right) {
+      this.x = area.right;
+      if (this.vx > 0) this.vx = 0;
     }
+    if (this.y > area.bottom) {
+      this.y = area.bottom;
+      if (this.vy > 0) this.vy = 0;
+    } else if (this.y < area.top && (this.isDragging || this.currentBehavior?.name !== "Fall")) {
+      this.y = area.top;
+      if (this.vy < 0) this.vy = 0;
+    }
+  }
+
+  /** Grab only when motion enters a wall/ceiling, before any floor impact.
+   * Sliding vertically after scroll detachment has no horizontal impact. */
+  private grabImpactSurface(beforeX: number, beforeY: number): boolean {
+    const area = this.area();
+    const dx = this.x - beforeX;
+    const dy = this.y - beforeY;
+    let time = dy > 0 && beforeY < area.bottom && this.y >= area.bottom
+      ? (area.bottom - beforeY) / dy : Infinity;
+    let surface: Surface | null = null;
+    for (const [side, edge] of [["left-wall", area.left], ["right-wall", area.right]] as const) {
+      if (side === "left-wall" ? dx >= 0 || beforeX < edge || this.x > edge
+        : dx <= 0 || beforeX > edge || this.x < edge) continue;
+      const hit = (edge - beforeX) / dx;
+      const y = beforeY + dy * hit;
+      if (hit < time && y >= area.top && y < area.bottom) {
+        time = hit;
+        surface = side;
+      }
+    }
+    if (this.currentBehavior?.name !== "Fall" && dy < 0 && beforeY >= area.top && this.y <= area.top) {
+      const hit = (area.top - beforeY) / dy;
+      const x = beforeX + dx * hit;
+      if (hit < time && x >= area.left && x <= area.right) {
+        time = hit;
+        surface = "ceiling";
+      }
+    }
+    if (!surface) return false;
+    this.x = beforeX + dx * time;
+    this.y = beforeY + dy * time;
+    if (surface === "ceiling") this.y = area.top;
+    else this.x = surface === "left-wall" ? area.left : area.right;
+    this.vx = this.vy = 0;
+    this.lookRight = surface === "right-wall";
+    this.lastSurface = surface;
+    this.setBehavior(surface === "ceiling" ? "HoldOntoCeiling" : "HoldOntoWall", "airborne-border-contact");
+    this.advanceActionTree();
+    return true;
+  }
+
+  /** Intersect this downward movement with the floor, including side collisions. */
+  private landOnFloor(beforeX: number, beforeY: number): boolean {
+    const area = this.area();
+    if (this.y <= beforeY || beforeY >= area.bottom || this.y < area.bottom) return false;
+    const fraction = (area.bottom - beforeY) / (this.y - beforeY);
+    const impactX = Math.max(area.left, Math.min(area.right, beforeX + (this.x - beforeX) * fraction));
+    this.x = impactX;
+    this.y = area.bottom;
+    this.vx = this.vy = 0;
+    this.emit({ kind: "milestone", name: "land", detail: "downward floor crossing",
+      x: this.x, y: this.y, leaf: this.leafLabel() });
+    return true;
   }
 
   private onBehaviorEnd(reason = "behavior-end") {
     if (!this.config) return;
-    if (this.scrollHold === "resting" && this.isScrolling && this.scrollDirection < 0 && this.surfaceAt() === "floor") {
-      this.setBehavior("SitDown", "scroll-up-hold");
-      return;
-    }
     const animation = MascotEngine.animationConfig;
     const mascot = this.mascotName;
     const candidates: BehaviorReference[] = [];
@@ -3386,7 +3357,6 @@ export class MascotEngine {
     const y = this.prevY + (this.y - this.prevY) * progress;
     this.lastRenderedX = x;
     this.lastRenderedY = y;
-    this.lastRenderedArea = this.area();
     // Boundary one: virtual viewport units → screen pixels.
     const scale = this.spriteScale;
     this.elRoot.style.transform = `translate3d(${x * scale}px, ${y * scale}px, 0)`;
