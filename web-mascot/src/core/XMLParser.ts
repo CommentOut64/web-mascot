@@ -15,11 +15,11 @@ export class XMLParser {
    *   owns URL resolution, so an embedded or hosted build never depends on the
    *   page's root path.
    */
-  static async loadConfig(mascotName: string, packBaseUrl: string): Promise<MascotConfig> {
+  static async loadConfig(mascotName: string, packBaseUrl: string, signal?: AbortSignal): Promise<MascotConfig> {
     const basePath = packBaseUrl.replace(/\/+$/, "");
     const [actionsXmlRes, behaviorsXmlRes] = await Promise.all([
-      fetch(`${basePath}/actions.xml`),
-      fetch(`${basePath}/behaviors.xml`),
+      fetch(`${basePath}/actions.xml`, { signal }),
+      fetch(`${basePath}/behaviors.xml`, { signal }),
     ]);
 
     if (!actionsXmlRes.ok || !behaviorsXmlRes.ok) {

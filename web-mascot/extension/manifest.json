@@ -1,0 +1,50 @@
+{
+  "manifest_version": 3,
+  "minimum_chrome_version": "106",
+  "name": "Web Mascot - 网页桌宠 (Unofficial Fan)",
+  "version": "0.0.4",
+  "description": "基于 Shimeji 规范的网页桌面萌宠扩展，可在任意网页与桌宠互动（非官方同人项目）。",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    },
+    "default_title": "Web Mascot 设置"
+  },
+  "permissions": [
+    "storage"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+        "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "mascot_pack/*",
+        "animation.config.json"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ]
+}
+
