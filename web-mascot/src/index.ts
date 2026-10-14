@@ -83,6 +83,12 @@ export interface MascotOptions {
   container: HTMLElement;
   /** Pack directory name, e.g. `"Neuron"`. `spriteUrl` reads `<assets>/<pack>/img/<pose>`. */
   pack: string;
+  /** Optional initial snapshot to restore position and action stack completely */
+  initialSnapshot?: import("./core/types.js").RelaySnapshot;
+  /** Prepare the first frame without running; call engine.resumeForRelay() to start. */
+  startPaused?: boolean;
+  /** Cancel preparation when its document loses execution rights. */
+  signal?: AbortSignal;
 }
 
 let hasConfigured = false;
@@ -157,16 +163,22 @@ export class Mascot {
  * the page.
  */
 export async function createMascot(options: MascotOptions): Promise<Mascot> {
-  const { container, pack } = options;
+  const { container, pack, initialSnapshot, startPaused, signal } = options;
   if (!container) throw new Error("[web-mascot] createMascot() needs a container element");
   if (!pack) throw new Error("[web-mascot] createMascot() needs a pack name");
 
   const engine = new MascotEngine(container, pack);
+  const cancel = () => engine.destroy();
+  signal?.addEventListener("abort", cancel, { once: true });
   try {
-    await engine.init();
+    signal?.throwIfAborted();
+    await engine.init({ initialSnapshot, startPaused, signal });
+    signal?.throwIfAborted();
   } catch (error) {
     engine.destroy();
     throw error;
+  } finally {
+    signal?.removeEventListener("abort", cancel);
   }
   return new Mascot(engine);
 }
@@ -177,5 +189,5 @@ export { AnimationConfig } from "./core/AnimationConfig.js";
 export { BroadcastManager } from "./core/Broadcast.js";
 export { DEFAULT_PACK_BASE_URL, resolveAssetBase } from "./core/Assets.js";
 export type { EngineEvent, EngineObserver } from "./core/MascotEngine.js";
-export type { Pose, ActionNode, Behavior } from "./core/types.js";
+export type { Pose, ActionNode, Behavior, RelaySnapshot, RelayVisualSnapshot, RelayFrameSnapshot } from "./core/types.js";
 export type { Hotspot } from "./core/Hotspot.js";

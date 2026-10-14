@@ -14,6 +14,61 @@ export interface AnimationVariant {
   hotspots?: Hotspot[];
 }
 
+export interface RelayFrameSnapshot {
+  /** Exact source slot in the parent, distinct from this frame's execution cursor. */
+  parentIndex: number;
+  referenceDepth: number;
+  nodeType: ActionType;
+  nodeName?: string;
+  nodeClassName?: string;
+  childIndex: number;
+  vars: Record<string, string>;
+  resolved: Record<string, unknown>;
+  elapsed: number;
+  poseIndex: number;
+  poseTick: number;
+  animationIndex: number;
+  stallTicks: number;
+  progressX: number;
+  progressY: number;
+  durationLimit: number | null;
+}
+
+export interface RelayVisualSnapshot {
+  image: string;
+  imageAnchor: { x: number; y: number };
+  lookRight: boolean;
+  /** Anchor position in screen pixels at the last painted frame. */
+  screenX: number;
+  screenY: number;
+  scale: number;
+  viewportWidth: number;
+  viewportHeight: number;
+}
+
+export interface RelaySnapshot {
+  schemaVersion: 2;
+  pack: string;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  lookRight: boolean;
+  behaviorName: string;
+  behaviorId?: number;
+  behaviorTicks: number;
+  stillTicks: number;
+  anchorStillTicks: number;
+  area: { left: number; top: number; right: number; bottom: number };
+  anchorX: "left" | "right" | "free";
+  anchorY: "floor" | "ceiling" | "free";
+  /** Partner relationships cannot be carried between documents. */
+  interaction: boolean;
+  frames: RelayFrameSnapshot[];
+  visual?: RelayVisualSnapshot;
+}
+
+
 export type ActionType =
   | "Stay"
   | "Move"

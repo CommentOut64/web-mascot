@@ -3,10 +3,11 @@ import { AnimationConfig } from "./AnimationConfig.js";
 import { BroadcastManager, ClientHandle, Interaction, ServerState } from "./Broadcast.js";
 import { hotspotAt } from "./Hotspot.js";
 import { registerMascotPage } from "./MascotPageCoordinator.js";
+import { mapRelayPoint, relayPosition } from "./RelayPosition.js";
 import { evaluateExpression } from "./ExpressionEvaluator.js";
 import { loggerFor } from "./Logger.js";
 import type { Hotspot } from "./Hotspot.js";
-import type { ActionNode, AnimationVariant, Behavior, BehaviorReference, MascotConfig, Pose } from "./types.js";
+import type { ActionNode, AnimationVariant, Behavior, BehaviorReference, MascotConfig, Pose, RelaySnapshot } from "./types.js";
 
 const expressionLog = loggerFor("engine");
 const loggedExpressionFailures = new Set<string>();
@@ -235,6 +236,8 @@ export type EngineObserver = (engine: MascotEngine, event: EngineEvent) => void;
 
 type ActionFrame = {
   node: ActionNode;
+  parentIndex: number;
+  referenceDepth: number;
   childIndex: number;
   vars: Record<string, string>;
   /** Values of the ${...} attributes, frozen when the frame was created. */
@@ -264,7 +267,7 @@ type ActionFrame = {
 
 type Area = { top: number; right: number; bottom: number; left: number };
 type Surface = "floor" | "left-wall" | "right-wall" | "ceiling";
-type PauseReason = "hidden" | "viewport" | "background-page";
+type PauseReason = "hidden" | "viewport" | "background-page" | "relay-transfer";
 
 export class MascotEngine {
   /** Every live mascot, so `mascot.totalCount` means something to the packs. */
@@ -286,6 +289,7 @@ export class MascotEngine {
   /** Affordance registry, shared by every mascot in the page (broadcast/manager). */
   private static broadcasts = new BroadcastManager();
   private static globalEventsInstalled = false;
+  public static extensionMode = false;
   /** Removes the reduced-motion listener again; null while none is installed. */
   private static reducedMotionWatcher: (() => void) | null = null;
   /** Default location of the editable configuration file. */
@@ -299,12 +303,12 @@ export class MascotEngine {
   public readonly label: string;
 
   private container: HTMLElement;
-  private mascotName: string;
+  public readonly mascotName: string;
   /** This pack's resolved base URL, captured at construction so `configure()`
    *  after the fact cannot leave one mascot reading from another pack. */
   private packBaseUrl: string;
   private config: MascotConfig | null = null;
-  private elRoot: HTMLDivElement;
+  public readonly elRoot: HTMLDivElement;
   private elImg: HTMLImageElement;
   /** An Interact action with image-less hold frames must hide its old standalone frame. */
   private interactionVisualActive = false;
@@ -409,12 +413,12 @@ export class MascotEngine {
   private observedImage = "";
   private clampReported = false;
   private eventsAbortController = new AbortController();
-  private resizeTimer = 0;
   private isScrolling = false;
   private scrollDebounceTimer = 0;
+  /** Ignore layout scroll events immediately after relay restoration. */
+  private scrollIgnoreUntil = 0;
   /**
-   * One-shot timers that are not already covered by `resizeTimer` /
-   * `scrollDebounceTimer`. `init()` and `setVisible()` schedule work that can fire
+   * One-shot timers that are not already covered by `scrollDebounceTimer`. `init()` and `setVisible()` schedule work that can fire
    * after `destroy()`, which used to let a torn-down mascot poke at a detached DOM
    * node (and at `this.visible`, which no longer means anything).
    */
@@ -453,6 +457,236 @@ export class MascotEngine {
   public vx = 0;
   public vy = 0;
   public lookRight = true;
+  /** Position of the last frame actually handed to CSS, including interpolation. */
+  private lastRenderedX = 0;
+  private lastRenderedY = 0;
+  private lastRenderedPose: Pose | null = null;
+  private lastRenderedArea: Area | null = null;
+
+  public handleExternalScroll(delta: number): void {
+    if (this.destroyed || this.isDragging || !Number.isFinite(delta) || delta === 0) return;
+
+    if (Math.abs(delta) > 500) return; // Ignore impossible layout shifts
+    if (performance.now() < this.scrollIgnoreUntil) return; // Ignore scroll events during tab switch immunity
+
+    if (this.scrollStopPending) {
+      this.scrollStopPending = false;
+      this.scrollGestureDirection = 0;
+      if (this.scrollHold === "resting") {
+        this.scrollHold = "none";
+        if (this.currentBehavior?.name === "SitDown" && this.surfaceAt() === "floor") {
+          this.setBehavior("StandUp", "scroll-stop");
+        }
+      }
+    }
+
+    this.pendingScrollShift += delta / this.spriteScale;
+    this.isScrolling = true;
+    this.scrollDirection = delta > 0 ? 1 : -1;
+    this.scrollStopPending = false;
+
+    window.clearTimeout(this.scrollDebounceTimer);
+    this.scrollDebounceTimer = window.setTimeout(() => {
+      this.isScrolling = false;
+      this.scrollDirection = 0;
+      this.scrollStopPending = true;
+    }, 160);
+  }
+
+
+  public resetToSpawn(): void {
+    this.applySpawnPosition();
+    this.setBehavior("Fall", "manual-reset");
+    this.actionExpansionsThisTick = 0;
+    this.advanceActionTree();
+    this.prevX = this.x;
+    this.prevY = this.y;
+    this.renderNow();
+  }
+
+  public pauseForRelay() {
+    // Commit the frame the user actually saw. The simulation may be between two
+    // logic ticks, so serialising logical x/y here otherwise creates a one-frame
+    // position jump when the next tab restores the snapshot.
+    if (Number.isFinite(this.lastRenderedX) && Number.isFinite(this.lastRenderedY)) {
+      this.x = this.lastRenderedX;
+      this.y = this.lastRenderedY;
+    }
+    this.cancelPress();
+    if (this.isDragging) {
+      this.endDrag();
+      this.setBehavior("Thrown", "relay-release");
+      this.actionExpansionsThisTick = 0;
+      this.advanceActionTree();
+    }
+    this.prevX = this.x;
+    this.prevY = this.y;
+    this.accumulator = 0;
+    this.render(false);
+    this.setPauseReason("relay-transfer", true);
+  }
+
+  /** Resume an engine that was paused while its relay snapshot was handed off. */
+  public resumeForRelay() {
+    this.renderNow();
+    this.elRoot.style.visibility = "visible";
+    this.setPauseReason("relay-transfer", false);
+  }
+
+  /** Paint the current logical state without advancing simulation time. */
+  public renderNow() {
+    if (this.destroyed) return;
+    this.render(false);
+  }
+  public createRelaySnapshot(): RelaySnapshot {
+    const area = this.area();
+    const pose = this.lastRenderedPose;
+    const surface = this.surfaceAt();
+    const action = this.currentBehavior && this.config?.actions[this.currentBehavior.name];
+    const interaction = this.interaction.available || this.actionStack.some((f) => !!f.server || !!f.client) ||
+      !!action && this.actionTreeMatches(action, (node) => this.isScanMove(node) || this.isInteract(node) ||
+        Boolean(node.attributes?.Affordance));
+    const snapshot: RelaySnapshot = {
+      schemaVersion: 2, pack: this.mascotName, x: this.lastRenderedX, y: this.lastRenderedY,
+      area: { ...area },
+      anchorX: this.borderIsOn("left", { x: this.x, y: this.y }) ? "left" :
+        this.borderIsOn("right", { x: this.x, y: this.y }) ? "right" : "free",
+      anchorY: surface === "floor" ? "floor" : surface === "ceiling" ? "ceiling" : "free",
+      interaction, vx: this.vx, vy: this.vy, lookRight: this.lookRight,
+      behaviorName: this.currentBehavior?.name ?? "StandUp", behaviorId: this.currentBehavior?.id,
+      behaviorTicks: this.behaviorTicks, stillTicks: this.stillTicks, anchorStillTicks: this.anchorStillTicks,
+      frames: this.actionStack.map((f) => ({
+        parentIndex: f.parentIndex, referenceDepth: f.referenceDepth,
+        nodeType: f.node.type, nodeName: f.node.name, nodeClassName: f.node.className,
+        childIndex: f.childIndex, vars: { ...f.vars }, resolved: { ...f.resolved },
+        elapsed: f.elapsed, poseIndex: f.poseIndex, poseTick: f.poseTick,
+        animationIndex: f.node.animations?.indexOf(f.animation!) ?? -1,
+        stallTicks: f.stallTicks, progressX: f.progressX, progressY: f.progressY, durationLimit: f.durationLimit,
+      })),
+    };
+    // Use the last actual bitmap, including image-less holds, for the loading placeholder.
+    if (this.elImg.style.visibility !== "hidden" && this.elImg.getAttribute("src") && pose) {
+      const image = this.elImg.getAttribute("src")!.slice((this.packBaseUrl + "/img").length);
+      snapshot.visual = { image, imageAnchor: { ...pose.imageAnchor }, lookRight: this.lookRight,
+        screenX: snapshot.x * this.spriteScale, screenY: snapshot.y * this.spriteScale,
+        scale: this.spriteScale, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight };
+    }
+    return snapshot;
+  }
+
+  /** Prepare a reused engine behind its placeholder. Simulation stays paused. */
+  public async prepareForRelay(snapshot: RelaySnapshot): Promise<void> {
+    this.setPauseReason("relay-transfer", true);
+    this.elRoot.style.visibility = "hidden";
+    if (!this.restoreRelaySnapshot(snapshot)) this.resetForRelay();
+    await this.warmFirstPose();
+    if (!this.destroyed) this.render(false);
+  }
+
+  /** One surface-aware fallback for invalid actions and terminated interactions. */
+  public resetForRelay(): void {
+    this.releaseStack();
+    this.interaction.finalize();
+    this.cancelPress();
+    this.endDrag();
+    this.vx = 0;
+    this.vy = 0;
+    const surface = this.surfaceAt();
+    const name = surface === "floor" ? "StandUp" : surface === "ceiling" ? "HoldOntoCeiling" :
+      surface === "left-wall" || surface === "right-wall" ? "HoldOntoWall" : "Fall";
+    this.setBehavior(name, "relay-reset");
+    this.actionExpansionsThisTick = 0;
+    this.advanceActionTree();
+    this.prevX = this.x;
+    this.prevY = this.y;
+    this.accumulator = 0;
+  }
+
+  public restoreRelaySnapshot(snapshot: RelaySnapshot): boolean {
+    if (!this.config || snapshot.schemaVersion !== 2 || snapshot.pack !== this.mascotName) return false;
+    const source = snapshot.area;
+    if (!source || ![snapshot.x, snapshot.y, snapshot.vx, snapshot.vy,
+      source.left, source.top, source.right, source.bottom].every(Number.isFinite) ||
+      source.right <= source.left || source.bottom <= source.top) return false;
+    const area = this.area();
+    const point = relayPosition(snapshot, area);
+    const behavior = this.config.behaviors.find((b) => b.name === snapshot.behaviorName &&
+      (snapshot.behaviorId === undefined || b.id === snapshot.behaviorId));
+    const frames: ActionFrame[] = [];
+    let valid = !!behavior && Array.isArray(snapshot.frames) && snapshot.frames.length > 0 &&
+      [snapshot.behaviorTicks, snapshot.stillTicks, snapshot.anchorStillTicks].every(
+        (n) => Number.isInteger(n) && n >= 0);
+    if (valid) for (const [index, saved] of snapshot.frames.entries()) {
+      let node = index === 0 ? this.config.actions[behavior!.name] :
+        frames[index - 1].node.children?.[saved.parentIndex];
+      if (!Number.isInteger(saved.parentIndex) || !Number.isInteger(saved.referenceDepth) ||
+        saved.referenceDepth < 0 || saved.referenceDepth > MAX_ACTION_EXPANSIONS_PER_TICK ||
+        ![saved.childIndex, saved.elapsed, saved.poseIndex, saved.poseTick, saved.stallTicks].every(
+          (n) => Number.isInteger(n) && n >= 0) || !saved.vars || !saved.resolved) { valid = false; break; }
+      for (let depth = 0; depth < saved.referenceDepth && node; depth++) {
+        node = node.type === "ActionReference" ? this.config.actions[node.referenceName || ""] : undefined;
+      }
+      if (!node || node.type !== saved.nodeType || node.name !== saved.nodeName ||
+        node.className !== saved.nodeClassName) { valid = false; break; }
+      const poses = node.animations?.[saved.animationIndex]?.poses ?? node.poses;
+      if (saved.durationLimit !== null && (!Number.isFinite(saved.durationLimit) || saved.durationLimit < 0) ||
+        node.children && saved.childIndex > node.children.length ||
+        poses?.length && saved.poseIndex >= poses.length ||
+        saved.animationIndex !== -1 && !node.animations?.[saved.animationIndex]) { valid = false; break; }
+      const resolved = { ...saved.resolved };
+      const target = mapRelayPoint(
+        typeof resolved.TargetX === "number" ? resolved.TargetX : source.left,
+        typeof resolved.TargetY === "number" ? resolved.TargetY : source.top, source, area);
+      if (typeof resolved.TargetX === "number") resolved.TargetX = target.x;
+      if (typeof resolved.TargetY === "number") resolved.TargetY = target.y;
+      frames.push({ node, parentIndex: saved.parentIndex, referenceDepth: saved.referenceDepth,
+        childIndex: saved.childIndex, vars: { ...saved.vars }, resolved, live: {}, liveTick: -1,
+        durationLimit: saved.durationLimit, elapsed: saved.elapsed, poseIndex: saved.poseIndex,
+        poseTick: saved.poseTick, stallTicks: saved.stallTicks,
+        progressX: NaN, progressY: NaN, server: null, client: null,
+        animation: node.animations?.[saved.animationIndex], bornTick: this.tickCount });
+    }
+    // Commit only after validation. Old handles must never survive a replacement.
+    this.releaseStack();
+    this.interaction.finalize();
+    this.cancelPress();
+    this.endDrag();
+    this.resetScrollTracking();
+    this.x = point.x;
+    this.y = point.y;
+    this.lookRight = snapshot.lookRight;
+    this.currentBehavior = behavior ?? null;
+    this.actionStack = frames;
+    this.interactionVisualActive = false;
+    this.servingClaimSince = 0;
+    this.wantMovement = false;
+    this.behaviorUsability.clear();
+    this.clampToWorkArea();
+    if (!valid || snapshot.interaction) {
+      this.interactionCooldownUntil = this.tickCount + MascotEngine.animationConfig.interactionCooldown(this.mascotName);
+      this.resetForRelay();
+    } else {
+      this.vx = snapshot.vx;
+      this.vy = snapshot.vy;
+      this.behaviorTicks = snapshot.behaviorTicks;
+      this.stillTicks = snapshot.stillTicks;
+      this.anchorStillTicks = snapshot.anchorStillTicks;
+    }
+    this.prevX = this.x;
+    this.prevY = this.y;
+    this.accumulator = 0;
+    this.lastTime = performance.now();
+    this.scrollIgnoreUntil = performance.now() + 100;
+    if (valid && !snapshot.interaction && !this.currentPose()?.image && snapshot.visual) {
+      const visual = snapshot.visual;
+      this.elImg.src = this.spriteUrl(visual.image);
+      const flip = visual.lookRight ? -1 : 1;
+      this.elImg.style.transform = `translate(${-flip * visual.imageAnchor.x * this.spriteScale}px, ${-visual.imageAnchor.y * this.spriteScale}px) scaleX(${flip * this.spriteScale}) scaleY(${this.spriteScale})`;
+      this.lastRenderedPose = { image: visual.image, imageAnchor: { ...visual.imageAnchor }, velocity: { x: 0, y: 0 }, duration: 1 };
+    }
+    this.render(false);
+    return true;
+  }
 
   public static addObserver(observer: EngineObserver) {
     MascotEngine.observers.add(observer);
@@ -505,26 +739,36 @@ export class MascotEngine {
     });
     window.addEventListener("resize", () => {
       for (const engine of MascotEngine.liveEngines) {
-        window.clearTimeout(engine.resizeTimer);
-        engine.resizeTimer = window.setTimeout(() => {
-          const borderBefore = engine.currentBorderAt(undefined);
-          engine.partnerCache.clear();
-          engine.travelCache.clear();
-          engine.borderStartCache.clear();
-          engine.behaviorUsability.clear();
-          engine.clampToWorkArea();
-          const area = engine.area();
+        const source = engine.lastRenderedArea;
+        const area = engine.area();
+        if (source) {
+          const point = { x: engine.x, y: engine.y };
+          const mapped = mapRelayPoint(engine.x, engine.y, source, area);
+          engine.x = engine.borderIsOn("left", point, source) ? area.left :
+            engine.borderIsOn("right", point, source) ? area.right : mapped.x;
+          engine.y = engine.borderIsOn("bottom", point, source) ? area.bottom :
+            engine.borderIsOn("top", point, source) ? area.top : mapped.y;
           for (const frame of engine.actionStack) {
-            if (typeof frame.resolved.TargetX === "number") frame.resolved.TargetX = Math.max(area.left, Math.min(area.right, frame.resolved.TargetX));
-            if (typeof frame.resolved.TargetY === "number") frame.resolved.TargetY = Math.max(area.top, Math.min(area.bottom, frame.resolved.TargetY));
+            const target = mapRelayPoint(
+              typeof frame.resolved.TargetX === "number" ? frame.resolved.TargetX : source.left,
+              typeof frame.resolved.TargetY === "number" ? frame.resolved.TargetY : source.top, source, area);
+            if (typeof frame.resolved.TargetX === "number") frame.resolved.TargetX = target.x;
+            if (typeof frame.resolved.TargetY === "number") frame.resolved.TargetY = target.y;
           }
-          const borderAfter = engine.currentBorderAt(undefined);
-          if (borderBefore && !borderAfter && !/Jump|Fall|Thrown|Dragged/i.test(engine.currentBehavior?.name || "")) engine.setBehavior("Fall", "resize-border-lost");
-        }, 200);
+        }
+        engine.partnerCache.clear();
+        engine.travelCache.clear();
+        engine.borderStartCache.clear();
+        engine.behaviorUsability.clear();
+        engine.clampToWorkArea();
+        engine.prevX = engine.x;
+        engine.prevY = engine.y;
+        engine.renderNow();
       }
     });
     window.addEventListener("scroll", () => {
       for (const engine of MascotEngine.liveEngines) {
+        if (MascotEngine.extensionMode) continue;
         const delta = window.scrollY - engine.lastScrollY;
         engine.lastScrollY = window.scrollY;
         if (delta === 0) continue;
@@ -770,15 +1014,29 @@ export class MascotEngine {
     MascotEngine.installGlobalEvents();
   }
 
-  public async init() {
+  public async init(options?: {
+    initialSnapshot?: RelaySnapshot;
+    startPaused?: boolean;
+    signal?: AbortSignal;
+  }) {
+    if (options?.startPaused) this.setPauseReason("relay-transfer", true);
     // Customisation is read first so the very first tick already obeys it.
     await MascotEngine.loadAnimationConfig();
-    this.config = await XMLParser.loadConfig(this.mascotName, this.packBaseUrl);
+    options?.signal?.throwIfAborted();
+    this.config = await XMLParser.loadConfig(this.mascotName, this.packBaseUrl, options?.signal);
     // Both awaits above are network-bound, so `destroy()` can legitimately have run
     // in between. Continuing would re-register a dead engine and re-attach its DOM,
     // leaving a zombie mascot that nothing can ever remove.
     if (this.destroyed) return;
-    this.applySpawnPosition();
+
+    let restoredSnapshot = false;
+    if (options?.initialSnapshot) {
+      restoredSnapshot = this.restoreRelaySnapshot(options.initialSnapshot);
+      if (restoredSnapshot) this.clampToWorkArea();
+    }
+    if (!restoredSnapshot) {
+      this.applySpawnPosition();
+    }
     this.resetScrollTracking();
     this.prevX = this.x;
     this.prevY = this.y;
@@ -788,17 +1046,32 @@ export class MascotEngine {
     // Warm the sprite cache before the first frames: assigning a fresh `src` to the
     // visible <img> shows an empty/broken image until the file arrives, which reads
     // as a flicker on every pose change.
+    const startBehavior = restoredSnapshot
+      ? options!.initialSnapshot!.behaviorName
+      : "Fall";
+    if (!restoredSnapshot) {
+      this.setBehavior(startBehavior, "spawn");
+      this.advanceActionTree();
+    }
     this.preloadSprites();
     await this.warmFirstPose();
     if (this.destroyed) return;
+    // Build a fresh action stack while the root is still hidden, then paint the
+    // first frame synchronously before exposing it to the browser.
+    this.render(false);
     // Do not expose the fixed box while the first real bitmap is still pending.
     // This prevents the browser's empty-image placeholder from flashing at (0, 0).
-    this.elRoot.style.visibility = "visible";
+    this.elRoot.style.visibility = options?.startPaused ? "hidden" : "visible";
     this.emit({ kind: "spawn", detail: `viewport=${window.innerWidth}x${window.innerHeight}` });
-    this.setBehavior("Fall", "spawn");
+    if (restoredSnapshot) {
+      this.scrollIgnoreUntil = performance.now() + 100;
+      this.emit({ kind: "milestone", name: "relay-resume", detail: `behavior=${this.currentBehavior?.name}`, x: this.x, y: this.y, leaf: this.leafLabel() });
+    }
     this.lastTime = performance.now();
     if (document.hidden) this.setPauseReason("hidden", true);
-    this.unregisterPage = registerMascotPage((owner) => this.setPauseReason("background-page", !owner));
+    if (!MascotEngine.extensionMode) {
+      this.unregisterPage = registerMascotPage((owner) => this.setPauseReason("background-page", !owner));
+    }
     if (this.pauseReasons.size === 0) this.loopId = requestAnimationFrame((t) => this.loop(t));
   }
 
@@ -828,50 +1101,23 @@ export class MascotEngine {
     }
   }
 
-  /** Decode the poses the spawn paints, so even the landing sequence has no gap.
-   *  Bounded by a timeout: a slow network must never delay the mascot. */
+  /** Await the actual first bitmap; never remove a placeholder for an undecoded image. */
   private async warmFirstPose(): Promise<void> {
-    const pose = this.currentPose() ?? this.firstPose();
-    if (!pose || !pose.image) return;
-
-    // The whole "Fall" tree is warmed (it carries Bouncing, Stand and friends): a
-    // landing sequence whose frames arrive one by one flashes empty sprites.
-    const first = this.spriteUrl(pose.image);
-    const urls = new Set<string>([first]);
-    const spawnAction = this.config?.actions?.["Fall"];
-    if (spawnAction) collectSpriteUrls(spawnAction, urls, (image) => this.spriteUrl(image));
-
-    // The instances are kept: the first pose's bitmap is what seeds the sprite box
-    // below, and `naturalWidth` is only trustworthy on the instance that has
-    // actually finished decoding.
-    const images = new Map<string, HTMLImageElement>();
-    const decodes: Promise<void>[] = [];
-    for (const url of urls) {
-      const image = new Image();
-      images.set(url, image);
-      image.src = url;
-      decodes.push(
-        typeof image.decode === "function" ? image.decode().catch(() => undefined) : Promise.resolve(),
-      );
-    }
-    await Promise.race([Promise.all(decodes), new Promise((resolve) => window.setTimeout(resolve, 1500))]);
-
-    // Seed the sprite box before the first frame so the initial paint already has
-    // a real size (this image is decoded, so its bitmap size is known).
-    const warm = images.get(first);
-    if (warm && warm.naturalWidth > 0) {
-      this.elImg.style.width = `${warm.naturalWidth}px`;
-      this.elImg.style.height = `${warm.naturalHeight}px`;
-      this.elRoot.style.width = `${warm.naturalWidth}px`;
-      this.elRoot.style.height = `${warm.naturalHeight}px`;
-    }
-  }
-
-  /** The first pose of the action a fresh mascot starts with (Fall/Bouncing). */
-  private firstPose(): Pose | undefined {
-    const node = this.config?.actions["Fall"];
-    const fromAnimations = node?.animations?.[0]?.poses?.[0];
-    return fromAnimations ?? node?.poses?.[0];
+    const pose = this.currentPose();
+    const src = pose?.image ? this.spriteUrl(pose.image) : this.elImg.getAttribute("src");
+    if (!src) return;
+    this.elImg.src = src;
+    let timer = 0;
+    try {
+      await Promise.race([
+        this.elImg.decode(),
+        new Promise<never>((_, reject) => {
+          timer = window.setTimeout(() => reject(new Error("First sprite decode timed out")), 1500);
+        }),
+      ]);
+      if (!this.elImg.naturalWidth) throw new Error("First sprite has no bitmap");
+      this.applySpriteIntrinsicSize();
+    } finally { window.clearTimeout(timer); }
   }
 
   /**
@@ -994,7 +1240,6 @@ export class MascotEngine {
     this.intersectionObserver?.disconnect();
     this.intersectionObserver = null;
     this.eventsAbortController.abort();
-    window.clearTimeout(this.resizeTimer);
     window.clearTimeout(this.scrollDebounceTimer);
     for (const timer of this.pendingTimers) window.clearTimeout(timer);
     this.pendingTimers.clear();
@@ -1696,9 +1941,11 @@ export class MascotEngine {
     return typeof value === "number" && Number.isFinite(value) ? value : null;
   }
 
-  private newFrame(node: ActionNode, vars: Record<string, string> = {}, resolved: Record<string, unknown> = {}): ActionFrame {
+  private newFrame(node: ActionNode, vars: Record<string, string> = {}, resolved: Record<string, unknown> = {}, parentIndex = -1, referenceDepth = 0): ActionFrame {
     const frame: ActionFrame = {
       node,
+      parentIndex,
+      referenceDepth,
       childIndex: 0,      // libshijima layers the action's own attributes under the <ActionReference>
       // overlay, so a condition may read either of them.
       vars: { ...(node.attributes || {}), ...vars },
@@ -2185,7 +2432,7 @@ export class MascotEngine {
       const vars = { ...frame.vars, ...attributes };
       const resolved = { ...frame.resolved, ...this.resolveVars(attributes, frame.resolved) };
       this.clampTravelTarget(resolved);
-      const next = this.newFrame(referenced, vars, resolved);
+      const next = this.newFrame(referenced, vars, resolved, frame.parentIndex, frame.referenceDepth + 1);
       // libshijima: stay::tick() runs for Duration ticks, defaulting to 250;
       // animate ends with its animation and move ends at its target. On top of
       // that the animation configuration may pin an explicit duration to any
@@ -2218,9 +2465,10 @@ export class MascotEngine {
     }
     if (node.type === "Select") {
       if (frame.childIndex > 0) { this.popActionStack(); return; }
-      const child = (node.children || []).find((candidate) => this.evaluateCondition(candidate.condition, frame));
+      const index = (node.children || []).findIndex((candidate) => this.evaluateCondition(candidate.condition, frame));
+      const child = node.children?.[index];
       frame.childIndex = 1;
-      if (child) this.actionStack.push(this.newFrame(child, { ...frame.vars }, { ...frame.resolved }));
+      if (child) this.actionStack.push(this.newFrame(child, { ...frame.vars }, { ...frame.resolved }, index));
       else this.popActionStack();
       return this.advanceActionTree();
     }
@@ -2229,7 +2477,7 @@ export class MascotEngine {
       while (frame.childIndex < children.length) {
         const child = children[frame.childIndex++];
         if (child.condition !== undefined && !this.evaluateCondition(child.condition, frame)) continue;
-        this.actionStack.push(this.newFrame(child, { ...frame.vars }, { ...frame.resolved }));
+        this.actionStack.push(this.newFrame(child, { ...frame.vars }, { ...frame.resolved }, frame.childIndex - 1));
         return this.advanceActionTree();
       }
       if (node.loop) { frame.childIndex = 0; return this.advanceActionTree(); }
@@ -2626,8 +2874,9 @@ export class MascotEngine {
   private detachAndFall(surface: Surface, reason: string) {
     const area = this.area();
     const epsilon = 2;
-    if (surface === "floor" && this.y >= area.bottom) this.y = Math.max(area.top, area.bottom - epsilon);
-    else if (surface === "left-wall") this.x = Math.min(area.right, area.left + epsilon);
+    // We DO NOT bounce off the floor here, because that forces a 1-frame mid-air glitch (平地摔).
+    // Instead, if it falls on the floor, it naturally lands on the next physics tick.
+    if (surface === "left-wall") this.x = Math.min(area.right, area.left + epsilon);
     else if (surface === "right-wall") this.x = Math.max(area.left, area.right - epsilon);
     else if (surface === "ceiling") this.y = Math.min(area.bottom, area.top + epsilon);
     this.vx = 0;
@@ -2661,6 +2910,7 @@ export class MascotEngine {
       return;
     }
     this.scrollHold = "none";
+    if (direction > 0 && surface === "floor") return;
     if (surface) this.detachAndFall(surface, direction > 0 ? "scroll-down-fall" : "scroll-up-surface-drop");
   }
 
@@ -3021,7 +3271,10 @@ export class MascotEngine {
     const wasY = this.y;
     this.x = Math.max(area.left, Math.min(area.right, this.x));
 
-    this.y = Math.max(area.top, Math.min(area.bottom, this.y));
+    const isAirborne = /Jump|Fall|Thrown|Dragged/i.test(this.currentBehavior?.name || "");
+    this.y = isAirborne
+        ? Math.min(area.bottom, this.y)
+        : Math.max(area.top, Math.min(area.bottom, this.y));
 
     const moved = Math.abs(this.x - wasX) + Math.abs(this.y - wasY);
     if (moved > 0.5 && !this.clampReported) {
@@ -3131,6 +3384,9 @@ export class MascotEngine {
     const progress = interpolate ? Math.max(0, Math.min(1, this.accumulator / runtime.tickMs)) : 1;
     const x = this.prevX + (this.x - this.prevX) * progress;
     const y = this.prevY + (this.y - this.prevY) * progress;
+    this.lastRenderedX = x;
+    this.lastRenderedY = y;
+    this.lastRenderedArea = this.area();
     // Boundary one: virtual viewport units → screen pixels.
     const scale = this.spriteScale;
     this.elRoot.style.transform = `translate3d(${x * scale}px, ${y * scale}px, 0)`;
@@ -3146,6 +3402,7 @@ export class MascotEngine {
       }
       return;
     }
+    this.lastRenderedPose = pose;
     const src = this.spriteUrl(pose.image);
     if (this.elImg.getAttribute("src") !== src) {
       // Keep the previous decoded frame visible until the replacement is ready.
