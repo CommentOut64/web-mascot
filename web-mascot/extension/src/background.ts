@@ -61,8 +61,12 @@ async function eligible(candidate: Owner, url?: string): Promise<boolean> {
     chrome.tabs.get(candidate.tabId), chrome.windows.getLastFocused(),
   ]);
   const host = new URL(url || tab.url || "https://invalid.local").hostname;
-  return tab.active && window.id === candidate.windowId && window.focused &&
-    !tab.discarded && !settings.blacklist.includes(host);
+  return (
+    tab.active &&
+    window.id === candidate.windowId &&
+    !tab.discarded &&
+    !settings.blacklist.includes(host)
+  );
 }
 
 async function transfer(previous: Owner): Promise<boolean> {
