@@ -290,6 +290,7 @@ export class MascotEngine {
   private static broadcasts = new BroadcastManager();
   private static globalEventsInstalled = false;
   public static extensionMode = false;
+  public static externalScroll = false;
   /** Removes the reduced-motion listener again; null while none is installed. */
   private static reducedMotionWatcher: (() => void) | null = null;
   /** Default location of the editable configuration file. */
@@ -461,6 +462,13 @@ export class MascotEngine {
     if ((surface === "floor" && documentScroll && delta > 0) ||
         surface === "left-wall" || surface === "right-wall" || surface === "ceiling") {
       this.scrollDetachPending = surface;
+    }
+  }
+
+  public setClickThrough(enabled: boolean): void {
+    if (this.elRoot) {
+      this.elRoot.style.pointerEvents = enabled ? "none" : "auto";
+      this.elRoot.style.opacity = enabled ? "0.85" : "1";
     }
   }
 
@@ -723,7 +731,7 @@ export class MascotEngine {
     });
     window.addEventListener("scroll", () => {
       for (const engine of MascotEngine.liveEngines) {
-        if (MascotEngine.extensionMode) continue;
+        if (MascotEngine.externalScroll || MascotEngine.extensionMode) continue;
         const delta = window.scrollY - engine.lastScrollY;
         engine.lastScrollY = window.scrollY;
         engine.handleExternalScroll(delta);
@@ -963,6 +971,7 @@ export class MascotEngine {
     initialSnapshot?: RelaySnapshot;
     startPaused?: boolean;
     signal?: AbortSignal;
+    enablePageCoordinator?: boolean;
   }) {
     if (options?.startPaused) this.setPauseReason("relay-transfer", true);
     // Customisation is read first so the very first tick already obeys it.
@@ -1014,7 +1023,8 @@ export class MascotEngine {
     }
     this.lastTime = performance.now();
     if (document.hidden) this.setPauseReason("hidden", true);
-    if (!MascotEngine.extensionMode) {
+    const shouldCoordinate = options?.enablePageCoordinator ?? !MascotEngine.extensionMode;
+    if (shouldCoordinate) {
       this.unregisterPage = registerMascotPage((owner) => this.setPauseReason("background-page", !owner));
     }
     if (this.pauseReasons.size === 0) this.loopId = requestAnimationFrame((t) => this.loop(t));

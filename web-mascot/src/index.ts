@@ -89,6 +89,8 @@ export interface MascotOptions {
   startPaused?: boolean;
   /** Cancel preparation when its document loses execution rights. */
   signal?: AbortSignal;
+  /** Set false to disable default single-origin page coordinator. */
+  enablePageCoordinator?: boolean;
 }
 
 let hasConfigured = false;
@@ -149,6 +151,10 @@ export class Mascot {
     return this.engine.label;
   }
 
+  public setClickThrough(enabled: boolean): void {
+    this.engine.setClickThrough(enabled);
+  }
+
   /** Remove the mascot from the page. Safe to call more than once. */
   public destroy(): void {
     if (this.destroyed) return;
@@ -163,7 +169,7 @@ export class Mascot {
  * the page.
  */
 export async function createMascot(options: MascotOptions): Promise<Mascot> {
-  const { container, pack, initialSnapshot, startPaused, signal } = options;
+  const { container, pack, initialSnapshot, startPaused, signal, enablePageCoordinator } = options;
   if (!container) throw new Error("[web-mascot] createMascot() needs a container element");
   if (!pack) throw new Error("[web-mascot] createMascot() needs a pack name");
 
@@ -172,7 +178,7 @@ export async function createMascot(options: MascotOptions): Promise<Mascot> {
   signal?.addEventListener("abort", cancel, { once: true });
   try {
     signal?.throwIfAborted();
-    await engine.init({ initialSnapshot, startPaused, signal });
+    await engine.init({ initialSnapshot, startPaused, signal, enablePageCoordinator });
     signal?.throwIfAborted();
   } catch (error) {
     engine.destroy();
@@ -184,6 +190,9 @@ export async function createMascot(options: MascotOptions): Promise<Mascot> {
 }
 
 export { MascotEngine } from "./core/MascotEngine.js";
+export { MascotGroup } from "./core/MascotGroup.js";
+export type { MascotGroupSpawnOptions } from "./core/MascotGroup.js";
+export { ViewportHost } from "./core/ViewportHost.js";
 export type { RuntimeOptions, RuntimeSnapshot } from "./core/MascotEngine.js";
 export { AnimationConfig } from "./core/AnimationConfig.js";
 export { BroadcastManager } from "./core/Broadcast.js";
