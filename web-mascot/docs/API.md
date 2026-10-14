@@ -58,10 +58,12 @@ attach({ console: true });               // 观测日志：宠物移动史
 | `DEFAULT_PACK_BASE_URL` | `string` | 兜底常量 `"/mascot_pack"` | 3.4 |
 | `resolveAssetBase` | `(url?: string) => string \| undefined` | 从模块 URL 推导包根目录，纯函数 | 3.4 |
 | `MascotEngine` | `class` | 高级用法，**不承诺稳定** | 3.4 |
+| `MascotGroup` | `class` | 多宠群组生命周期与编排管理 | 3.6 |
+| `ViewportHost` | `class` | 全屏 Shadow DOM 隔离视口与占位图管理 | 3.6 |
 | `AnimationConfig` | `class` | 高级用法，**不承诺稳定** | 3.4 |
 | `BroadcastManager` | `class` | 高级用法，**不承诺稳定** | 3.4 |
 
-类型：`MascotOptions`、`MascotConfig`、`RuntimeOptions`、`RuntimeSnapshot`、`Pose`、`ActionNode`、`Behavior`、`Hotspot`、`EngineEvent`、`EngineObserver`。
+类型：`MascotOptions`、`MascotConfig`、`MascotGroupSpawnOptions`、`RuntimeOptions`、`RuntimeSnapshot`、`Pose`、`ActionNode`、`Behavior`、`Hotspot`、`EngineEvent`、`EngineObserver`。
 
 ### 开发工具入口 `web-mascot/devtools`（13 个值 + 8 个类型）
 
