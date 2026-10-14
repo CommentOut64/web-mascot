@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Web Mascot 控制面板</title>
+  <link rel="stylesheet" href="./popup.css">
+</head>
+<body>
+  <div class="panel">
+    <header class="header">
+      <div class="brand">
+        <img src="./icons/icon-48.png" alt="logo" class="logo">
+        <div>
+          <h1 class="title">Web Mascot</h1>
+          <span class="subtitle">网页桌面宠物</span>
+        </div>
+      </div>
+      <span class="version" id="version-badge">v0.0.3</span>
+    </header>
+
+    <main class="content">
+      <!-- 基础开关组 -->
+      <section class="section switches-group">
+        <div class="switch-row">
+          <span class="label">全局启用桌宠</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="enabled-toggle" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="switch-row">
+          <div class="label-with-tip">
+            <span class="label">鼠标穿透模式</span>
+            <span class="tip">开启后点击将直接穿透到底层网页</span>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="clickthrough-toggle">
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="switch-row">
+          <div class="label-with-tip">
+            <span class="label">自动隐藏页面滚动条</span>
+            <span class="tip">自动探测网页滚动条并隐藏外观（保留正常滚动，支持热切换）</span>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="autohide-scrollbar-toggle">
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="switch-row">
+          <div class="label-with-tip">
+            <span class="label">控制台日志记录</span>
+            <span class="tip">在 F12 控制台中输出启动与交互日志</span>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="debuglog-toggle" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="switch-row">
+          <div class="label-with-tip">
+            <span class="label">页面滚动互动 <span class="tag-experimental">实验性</span></span>
+            <span class="tip">滚动页面时触发掉落或下蹲避让（复杂网页易误触，默认关闭）</span>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="scroll-toggle">
+            <span class="slider"></span>
+          </label>
+        </div>
+      </section>
+
+      <!-- 当前网站黑名单控制 -->
+      <!-- <section class="section site-control-section">
+        <div class="site-row">
+          <div class="site-info">
+            <span class="site-label">当前网站规则</span>
+            <span class="site-host" id="current-hostname">正在检测...</span>
+          </div>
+          <button id="btn-toggle-blacklist" class="btn btn-sm btn-blacklist">
+            <span id="btn-blacklist-text">🚫 禁用当前网站</span>
+          </button>
+        </div>
+      </section> -->
+
+      <!-- 角色选择 (支持单宠及双宠模式，纯文本无多余图标) -->
+      <section class="section">
+        <h2 class="section-title">选择登场桌宠</h2>
+        <div class="pack-selector">
+          <label class="pack-option" id="option-neuron">
+            <input type="radio" name="mode" value="Neuron" checked>
+            <div class="pack-card">
+              <span class="pack-name">Neuron</span>
+              <!-- <span class="pack-desc">温柔乖巧主宠</span> -->
+            </div>
+          </label>
+          <label class="pack-option" id="option-eviling">
+            <input type="radio" name="mode" value="Eviling">
+            <div class="pack-card">
+              <span class="pack-name">Eviling</span>
+              <!-- <span class="pack-desc">调皮小恶魔</span> -->
+            </div>
+          </label>
+          <label class="pack-option pack-option-full" id="option-both">
+            <input type="radio" name="mode" value="both">
+            <div class="pack-card">
+              <span class="pack-name">双宠 Neuron + Eviling</span>
+              <span class="pack-desc">两只宠物同屏漫步，支持拥抱、扔宠等亲密互动</span>
+            </div>
+          </label>
+        </div>
+      </section>
+
+      <!-- 快捷操作按钮组 -->
+      <section class="section btn-grid">
+        <button id="btn-restart" class="btn btn-secondary">
+          <span>🔄 重启全部桌宠</span>
+        </button>
+        <button id="btn-reset-pos" class="btn btn-primary">
+          <span>📍 重置宠物位置</span>
+        </button>
+      </section>
+
+      <!-- 署名与开源声明 (CC-BY-NC-SA 4.0 合规) -->
+      <section class="section info-section">
+        <details class="credits-details">
+          <summary class="credits-summary">版权与作者署名 (Credits & License)</summary>
+          <div class="credits-body">
+            <p><strong>底层引擎</strong>：GPL-3.0-or-later (<a href="https://github.com/CommentOut64/web-mascot" target="_blank">web-mascot</a>)</p>
+            <p><strong>美术立绘</strong>：Paccha (<a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" target="_blank">CC-BY-NC-SA-4.0</a>)</p>
+            <p><strong>动作配置</strong>：@promote. & @dalekcraft</p>
+            <p><strong>角色原案致谢</strong>：@Monikaphobia</p>
+            <p class="disclaimer"><strong>免责声明</strong>：本插件为非官方非商业粉丝作品。Neuro-sama 及相关角色版权归其所有者所有。</p>
+          </div>
+        </details>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="./popup.ts"></script>
+</body>
+</html>
