@@ -1,67 +1,234 @@
 /**
- * The engine's built-in animation preset — the defaults every host gets when it
- * configures nothing.
+ * Standard Animation Preset & Preset Registry
  *
- * This module is deliberately the *only* copy of these values:
+ * Provides standardized animation presets, clear parameter definitions,
+ * and a decoupled registration mechanism for Web Mascot.
  *
- *   - `AnimationConfig` imports `ANIMATION_PRESET_DEFAULTS` and applies it as the
- *     bottom layer of `optionsFor()`;
- *   - `vite.config.ts` emits `ANIMATION_PRESET_FILE` as `dist/animation.config.json`,
- *     the copy a host may take as a starting point (also exported as
- *     `web-mascot/animation.config.json`).
- *
- * so the shipped template and the default behaviour can never drift apart.
- *
- * The values are tuned for a *web page* rather than a desktop: a mascot that
- * stands still for more than a few seconds reads as broken, while the packs' own
- * long animations still have to be allowed to finish. Field-by-field rationale,
- * measurements and the "how lively vs. how Qt" trade-off live in
- * ANIMATION_CONFIG.md.
+ * Layers & Responsibilities:
+ *   1. Engine Baseline (Runtime Defaults): Hard physics & engine constraints (in MascotEngine).
+ *   2. Classic Preset ("classic"): 100% faithful to the original Shimeji / Qt desktop pet.
+ *   3. Lively Preset ("lively"): Tuned specifically for web pages (anti-freeze, active wandering).
+ *   4. PresetRegistry: Allows getting, modifying, registering, and switching presets without coupling.
  */
+
 import type { MascotAnimationOptions } from "./AnimationConfig.js";
 
-/** The `defaults` block of the built-in preset. */
-export const ANIMATION_PRESET_DEFAULTS: MascotAnimationOptions = {
-  // Several mascots must not spawn on top of each other: 180 px is comfortably
-  // more than the packs' 128 px sprite, so the offsets never overlap.
+/** Deep-clone a MascotAnimationOptions object to prevent mutation leakage. */
+export function cloneOptions(options: MascotAnimationOptions): MascotAnimationOptions {
+  return {
+    ...options,
+    allowBehaviors: options.allowBehaviors ? [...options.allowBehaviors] : undefined,
+    denyBehaviors: options.denyBehaviors ? [...options.denyBehaviors] : undefined,
+    pacerExemptBehaviors: options.pacerExemptBehaviors ? [...options.pacerExemptBehaviors] : undefined,
+    exitToPoolBehaviors: options.exitToPoolBehaviors ? [...options.exitToPoolBehaviors] : undefined,
+    behaviorWeights: options.behaviorWeights ? { ...options.behaviorWeights } : undefined,
+    actionDurations: options.actionDurations
+      ? Object.fromEntries(
+          Object.entries(options.actionDurations).map(([key, value]) => [
+            key,
+            Array.isArray(value) ? [...value] : value,
+          ]),
+        )
+      : undefined,
+    partnerWeights: options.partnerWeights ? { ...options.partnerWeights } : undefined,
+    zone: options.zone ? { ...options.zone } : undefined,
+    spawn: options.spawn ? { ...options.spawn } : undefined,
+  };
+}
+
+/**
+ * Classic (Qt) animation preset.
+ *
+ * 100% faithful to the original Shimeji / NeurolingsCE-Qt desktop pet behavior:
+ * - Empty patch layer (no pacer, no behavior caps, no weight overrides, raw XML).
+ * - All options fall back directly to XML definitions and engine runtime defaults.
+ */
+export const CLASSIC_ANIMATION_PRESET: Readonly<MascotAnimationOptions> = Object.freeze({});
+
+/**
+ * Lively (Web Default) animation preset.
+ *
+ * Tuned specifically for web pages:
+ * - 8s pacer (forcedSwitchTicks: 200): nudges stationary mascots into movement so page never looks frozen.
+ * - Safe behavior cap (maxBehaviorTicks: 1100, 44s): prevents indefinite wall-climbing / crawling.
+ * - Pacer exemption: allows long characterful animations (e.g. SitWhileDanglingLegs) to complete.
+ * - Loop breaker (exitToPoolBehaviors): breaks closed nextBehavior loops so pets don't get stuck sitting.
+ * - Boosts selection weight for expressive actions.
+ */
+export const LIVELY_ANIMATION_PRESET: Readonly<MascotAnimationOptions> = Object.freeze({
   spawn: { topOffset: 100, staggerPx: 180 },
-  // 200 ticks = 8 s. Long enough to look calm, short enough that a visitor
-  // notices the mascot is alive.
   forcedSwitchTicks: 200,
-  // ...but the sit-and-dangle sequence is a long *stationary* animation, and the
-  // pacer keys off movement rather than behaviour, so without the exemption it is
-  // cut off mid-way and never plays through. The pool exit is its partner: the
-  // packs chain SitAndFaceMouse with `Add="false"` into a closed loop, so a
-  // mascot that sits down would otherwise never leave it again.
   pacerExemptBehaviors: ["SitWhileDanglingLegs"],
   exitToPoolBehaviors: ["SitWhileDanglingLegs"],
-  // The pacer only acts on a stationary mascot; this is the cap for everything
-  // else. It sits above the dangle sequence so that one still finishes.
   maxBehaviorTicks: 1100,
-  // Both packs ship SitWhileDanglingLegs at 50, and it is the most characterful
-  // thing they do, so it is worth raising. SitAndFaceMouse is lowered because it
-  // is the entry to the closed chain above.
   behaviorWeights: {
     SitWhileDanglingLegs: 150,
     SitAndFaceMouse: 8,
   },
+});
+
+/**
+ * Backward-compatible alias for the default preset.
+ * @deprecated Use `LIVELY_ANIMATION_PRESET` or `PresetRegistry.get("lively")` instead.
+ */
+export const ANIMATION_PRESET_DEFAULTS: MascotAnimationOptions = LIVELY_ANIMATION_PRESET;
+
+/**
+ * PresetRegistry — Decoupled repository of named animation presets.
+ */
+export class PresetRegistry {
+  private static presets = new Map<string, MascotAnimationOptions>([
+    ["lively", cloneOptions(LIVELY_ANIMATION_PRESET)],
+    ["classic", cloneOptions(CLASSIC_ANIMATION_PRESET)],
+  ]);
+  private static defaultPresetName = "lively";
+
+  /** Register a custom preset. */
+  public static register(name: string, preset: MascotAnimationOptions): void {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      throw new Error("[PresetRegistry] Preset name cannot be empty");
+    }
+    PresetRegistry.presets.set(trimmed, cloneOptions(preset));
+  }
+
+  /**
+   * Get an independent, mutable clone of a registered preset.
+   * Modifying the returned object will NOT affect the registry.
+   */
+  public static get(name: string): MascotAnimationOptions | undefined {
+    const found = PresetRegistry.presets.get(name.trim());
+    return found ? cloneOptions(found) : undefined;
+  }
+
+  /** Check if a preset exists. */
+  public static has(name: string): boolean {
+    return PresetRegistry.presets.has(name.trim());
+  }
+
+  /** List all registered preset names. */
+  public static list(): string[] {
+    return Array.from(PresetRegistry.presets.keys());
+  }
+
+  /** Get the active default preset name. */
+  public static getDefaultPresetName(): string {
+    return PresetRegistry.defaultPresetName;
+  }
+
+  /** Set the active default preset name. */
+  public static setDefaultPresetName(name: string): void {
+    const trimmed = name.trim();
+    if (!PresetRegistry.presets.has(trimmed)) {
+      throw new Error(`[PresetRegistry] Preset "${name}" is not registered`);
+    }
+    PresetRegistry.defaultPresetName = trimmed;
+  }
+}
+
+/**
+ * Standard configuration template with exhaustive field-by-field annotations.
+ */
+export const STANDARD_CONFIG_SAMPLE = {
+  $schema: "https://github.com/CommentOut64/web-mascot/blob/main/web-mascot/ANIMATION_CONFIG.md",
+  version: 1,
+  preset: "lively", // Base preset: "lively" (default web-tuned) or "classic" (Qt desktop parity)
+  respectReducedMotion: true, // Follow system prefers-reduced-motion (boolean, default true)
+  defaults: {
+    // --- 1. Pacing & Travel Limits ---
+    // [forcedSwitchTicks] Inactivity pacer: nudges mascot to move after N ticks of zero displacement.
+    // Unit: ticks (1 tick = 40 ms; 25 ticks = 1 s; 200 = 8 s). 0 = disabled. Classic = 0, Lively = 200.
+    forcedSwitchTicks: 200,
+
+    // [maxBehaviorTicks] Hard cap on single behavior duration (except Fall & Dragged).
+    // Unit: ticks (0 = unlimited). Classic = 0, Lively = 1100 (44 s).
+    maxBehaviorTicks: 1100,
+
+    // [pacerExemptBehaviors] Behaviors exempt from forcedSwitchTicks so stationary animations play out.
+    pacerExemptBehaviors: ["SitWhileDanglingLegs"],
+
+    // [exitToPoolBehaviors] Behaviors that return to global pool on end, breaking closed XML loops.
+    exitToPoolBehaviors: ["SitWhileDanglingLegs"],
+
+    // [maxTravelPx] Maximum horizontal wander travel distance in pixels. 0 = unlimited.
+    maxTravelPx: 240,
+
+    // --- 2. Behavior Selection & Duration Overrides ---
+    // [behaviorWeights] Overrides XML <Behavior Frequency="...">. 0 = disable; >0 = enable/boost.
+    behaviorWeights: {
+      SitWhileDanglingLegs: 150,
+      SitAndFaceMouse: 8,
+    },
+
+    // [actionDurations] Overrides XML <Action> duration for Stay actions. Single number or [min, max] range.
+    actionDurations: {
+      // Sit: [80, 150]
+    },
+
+    // [durationScale] Multiplier applied to all XML Duration attributes (0.05 ~ 20.0, 1 = unscaled).
+    durationScale: 1.0,
+
+    // [allowBehaviors] Whitelist: only these behaviors may appear (empty/absent = all allowed).
+    allowBehaviors: [] as string[],
+
+    // [denyBehaviors] Blacklist: behaviors that never appear (takes precedence over allowBehaviors).
+    denyBehaviors: [] as string[],
+
+    // --- 3. Sizing & Geometry ---
+    // [scale] Visual size multiplier (0.2 ~ 4.0, 1.0 = native 128 px sprite).
+    scale: 1.0,
+
+    // [spawn] Initial spawn location and multi-mascot displacement.
+    spawn: {
+      vertical: "top", // "top" (drop from ceiling) | "floor" (start on floor)
+      x: "center", // Horizontal position: number (px), "50%", "center", "left", "right"
+      topOffset: 100, // Pixels below work area top for "top" spawn
+      staggerPx: 180, // Horizontal offset per already-spawned mascot to prevent stacking
+    },
+
+    // [zone] Activity bounding box (work area). Omit for full container.
+    // zone: { left: 0, right: "100%", top: 0, bottom: "100%" },
+
+    // --- 4. Partner Interactions ---
+    // [scanDistancePx] Search radius (px) for partner advertisement detection (16 ~ 4096 px, default 256).
+    scanDistancePx: 256,
+
+    // [interactionCooldownTicks] Cooldown ticks after interaction before another can start (default 0).
+    interactionCooldownTicks: 0,
+
+    // [partnerWeights] Dynamic weights for partner-seeking behaviors based on presence & reachability.
+    partnerWeights: {
+      alone: 40, // When this mascot is the only one on page
+      withPartner: 150, // When another mascot exists on page
+      reachable: 1800, // When partner is on same surface within scanDistancePx
+    },
+  },
+  mascots: {
+    // Specific per-mascot overrides merged on top of defaults
+    // Neuron: { ... },
+    // Eviling: { ... }
+  },
+  reducedMotion: {
+    // Options merged on top of defaults when OS asks for reduced motion
+  },
 };
 
 /**
- * The same preset in file shape, emitted as `dist/animation.config.json` by the
- * build. `_readme` is ignored by the parser (see `normalizeOptions`), exactly
- * like the labels inside the packs' own XML.
+ * File shape emitted as `dist/animation.config.json` by the build.
  */
 export const ANIMATION_PRESET_FILE = {
   _readme: [
-    "web-mascot 的默认动画配置档。",
-    "引擎已经内建了下面这套默认值，所以本文件通常不必存在：配好精灵路径即可。",
-    "要改某项，就把它写进 defaults —— 对象型字段（behaviorWeights/actionDurations/zone/spawn/partnerWeights）按 key 合并，数组与数值整体替换。",
-    "要完全退回 pack 原生行为（无 pacer、无权重覆盖、无长序列豁免），写 ignoreBuiltin: true。",
-    "字段逐条说明见 ANIMATION_CONFIG.md。",
+    "web-mascot 动画配置规范文件 (Standard Animation Configuration File)。",
+    "引擎支持双预设体系：",
+    "  - preset: 'lively' (默认)：专为网页端调优，8秒静止换位防呆滞，放行晃腿等长动画，打破坐姿闭环；",
+    "  - preset: 'classic'：100% 忠实还原原版 Qt / Shimeji 桌面桌宠表现，无 pacer，无权重篡改。",
+    "你可以在本文件中基于 preset 微调 defaults，或在 mascots 中按宠物定制。",
+    "字段详细说明与约束区间见 ANIMATION_CONFIG.md 与 src/core/animationPreset.ts。",
   ],
   version: 1,
+  preset: "lively",
   respectReducedMotion: true,
-  defaults: ANIMATION_PRESET_DEFAULTS,
+  defaults: LIVELY_ANIMATION_PRESET,
   mascots: {},
+  reducedMotion: {},
 };

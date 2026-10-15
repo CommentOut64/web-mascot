@@ -1,6 +1,7 @@
 import { MascotEngine } from "./core/MascotEngine.js";
 import type { RuntimeOptions, RuntimeSnapshot } from "./core/MascotEngine.js";
 import { defaultPackBaseUrl } from "./core/Assets.js";
+import { PresetRegistry } from "./core/animationPreset.js";
 
 /**
  * Public entry point of the web-mascot library.
@@ -66,11 +67,15 @@ export interface MascotConfig {
    *  `/animation.config.json` once per page; if that file is absent nothing breaks
    *  and the built-in preset stays in effect. */
   animationConfigUrl?: string;
-  /** Set true to drop the built-in animation preset and run the packs exactly as
-   *  they ship: no pacer, no behaviour-weight overrides, no long-sequence
-   *  exemption. Default false — the built-in preset is what a host gets when it
-   *  configures nothing. Orthogonal to `animationConfigUrl`: this removes the
-   *  layer underneath, it does not disable the file. */
+  /**
+   * Base animation preset to inherit from: "lively" (default, web-tuned) or "classic" (Qt desktop parity).
+   */
+  preset?: string;
+  /**
+   * @deprecated Use `preset: "classic"` instead.
+   * Set true to drop the lively animation preset and run the packs exactly as
+   * they ship: no pacer, no behaviour-weight overrides, no long-sequence exemption.
+   */
   ignoreBuiltin?: boolean;
   /** Simulation tuning. See `RuntimeOptions`; omitted fields keep their defaults. */
   runtime?: RuntimeOptions;
@@ -106,10 +111,19 @@ let hasConfigured = false;
  */
 export function configure(options: MascotConfig): void {
   hasConfigured = true;
-  if (options.assets || options.animationConfigUrl || options.ignoreBuiltin !== undefined) {
+  if (options.preset) {
+    usePreset(options.preset);
+  }
+  if (
+    options.assets ||
+    options.animationConfigUrl ||
+    options.ignoreBuiltin !== undefined ||
+    options.preset
+  ) {
     MascotEngine.configure({
       packBaseUrl: options.assets,
       animationConfigUrl: options.animationConfigUrl,
+      preset: options.preset,
       ignoreBuiltin: options.ignoreBuiltin,
     });
   }
@@ -264,6 +278,37 @@ export type { MascotGroupSpawnOptions } from "./core/MascotGroup.js";
 export { ViewportHost } from "./core/ViewportHost.js";
 export type { RuntimeOptions, RuntimeSnapshot } from "./core/MascotEngine.js";
 export { AnimationConfig } from "./core/AnimationConfig.js";
+export type { MascotAnimationOptions, AnimationConfigFile } from "./core/AnimationConfig.js";
+export {
+  PresetRegistry,
+  CLASSIC_ANIMATION_PRESET,
+  LIVELY_ANIMATION_PRESET,
+  STANDARD_CONFIG_SAMPLE,
+} from "./core/animationPreset.js";
+
+/**
+ * Get an independent, mutable clone of a registered animation preset.
+ * Modifying the returned object will not affect the preset in the registry.
+ */
+export function getPreset(name: string): import("./core/AnimationConfig.js").MascotAnimationOptions | undefined {
+  return PresetRegistry.get(name);
+}
+
+/**
+ * Register a custom animation preset in the PresetRegistry.
+ */
+export function registerPreset(name: string, config: import("./core/AnimationConfig.js").MascotAnimationOptions): void {
+  PresetRegistry.register(name, config);
+}
+
+/**
+ * Switch the active base animation preset (e.g. "classic", "lively", or a custom one).
+ */
+export function usePreset(name: string): void {
+  PresetRegistry.setDefaultPresetName(name);
+  MascotEngine.setPreset(name);
+}
+
 export { BroadcastManager } from "./core/Broadcast.js";
 export { DEFAULT_PACK_BASE_URL, resolveAssetBase } from "./core/Assets.js";
 export { PackRegistry } from "./core/PackRegistry.js";
@@ -279,3 +324,5 @@ export type {
 export type { EngineEvent, EngineObserver } from "./core/MascotEngine.js";
 export type { Pose, ActionNode, Behavior, RelaySnapshot, RelayVisualSnapshot, RelayFrameSnapshot } from "./core/types.js";
 export type { Hotspot } from "./core/Hotspot.js";
+
+

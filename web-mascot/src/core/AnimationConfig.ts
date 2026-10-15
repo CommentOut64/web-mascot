@@ -32,7 +32,7 @@
  * effective settings back for a settings UI.
  */
 
-import { ANIMATION_PRESET_DEFAULTS } from "./animationPreset.js";
+import { PresetRegistry, cloneOptions } from "./animationPreset.js";
 
 /** A position or size: pixels as a number, a percentage like "40%", or a keyword
  *  ("left" | "right" | "top" | "bottom" | "center"). */
@@ -44,7 +44,7 @@ export interface SpawnOptions {
   vertical?: "top" | "floor";
   /** Horizontal start position (Metric), default the middle of the zone. */
   x?: Metric;
-  /** Extra offset per already-live mascot so several mascots do not stack. */
+  /** Extra offset per already-live mascot so several mascots do not stack (>128 px). */
   staggerPx?: number;
   /** How far below the zone's top a "top" spawn starts. Default 100. */
   topOffset?: number;
@@ -59,94 +59,116 @@ export interface ZoneOptions {
 
 /** Weight for partner behaviours, in the situations that matter. */
 export interface PartnerWeights {
-  /** While this mascot is the only one on the page. */
+  /** While this mascot is the only one on the page (0 ~ 100,000, default 40). */
   alone?: number;
-  /** While other mascots are live, so an interaction can actually happen. */
+  /** While other mascots are live on the page (0 ~ 100,000, default 150). */
   withPartner?: number;
   /**
-   * While another mascot is on the *same* surface and within the scan distance —
-   * i.e. a scan started right now could connect. Raising this is what makes two
-   * mascots that are both on the floor seek each other out. It cannot make a hug
-   * certain: a scan still only connects if the other one happens to be advertising
-   * at that exact tick, so the interaction stays stochastic.
+   * While another mascot is on the *same* surface and within scan distance (0 ~ 100,000, default 1800).
+   * Dynamically boosts engagement when an interaction is physically reachable right now.
    */
   reachable?: number;
 }
 
 export interface MascotAnimationOptions {
-  /** Only these behaviours may be chosen. Empty/absent means "all of them". */
-  allowBehaviors?: string[];
-  /** These behaviours are never chosen. */
-  denyBehaviors?: string[];
-  /** Selection weight per behaviour, overriding the pack's Frequency. 0 disables. */
-  behaviorWeights?: Record<string, number>;
-  /** Hold duration per action in ticks; 40 ms each. `[min,max]` or a single value. */
-  actionDurations?: Record<string, DurationSetting>;
-  /** Multiplier applied to the pack's own Duration values. 1 = unchanged. */
-  durationScale?: number;
   /**
-   * How much bigger the mascot is drawn, as a linear multiplier (1 = the pack's
-   * native 128 px sprite). The engine keeps working in *virtual* units, where one
-   * unit is one sprite pixel, and converts at the two boundaries (rendering and
-   * pointer input) — the same thing libshijima does with `environment::set_scale`.
-   * That is what keeps the packs' own pixel constants (`workArea.top+64`,
-   * `width-128`, velocities, `Offset Y=1`, hotspot origins) meaningful at any size.
+   * [allowBehaviors] Whitelist: only these behaviours may appear. Empty/absent means "all allowed".
+   * Names correspond to <Behavior Name="..."> in behaviors.xml.
+   */
+  allowBehaviors?: string[];
+
+  /**
+   * [denyBehaviors] Blacklist: these behaviours are never chosen.
+   * Takes precedence over allowBehaviors.
+   */
+  denyBehaviors?: string[];
+
+  /**
+   * [behaviorWeights] Selection weight (probability) per behaviour, overriding the pack's Frequency.
+   * Unit: integer weight (0 ~ 100,000). 0 disables; positive value enables or boosts.
+   * Classic = {} (respects pack Frequency); Lively = { SitWhileDanglingLegs: 150, SitAndFaceMouse: 8 }.
+   */
+  behaviorWeights?: Record<string, number>;
+
+  /**
+   * [actionDurations] Hold duration per action in ticks.
+   * Unit: ticks (1 tick = 40 ms). Range: 1 ~ 1,000,000 ticks.
+   * Value: single number or `[min, max]` range. Overrides <Action> Duration in actions.xml.
+   */
+  actionDurations?: Record<string, DurationSetting>;
+
+  /**
+   * [durationScale] Global multiplier applied to all pack Duration attributes (Stay actions).
+   * Range: 0.05 ~ 20.0. 1.0 = unchanged / native speed.
+   */
+  durationScale?: number;
+
+  /**
+   * [scale] Visual mascot render scale multiplier.
+   * Range: 0.2 ~ 4.0. 1.0 = native 128 px sprite size.
+   * Engine calculates in virtual 1:1 sprite units, so physics & hotspot geometries remain exact.
    */
   scale?: number;
-  /** Nudge a standing mascot into a new behaviour after this many ticks. */
-  forcedSwitchTicks?: number;
+
   /**
-   * Behaviours the pacer above must not interrupt.
-   *
-   * `forcedSwitchTicks` keys off *movement*: any pose with zero velocity counts as
-   * standing still, so a long stationary animation — a sit-and-dangle sequence is
-   * ~400 ticks — gets cut off mid-way by a pacer shorter than it. Listing it here
-   * lets the whole sequence play, while a plain idle `Stay` is still nudged on time.
-   * Only the pacer is suspended; `maxBehaviorTicks` still applies, so a listed
-   * behaviour cannot run for ever.
+   * [forcedSwitchTicks] Inactivity pacer: nudges mascot to pick a travel behaviour if standing still for N ticks.
+   * Unit: ticks (1 tick = 40 ms; 25 ticks = 1 s; 200 = 8 s). Range: 0 ~ 1,000,000. 0 = disabled.
+   * Classic = 0 (disabled, natural XML 20-60s rest); Lively = 200 (8s anti-freeze).
+   */
+  forcedSwitchTicks?: number;
+
+  /**
+   * [pacerExemptBehaviors] Behaviours exempt from forcedSwitchTicks.
+   * Since pacer measures zero velocity as "still", long stationary animations (e.g. SitWhileDanglingLegs, ~400 ticks)
+   * would be cut mid-way without this exemption.
    */
   pacerExemptBehaviors?: string[];
+
   /**
-   * Behaviours that return to the *global* pool when they end, instead of following
-   * the pack's `<NextBehaviorList>`.
-   *
-   * The packs use that list to chain related behaviours, and some chains are closed
-   * (`Add="false"` with their own name among the targets). `SitAndFaceMouse` in the
-   * shipped packs is exactly that: it can only re-pick itself or
-   * `SitWhileDanglingLegs`, forever. A mascot that sits down therefore never leaves
-   * that pair on its own; combining a pacer exemption with this list is what lets it
-   * finish the animation *and* move on afterwards.
+   * [exitToPoolBehaviors] Loop-breaker: behaviours that return to the global selection pool on completion.
+   * Breaks closed loops created by pack XML chains (e.g. SitAndFaceMouse with Add="false").
    */
   exitToPoolBehaviors?: string[];
-  /** After a completed interaction (hug/hurl), partner behaviours are suppressed for
-   *  this many ticks. Without it two mascots that end a hug next to each other simply
-   *  connect again on the next pick and chain hugs back to back. */
-  interactionCooldownTicks?: number;
-  /** Hard cap on one behaviour, in ticks. A fall or a drag is never cut. */
-  maxBehaviorTicks?: number;
-  /** Longest horizontal wander target, in pixels. 0/absent = unlimited. */
-  maxTravelPx?: number;
+
   /**
-   * Weight given to *partner* behaviours (hugging, hurling, waiting for a hug,
-   * noticing a falling friend) regardless of the name the pack uses and regardless
-   * of how large the pack's own Frequency is.
-   *
-   * The packs weight these at 1000–3000 because a busy desktop has several
-   * mascots; on a page a lone mascot would just stand around. Naming the pack's
-   * behaviours here would be brittle — Neuron calls it HugEvil and Eviling calls it
-   * HugNeuro — so the engine decides by inspecting the action instead, and this
-   * pair of numbers says how much that class of behaviour is worth.
+   * [interactionCooldownTicks] Cooldown ticks after an interaction (e.g. Hug) before another can start.
+   * Unit: ticks (1 tick = 40 ms). Range: 0 ~ 100,000. Prevents consecutive back-to-back hugging.
+   */
+  interactionCooldownTicks?: number;
+
+  /**
+   * [maxBehaviorTicks] Hard cap on single behaviour duration, in ticks.
+   * Unit: ticks (1 tick = 40 ms). Range: 0 ~ 1,000,000. 0 = unlimited.
+   * Fall and Dragged are never interrupted. Classic = 0, Lively = 1100 (44 s).
+   */
+  maxBehaviorTicks?: number;
+
+  /**
+   * [maxTravelPx] Maximum horizontal wander travel distance in pixels.
+   * Unit: pixels (px). Range: 10 ~ 100,000. 0/absent = unlimited.
+   * Constrains random wander targets without breaking wall-climbing boundary targets.
+   */
+  maxTravelPx?: number;
+
+  /**
+   * [partnerWeights] Dynamic weights for partner-seeking behaviours (alone / withPartner / reachable).
    */
   partnerWeights?: PartnerWeights;
+
   /**
-   * How far a scanning mascot looks for an advertisement, in pixels (libshijima
-   * uses 256, which suits a desktop). A page is often much wider than a mascot
-   * neighbourhood, so raising this is what lets two mascots find each other.
+   * [scanDistancePx] Search radius for discovering partner interaction advertisements.
+   * Unit: pixels (px). Range: 16 ~ 4,096. Default 256.
    */
   scanDistancePx?: number;
-  /** The activity rectangle; it becomes the mascot's work area. */
+
+  /**
+   * [zone] Activity bounding box constraint for the mascot (becomes its custom workArea).
+   */
   zone?: ZoneOptions;
-  /** Where a new mascot appears. */
+
+  /**
+   * [spawn] Initial spawn position, vertical entry mode, and multi-mascot stagger distance.
+   */
   spawn?: SpawnOptions;
 }
 
@@ -155,10 +177,15 @@ export type DurationSetting = number | [number, number];
 
 export interface AnimationConfigFile {
   version?: number;
-  /** Set true to drop the engine's built-in preset and run the packs exactly as
-   *  they ship: no pacer, no behaviour-weight overrides, no long-sequence
-   *  exemption. Default false. Orthogonal to the fields below — this removes the
-   *  layer *underneath*, it does not disable the file. */
+  /**
+   * Base preset to inherit from: "lively" (default web-tuned) or "classic" (Qt desktop parity).
+   * Overridden by fields in `defaults` and `mascots`.
+   */
+  preset?: string;
+  /**
+   * @deprecated Use `preset: "classic"` instead.
+   * Set true to drop the lively preset and run in pure Qt / pack parity mode.
+   */
   ignoreBuiltin?: boolean;
   /** Applied to every mascot. */
   defaults?: MascotAnimationOptions;
@@ -384,17 +411,8 @@ function hasContent(options: MascotAnimationOptions): boolean {
   );
 }
 
-/**
- * The built-in preset, normalised once.
- *
- * It is declared *below* the helpers on purpose: module-level `const`
- * initialisation runs in source order, and `normalizeOptions` reads constants of
- * its own, so hoisting the function is not enough. Moving this above them throws
- * "Cannot access '…' before initialization" on import.
- */
-const BUILTIN_ANIMATION_CONFIG: MascotAnimationOptions = normalizeOptions(ANIMATION_PRESET_DEFAULTS);
-
 export class AnimationConfig {
+  private presetName: string = "lively";
   private defaults: MascotAnimationOptions = {};
   private perMascot = new Map<string, MascotAnimationOptions>();
   private reduced: MascotAnimationOptions = {};
@@ -405,7 +423,7 @@ export class AnimationConfig {
   /** Where the settings came from, for logs and diagnostics. */
   public readonly source: string;
 
-  constructor(file?: unknown, source = "(built-in defaults)") {
+  constructor(file?: unknown, source = "(preset defaults)") {
     this.source = source;
     this.apply(file);
   }
@@ -417,9 +435,21 @@ export class AnimationConfig {
     this.reduced = {};
     this.respectReduced = true;
     this.respectBuiltin = true;
+    this.presetName = PresetRegistry.getDefaultPresetName();
     this.resolved = new Map();
     if (!isRecord(file)) return;
-    this.respectBuiltin = file.ignoreBuiltin !== true;
+
+    if (typeof file.preset === "string" && file.preset.trim()) {
+      this.presetName = file.preset.trim();
+    }
+    // Backward compatibility: ignoreBuiltin = true maps to "classic" preset
+    if (file.ignoreBuiltin === true) {
+      this.presetName = "classic";
+      this.respectBuiltin = false;
+    } else if (file.ignoreBuiltin === false) {
+      this.respectBuiltin = true;
+    }
+
     this.defaults = normalizeOptions(file.defaults);
     this.reduced = normalizeOptions(file.reducedMotion);
     this.respectReduced = file.respectReducedMotion !== false;
@@ -432,6 +462,18 @@ export class AnimationConfig {
       }
     }
     this.refreshReducedMotion();
+  }
+
+  /** Get the current base preset name. */
+  public getPreset(): string {
+    return this.presetName;
+  }
+
+  /** Switch the base preset. Clears cached resolved options. */
+  public setPreset(name: string): void {
+    this.presetName = name.trim();
+    this.respectBuiltin = this.presetName !== "classic";
+    this.resolved.clear();
   }
 
   /** Called by the engine when the OS preference changes. */
@@ -459,17 +501,22 @@ export class AnimationConfig {
     return this.reducedActive;
   }
 
-  /** True when this configuration cannot affect anything: the built-in preset is
-   *  off and the host supplied nothing of its own. */
+  /** True when this configuration cannot affect anything: preset is classic and host supplied nothing. */
   public get isEmpty(): boolean {
-    return !this.respectBuiltin && !hasContent(this.defaults) && this.perMascot.size === 0 && !hasContent(this.reduced);
+    return (
+      this.presetName === "classic" &&
+      !hasContent(this.defaults) &&
+      this.perMascot.size === 0 &&
+      !hasContent(this.reduced)
+    );
   }
 
-  /** Effective options: built-in (if not ignored), then file defaults, then reduced-motion block, then mascot overrides. */
+  /** Effective options: base preset (from PresetRegistry), then defaults, then reduced-motion, then mascot overrides. */
   public optionsFor(mascot: string): MascotAnimationOptions {
     const cached = this.resolved.get(mascot);
     if (cached) return cloneOptions(cached);
-    let base = this.respectBuiltin ? BUILTIN_ANIMATION_CONFIG : {};
+    const basePreset = PresetRegistry.get(this.presetName) ?? PresetRegistry.get("lively") ?? {};
+    let base = normalizeOptions(basePreset);
     let merged = mergeOptions(base, this.defaults);
     merged = mergeOptions(merged, this.reducedActive ? this.reduced : {});
     merged = mergeOptions(merged, this.perMascot.get(mascot) ?? {});
@@ -591,12 +638,15 @@ export class AnimationConfig {
     for (const [name, options] of this.perMascot) mascots[name] = cloneOptions(options);
     const result: AnimationConfigFile = {
       version: 1,
+      preset: this.presetName,
       defaults: cloneOptions(this.defaults),
       mascots,
       reducedMotion: cloneOptions(this.reduced),
       respectReducedMotion: this.respectReduced,
     };
-    if (!this.respectBuiltin) result.ignoreBuiltin = true;
+    if (!this.respectBuiltin || this.presetName === "classic") {
+      result.ignoreBuiltin = true;
+    }
     return result;
   }
 
@@ -604,7 +654,7 @@ export class AnimationConfig {
   public describe(mascot: string): string {
     const options = this.optionsFor(mascot);
     const parts = [
-      `source=${this.source}${this.respectBuiltin ? " +builtin" : " no-builtin"}`,
+      `source=${this.source}[preset=${this.presetName}]${this.presetName !== "classic" && this.respectBuiltin ? " +builtin" : " no-builtin"}`,
       `durationScale=${options.durationScale ?? 1}`,
       `scale=${options.scale ?? 1}`,
       `cap=${options.maxBehaviorTicks ?? 0}`,
@@ -679,19 +729,3 @@ export class AnimationConfig {
   }
 }
 
-function cloneOptions(options: MascotAnimationOptions): MascotAnimationOptions {
-  return {
-    ...options,
-    allowBehaviors: options.allowBehaviors ? [...options.allowBehaviors] : undefined,
-    denyBehaviors: options.denyBehaviors ? [...options.denyBehaviors] : undefined,
-    pacerExemptBehaviors: options.pacerExemptBehaviors ? [...options.pacerExemptBehaviors] : undefined,
-    exitToPoolBehaviors: options.exitToPoolBehaviors ? [...options.exitToPoolBehaviors] : undefined,
-    behaviorWeights: options.behaviorWeights ? { ...options.behaviorWeights } : undefined,
-    actionDurations: options.actionDurations
-      ? Object.fromEntries(Object.entries(options.actionDurations).map(([key, value]) => [key, Array.isArray(value) ? [...value] : value]))
-      : undefined,
-    partnerWeights: options.partnerWeights ? { ...options.partnerWeights } : undefined,
-    zone: options.zone ? { ...options.zone } : undefined,
-    spawn: options.spawn ? { ...options.spawn } : undefined,
-  };
-}

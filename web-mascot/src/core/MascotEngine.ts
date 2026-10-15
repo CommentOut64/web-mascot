@@ -954,7 +954,12 @@ export class MascotEngine {
   public static configure(options: {
     packBaseUrl?: string;
     animationConfigUrl?: string;
-    /** True drops the built-in animation preset for this page; false is the default. */
+    /** Base preset name: "lively" (default) or "classic" (Qt). */
+    preset?: string;
+    /**
+     * @deprecated Use `preset: "classic"` instead.
+     * True drops the lively preset and runs in pure Qt / pack parity mode.
+     */
     ignoreBuiltin?: boolean;
   }): void {
     if (options.packBaseUrl) {
@@ -963,11 +968,14 @@ export class MascotEngine {
     if (options.animationConfigUrl && !MascotEngine.animationConfigUrl) {
       MascotEngine.animationConfigUrl = options.animationConfigUrl;
     }
+    if (options.preset !== undefined) {
+      MascotEngine.animationConfig.setPreset(options.preset);
+    }
     if (options.ignoreBuiltin !== undefined) {
-      // Remembered as a page-level preference instead of being written into the
-      // current instance, because a configuration file may replace that instance
-      // later: `applyBuiltinPreference()` re-applies it afterwards.
       MascotEngine.builtinPreference = options.ignoreBuiltin;
+      if (options.ignoreBuiltin) {
+        MascotEngine.animationConfig.setPreset("classic");
+      }
       MascotEngine.applyBuiltinPreference();
     }
   }
@@ -996,6 +1004,16 @@ export class MascotEngine {
    *  own sprite URLs (`spriteUrl()` returns the same shape). */
   public static getPackBaseUrl(): string {
     return MascotEngine.packBaseUrl;
+  }
+
+  /** Switch the active base animation preset (e.g. "classic", "lively", or custom). */
+  public static setPreset(preset: string): void {
+    MascotEngine.animationConfig.setPreset(preset);
+  }
+
+  /** Get the currently active base animation preset name. */
+  public static getPreset(): string {
+    return MascotEngine.animationConfig.getPreset();
   }
 
   /**
