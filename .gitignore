@@ -14,6 +14,7 @@ release/
 web-mascot/dist-extension/
 web-mascot/release/
 web-mascot/*.tgz
+web-mascot/store-assets
 
 # ---------- 运行时日志 ----------
 # 宠物运行产生的分目录日志、录制文件

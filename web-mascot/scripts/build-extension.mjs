@@ -119,23 +119,35 @@ fs.writeFileSync(
 console.log(">> 复制桌宠素材包与配置文件 ...");
 fs.cpSync(distMascotPack, path.resolve(distExtDir, "mascot_pack"), { recursive: true });
 fs.copyFileSync(distAnimConfig, path.resolve(distExtDir, "animation.config.json"));
+
+// 确保图标符合 Chrome Web Store 与 Edge Add-ons 规范 (16/32/48/128 严格尺寸匹配)
+const icon32Path = path.resolve(projectRoot, "extension/icons/icon-32.png");
+if (!fs.existsSync(icon32Path) && process.platform === "win32") {
+  console.log(">> 正在生成符合商店规范的多尺寸图标 (16/32/48/128)...");
+  execSync(`powershell -ExecutionPolicy Bypass -File "${path.resolve(__dirname, "resize-icons.ps1")}"`, { stdio: "inherit" });
+}
 fs.cpSync(path.resolve(projectRoot, "extension/icons"), path.resolve(distExtDir, "icons"), { recursive: true });
 
-// 7. 自动生成分发用 ZIP 压缩包
+// 7. 自动生成符合 Chrome Web Store 与 Edge Add-ons 规范的标准 ZIP 压缩包
+// 确保 manifest.json 位于 ZIP 顶级根目录，且条目无多余 ./ 路径前缀
 const zipName = `web-mascot-extension-v${version}.zip`;
 const zipPath = path.resolve(releaseDir, zipName);
 if (fs.existsSync(zipPath)) {
   fs.rmSync(zipPath);
 }
 
-console.log(`>> 正在生成离线分发压缩包: ${zipName} ...`);
-try {
-  execSync(`tar -a -c -f "${zipPath}" -C "${distExtDir}" .`, { stdio: "inherit" });
-} catch {
+console.log(`>> 正在生成符合商店规范的分发压缩包: ${zipName} ...`);
+if (process.platform === "win32") {
   execSync(
     `powershell -NoProfile -Command "Compress-Archive -Path '${distExtDir}/*' -DestinationPath '${zipPath}' -Force"`,
     { stdio: "inherit" }
   );
+} else {
+  try {
+    execSync(`(cd "${distExtDir}" && zip -r "${zipPath}" ./*)`, { stdio: "inherit" });
+  } catch {
+    execSync(`tar -a -c -f "${zipPath}" -C "${distExtDir}" .`, { stdio: "inherit" });
+  }
 }
 
 const stats = fs.statSync(zipPath);
