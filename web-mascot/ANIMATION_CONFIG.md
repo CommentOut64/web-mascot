@@ -1,100 +1,72 @@
-# 动画自定义配置（Animation configuration）
+# 动画自定义配置与预设体系（Animation Configuration & Presets）
 
-引擎**自带一套默认预设**，宿主什么都不做就是它：普通静止约 8 秒即被推动（偏活跃），
-但晃腿这类长静止序列允许完整播完再回主池。这份预设的**唯一事实源**是库源码里的
-`src/core/animationPreset.ts`；构建时同一份数据会生成 `dist/animation.config.json`
-（也就是 `web-mascot/animation.config.json`），供想要一份文件来改的宿主取用 —— 两者不会漂移。
+`web-mascot` 采用**平等的预设表 + 注册中心机制（`PresetRegistry`）**管理宠物的行为与动画。系统内置两套标准预设，并允许宿主自由克隆、修改、注册与切换：
 
-生效的配置按下面的优先级叠加，后写的覆盖先写的（**逐字段**，对象型字段按 key 合并）：
+1. **`"lively"`（活跃预设，默认启用）**：专为**网页环境**调优。普通原地静止约 8 秒即被推动换位，放行晃腿等有灵性的长动画，并打破原版 XML 的坐姿死循环，保证网页生动不卡顿。
+2. **`"classic"`（原版 Qt 预设）**：100% 忠实还原原版 Shimeji / NeurolingsCE-Qt 桌面桌宠表现。不设节奏催促（`forcedSwitchTicks: 0`），允许宠物依据原生 XML 静坐或躺卧 20~60 秒，完全遵循素材包原生权重。
+3. **自定义预设（Custom Presets）**：宿主可通过 `getPreset("lively")` 拿已有配置微调，然后 `registerPreset("my-style", cfg)` 注册并切换。
+
+生效的配置按标准的优先级叠加，后写的覆盖先写的（**逐字段**，对象型字段按 key 合并）：
 
 ```
-内置预设  →  文件 / 运行时下发的 defaults  →  reducedMotion（系统要求减少动效时）  →  mascots.<宠物名>
+基础预设 (PresetRegistry: lively / classic / 自定义)
+   └── 文件 / 运行时配置中的 defaults
+          └── 系统偏好 reducedMotion (当操作系统开启减少动效时)
+                 └── mascots.<宠物名> (单宠个性化覆写)
 ```
 
-配置文件默认从 `/animation.config.json` 读取（也可以 `?config=/my.config.json` 指向别的文件）。
-一份配置同时管五件事：**出现哪些行为、各行为多大概率、各动作持续多久、多久换一次行为、
-宠物出现在哪里、以及活动区域**。
+配置文件默认从 `/animation.config.json` 读取（亦可 `?config=/my.config.json` 指定路径）。
 
-## 生效方式
+---
 
-| 方式 | 用法 |
-|---|---|
-| 改文件 | 把 `animation.config.json` 放进站点静态根（或 `?config=` 指定）→ 刷新页面，或控制台 `__mascotConfig.reload()` |
-| 改内置预设 | 编辑 `src/core/animationPreset.ts` 后重新构建 —— 它同时决定运行时默认值与随包附带的 `dist/animation.config.json` |
-| 换文件 | URL 加 `?config=/my.config.json` |
-| 运行时下发 | `__mascotConfig.set({ defaults: {...}, mascots: {...} })` —— 立即作用于**已在运行**的宠物 |
-| 读回生效值 | `__mascotConfig.get()`（文件形状）/ `__mascotConfig.get("Neuron")`（该宠物的解析结果） |
-| 看广播状态 | `__mascotConfig.broadcasts()` —— 当前存活的可互动告示（`{CuddleNeuro: 1, ...}`） |
-| 代码内嵌 | `MascotEngine.setAnimationConfig(obj)` / `loadAnimationConfig(url)` / `reloadAnimationConfig(url)` |
+## 一、 快速切换与用法
 
-文件缺失或格式错误时，配置退回**引擎内置预设**（若文件里写了 `ignoreBuiltin: true`，则退回 pack 原生行为），不会影响宠物运行。引擎每页会探测一次默认路径，所以没有这个文件的站点会看到**一次预期内的 404** —— 不影响运行，也不产生控制台噪音。
+| 想要的效果 | 推荐写法 | 兼容写法（旧版） |
+|---|---|---|
+| **默认活跃档（Web 优化）** | 什么都不用配置 | `{}` |
+| **纯正 Qt / 原版桌宠档** | `configure({ preset: "classic" })` 或配置 JSON 中写 `"preset": "classic"` | `configure({ ignoreBuiltin: true })` |
+| **在基础预设上微调** | 配置文件只写要修改的字段，例如 `{"defaults":{"forcedSwitchTicks":400}}` | — |
+| **自定义注册新预设** | `const cfg = getPreset("lively"); cfg.forcedSwitchTicks = 300; registerPreset("my-preset", cfg); usePreset("my-preset");` | — |
 
-每次 `Spawn` 时，生效配置的摘要会写进观测日志（`k:"spawn"` 的 `config` 字段 + `k:"config"` 明细行），便于事后核对；摘要里的 `source=…` 会带 `+builtin` / `no-builtin`，一眼能看出内置预设是否生效。
+---
 
-### 三档用法（最容易混的地方）
+## 二、 标准配置表规范与参数字典
 
-| 想要 | 怎么写 |
-|---|---|
-| 引擎默认（内置的活跃预设） | 什么都不做 |
-| 在内置预设之上微调 | 文件里只写要改的字段：`{"defaults":{"forcedSwitchTicks":400}}` |
-| 纯正原版（pack 原生：无 pacer、无权重覆盖、无长序列豁免） | `{"version":1,"ignoreBuiltin":true}` —— **文件里只写这一项**；或代码里 `configure({ ignoreBuiltin: true })` / `setAnimationConfig({ ignoreBuiltin: true })` |
-
-`ignoreBuiltin` 关掉的是**内置预设这一层**，不是"整个配置"：它与 `defaults` 正交，所以
-`{"ignoreBuiltin":true,"defaults":{"forcedSwitchTicks":300}}` 得到的是「pack 原生 + 300 tick 的 pacer」。
-
-## 字段
+标准配置文件结构（`animation.config.json`）：
 
 ```jsonc
 {
   "version": 1,
-  "ignoreBuiltin": false, // true = 丢弃内置预设这一层（与下面的 defaults 正交，不会禁用本文件）
-  "respectReducedMotion": true,
-  "defaults": { /* 对所有宠物生效 */ },
-  "mascots": { "Neuron": { /* 覆盖 defaults */ }, "Eviling": { } },
-  "reducedMotion": { /* 系统要求「减少动态效果」时叠加到 defaults 上 */ }
+  "preset": "lively", // 继承的基础预设名："lively"（默认）或 "classic"（Qt原版）
+  "respectReducedMotion": true, // 是否跟随系统「减少动态效果」偏好，默认 true
+  "defaults": { /* 对所有宠物生效的微调覆盖 */ },
+  "mascots": { "Neuron": { /* 仅对该宠物覆盖 */ }, "Eviling": { } },
+  "reducedMotion": { /* 系统开启减少动效时追加覆盖 defaults */ }
 }
 ```
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `allowBehaviors` | `string[]` | **只允许**出现这些行为（缺省 = 全部允许）。名字取自 `behaviors.xml` 的 `<Behavior Name>` |
-| `denyBehaviors` | `string[]` | **永不出现**这些行为，优先级高于 `allowBehaviors` |
-| `behaviorWeights` | `{ [行为名]: number }` | 行为被抽中的权重，覆盖 XML 的 `Frequency`。`0` = 禁用；给 XML 里 `Frequency="0"` 的行为赋正值可**打开**它 |
-| `actionDurations` | `{ [动作名]: number \| [min,max] }` | 动作持续 tick 数（1 tick = 40 ms，25 tick = 1 s）。名字取自 `actions.xml` 的 `<Action Name>` |
-| `durationScale` | `number` | 全局时长倍率（0.05–20），只作用于 XML 自带的 `Duration`（Stay 类动作） |
-| `scale` | `number` | **宠物绘制大小**（0.2–4，1 = pack 原生 128px）。引擎内部按「1 虚拟单位 = 1 贴图像素」工作，见下文 |
-| `forcedSwitchTicks` | `number` | **节奏调节器**：原地不动超过 N tick，下一次行为必须挑一个**会移动**的；单个姿势静止超过 N tick 也会被换掉。`0`/缺省 = 不启用 |
-| `maxBehaviorTicks` | `number` | **硬上限**：单个行为最长 N tick，超时即换（掉落/拖拽除外）。用于刹住 40 s 级的爬墙与爬行 |
-| `pacerExemptBehaviors` | `string[]` | **节奏调节器的例外名单**：列出的行为不被 `forcedSwitchTicks` 打断，让长静止动画播完。注意「静止」按位置判定，速度为零的长序列（如 `SitWhileDanglingLegs`，约 400 tick）默认会被节奏调节器拦腰截断 |
-| `exitToPoolBehaviors` | `string[]` | **绕开 pack 闭链**：列出的行为结束时回到**全局抽签池**，而不是走 `<NextBehaviorList>`。内置 pack 的 `SitAndFaceMouse` 用 `Add="false"` 只能重选自己或 `SitWhileDanglingLegs`，是闭链——宠物坐下后就再也出不来 |
-| `interactionCooldownTicks` | `number` | **刚互动完的冷却**：这段时间内"需要伙伴的行为"从候选池里拿掉。缺省 `0`。没有它，两只抱完还贴在一起，下一次抽取立刻又连上（实测间隔 **0.1 秒**），会连续抱个不停 |
-| `maxTravelPx` | `number` | 水平「游走型」目标的最大距离（px）。指向边界的目标（走过去爬墙那种）不受影响，否则会破坏后续动作 |
-| `partnerWeights` | `{ alone, withPartner, reachable }` | **需要伙伴的行为**（抱/扔/等抱/注意掉落）专用权重：单只时用 `alone`，场上有伙伴时 `withPartner`，对方同高度且在扫描半径内时 `reachable`（见下文） |
-| `scanDistancePx` | `number` | 「找伙伴」的搜索半径（px），缺省 256（libshijima 为桌面选的）。网页更宽，调大才能让两只宠物互相发现 |
-| `zone` | `{ left, right, top, bottom }` | 宠物活动矩形；它会成为宠物的**工作区**，地板/墙/天花板、以及所有边界夹紧都跟着变 |
-| `spawn` | `{ vertical, x, topOffset, staggerPx }` | 启动位置与多只宠物之间的错开 |
-| `respectReducedMotion` | `boolean` | 缺省 `true`：跟随系统「减少动态效果」偏好，并监听其变化 |
-| `reducedMotion` | `MascotAnimationOptions` | 上述偏好开启时，叠加在 `defaults` 之上的一组选项（内容由宿主决定） |
+### 全参数规格与约束
 
-### 位置取值（`zone` 与 `spawn.x` 通用）
-
-像素数字 `240`；百分比字符串 `"40%"`；或关键字 `left` / `right` / `top` / `bottom` / `center`。
-
-### 合并优先级
-
-`defaults` → （若系统要求减少动态）`reducedMotion` → `mascots.<名字>`。
-
-- 对象型字段（`behaviorWeights`、`actionDurations`、`zone`、`spawn`、`partnerWeights`）**按 key 合并**；
-- 数组与数值（`allowBehaviors`、`denyBehaviors`、`durationScale`、`forcedSwitchTicks`、
-  `pacerExemptBehaviors`、`exitToPoolBehaviors`、`maxBehaviorTicks`、`maxTravelPx`、`scanDistancePx`）
-  **整体替换**——所以 `reducedMotion` 里写 `denyBehaviors` 时要自己把 `defaults` 的项一并列出。
-
-### 取值范围与校验
-
-- `durationScale` 限制在 `0.05 ~ 20`；tick 数限制在 `1 ~ 1000000`；`scanDistancePx` 限制在 `16 ~ 4096`；
-  非数字/负数会被忽略（该字段退回默认，其余字段照常生效）；
-- `[min,max]` 顺序写反会自动交换；`min == max` 会存成单个数字；
-- 未知字段（如 `_readme`、`_example`）被忽略；未知行为/动作名保留但不匹配（方便先写配置后加动作）。
+| 字段 | 类型 | 单位 | 有效区间 | Classic (Qt) | Lively (活跃) | 功能说明与约束边界 |
+|---|---|---|---|---|---|---|
+| `preset` | `string` | 字符串 | 已注册预设名 | `"classic"` | `"lively"` | **基底预设**：决定底层继承哪套行为策略。 |
+| `forcedSwitchTicks` | `number` | ticks (40ms) | `0 ~ 1,000,000` | `0` (关闭) | `200` (8s) | **节奏调节器**：原地不动超过此 ticks 强制抽选带位移的行为。`0` 表示不催促（原版桌宠会静坐发呆 20~60s）。 |
+| `maxBehaviorTicks` | `number` | ticks (40ms) | `0 ~ 1,000,000` | `0` (无上限) | `1100` (44s) | **行为硬上限**：防止单个爬墙、爬行行为无限霸屏。掉落和拖拽不受此限。 |
+| `pacerExemptBehaviors` | `string[]` | 数组 | 行为名 | `[]` | `["SitWhileDanglingLegs"]` | **节奏调节器豁免名单**：虽然物理位移为 0，但属于有帧播放的长静止动画序列，防止被 Pacer 拦腰截断。 |
+| `exitToPoolBehaviors` | `string[]` | 数组 | 行为名 | `[]` | `["SitWhileDanglingLegs"]` | **闭环打破名单**：原版 XML 中部分行为（如坐下）使用 `Add="false"` 形成死循环；列入此名单的行为执行完强制回全局池抽签。 |
+| `behaviorWeights` | `Record<string, number>` | 字典 | `0 ~ 100,000` | `{}` (原生) | `{ SitWhileDanglingLegs: 150, SitAndFaceMouse: 8 }` | **行为选择权重覆盖**：覆盖 XML 中的 `Frequency`。`0` = 禁用；正数提高抽取概率。 |
+| `actionDurations` | `Record<string, number \| [min,max]>` | ticks (40ms) | `1 ~ 1,000,000` | `{}` (原生) | `{}` | **动作停留时长固定/范围覆盖**：覆盖 XML 中 Stay 类动作的 `Duration`。 |
+| `durationScale` | `number` | 浮点数 | `0.05 ~ 20.0` | `1.0` (原速) | `1.0` | **全局时长缩放倍率**：按比例缩放 XML 自带的所有 Stay 动作持续时间。 |
+| `scale` | `number` | 浮点数 | `0.2 ~ 4.0` | `1.0` (原尺寸) | `1.0` | **宠物视口渲染尺寸缩放**：1.0 = 原生 128px 贴图大小。引擎内部保持 1:1 虚拟坐标计算。 |
+| `maxTravelPx` | `number` | px | `10 ~ 100,000` | `0` (不限制) | `0` (不限制) | **水平漫游最大距离**：限制随机游走步长，防止横穿全屏破坏排版。爬墙等边界目标不受此限。 |
+| `interactionCooldownTicks` | `number` | ticks (40ms) | `0 ~ 100,000` | `0` | `0` | **互动冷却时间**：完成一次互动（如拥抱）后的冷却期，防止两只宠物贴身无限连续拥抱。 |
+| `scanDistancePx` | `number` | px | `16 ~ 4,096` | `256` | `256` | **伙伴搜索半径**：扫描附近可互动伙伴的有效直线距离。 |
+| `partnerWeights` | `{alone, withPartner, reachable}` | 对象 | `0 ~ 100,000` | `{}` | `{alone: 40, withPartner: 150, reachable: 1800}` | **伙伴互动场景权重**：根据“单只独处”、“同场有伴”、“同高度且在搜索半径内”三档动态调节互动欲望。 |
+| `allowBehaviors` | `string[]` | 数组 | 行为名 | `[]` (全允许) | `[]` (全允许) | **行为白名单**：只允许出现列表内的行为。 |
+| `denyBehaviors` | `string[]` | 数组 | 行为名 | `[]` (无禁用) | `[]` (无禁用) | **行为黑名单**：永不出现列表内的行为，优先级高于白名单。 |
+| `spawn` | `{ vertical, x, topOffset, staggerPx }` | 对象 | 复合结构 | `{ topOffset: 100, staggerPx: 180 }` | `{ topOffset: 100, staggerPx: 180 }` | **生成位置**：`vertical` 可选 `"top"` 或 `"floor"`；`staggerPx` 为多只生成时的错开位移（防重叠）。 |
+| `zone` | `{ left, right, top, bottom }` | 对象 | 复合结构 | 全视口 | 全视口 | **活动限制区域**：将宠物的生活区域约束在指定盒子内。 |
+| `ignoreBuiltin` | `boolean` | 布尔值 | `true / false` | `@deprecated` | `@deprecated` | **向后兼容字段**：旧代码设置 `ignoreBuiltin: true` 等价于自动切换至 `"classic"` 预设。 |
 
 ## 两个上限的分工（重要）
 
@@ -331,7 +303,101 @@ on=Floor n=11 total=830  partnerShare=0.0%     ← 强制移动时的池子：�
 | 地板时间 | 93–95% | **96–98%** |
 | 完成的互动 | 3 次 / 5.6 分 | 2 次 / 5.4 分（`reachable` 期间仍约每 1 分钟一次） |
 
-## 示例
+## 标准配置表完整样例（全字段注释）
+
+你可以直接复制以下结构保存为 `animation.config.json`，按需修改对应项：
+
+```jsonc
+{
+  "version": 1,
+  // 基础预设："lively"（活跃预设，默认）或 "classic"（Qt桌面桌宠原版）
+  "preset": "lively",
+  // 是否跟随系统减少动效偏好 (boolean)
+  "respectReducedMotion": true,
+
+  "defaults": {
+    // ---------------- 1. 节奏与移动控制 ----------------
+    // [forcedSwitchTicks] 静止超过 N ticks 强制找移动行为 (ticks, 1tick=40ms, 200=8s, 0=关闭)
+    // Classic 推荐 0（还原20-60秒静坐），Lively 推荐 200
+    "forcedSwitchTicks": 200,
+
+    // [maxBehaviorTicks] 单个行为最长持续 ticks，防超长挂墙/爬行 (ticks, 0=无上限)
+    // Classic 推荐 0，Lively 推荐 1100 (44s)
+    "maxBehaviorTicks": 1100,
+
+    // [pacerExemptBehaviors] 节奏调节器豁免名单（位移为0但本身在播放的长动画）
+    "pacerExemptBehaviors": ["SitWhileDanglingLegs"],
+
+    // [exitToPoolBehaviors] 行为结束后强制返回全局抽签池（打破XML坐姿死循环）
+    "exitToPoolBehaviors": ["SitWhileDanglingLegs"],
+
+    // [maxTravelPx] 横向漫游最大距离，防止横穿全屏破坏网页正文排版 (px, 0=不限制)
+    "maxTravelPx": 240,
+
+    // ---------------- 2. 行为选择与动作时长 ----------------
+    // [behaviorWeights] 覆盖 XML 中的 <Behavior Frequency="..."> (0=禁用, >0提高概率)
+    "behaviorWeights": {
+      "SitWhileDanglingLegs": 150,
+      "SitAndFaceMouse": 8
+    },
+
+    // [actionDurations] 覆盖 XML 中 Stay 动作的持续时间，可写数字或 [min, max] (ticks)
+    "actionDurations": {
+      // "Sit": [80, 150]
+    },
+
+    // [durationScale] 全局动作时长倍率，等比缩放 XML 中所有的 Stay 动作时长 (0.05 ~ 20.0)
+    "durationScale": 1.0,
+
+    // [allowBehaviors] 白名单：只允许抽选列表内的行为（缺省/空=全部允许）
+    "allowBehaviors": [],
+
+    // [denyBehaviors] 黑名单：永不抽选列表内的行为
+    "denyBehaviors": [],
+
+    // ---------------- 3. 尺寸与生成几何 ----------------
+    // [scale] 宠物视口渲染缩放倍率 (0.2 ~ 4.0, 1.0=128px原生贴图)
+    "scale": 1.0,
+
+    // [spawn] 生成位置与错开
+    "spawn": {
+      "vertical": "top", // "top" 顶部落下，"floor" 地板起步
+      "x": "center", // 水平位置：像素(如 300)、百分比(如 "50%") 或 "center"/"left"/"right"
+      "topOffset": 100, // 顶部落下时的起始下落偏移 (px)
+      "staggerPx": 180 // 多只同时生成时的错位间距 (px, >128防重叠)
+    },
+
+    // [zone] 活动限制区域 (工作区盒模型，px / % / 关键字)
+    // "zone": { "left": 0, "right": "100%", "top": 0, "bottom": "100%" },
+
+    // ---------------- 4. 伙伴与双宠互动 ----------------
+    // [scanDistancePx] 寻找伙伴的扫描半径 (16 ~ 4096 px, 默认 256)
+    "scanDistancePx": 256,
+
+    // [interactionCooldownTicks] 完成一次互动后的冷却 ticks，防贴脸无限连击
+    "interactionCooldownTicks": 0,
+
+    // [partnerWeights] 伙伴互动动作的场景权重 (alone / withPartner / reachable)
+    "partnerWeights": {
+      "alone": 40,
+      "withPartner": 150,
+      "reachable": 1800
+    }
+  },
+
+  "mascots": {
+    // 针对特定宠物名称的个性化覆盖 (按 key 合并 defaults)
+    // "Neuron": {},
+    // "Eviling": {}
+  },
+
+  "reducedMotion": {
+    // 系统开启减弱动态效果时额外叠加的配置
+  }
+}
+```
+
+## 场景定制示例
 
 **只让它在地板上跑和坐，坐得短一点，每 8 秒必须动一次：**
 

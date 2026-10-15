@@ -46,7 +46,11 @@ attach({ console: true });               // 观测日志：宠物移动史
 | 导出 | 签名 | 一句话 | 详见 |
 | --- | --- | --- | --- |
 | `createMascot` | `(options: MascotOptions) => Promise<Mascot>` | 创建并挂载一只宠物，解析完 pack 且画出首帧后 resolve | 3.2 |
-| `configure` | `(options: MascotConfig) => void` | **打包环境必须**（在 `createMascot()` 之前）：资源根 / 动画配置 / 物理参数 | 3.1 |
+| `configure` | `(options: MascotConfig) => void` | **打包环境必须**（在 `createMascot()` 之前）：资源根 / 预设名 / 动画配置 / 物理参数 | 3.1 |
+| `PresetRegistry` | `class` | 动画行为预设注册中心（注册、获取、切换预设） | 3.6 |
+| `registerPreset` | `(name: string, preset: MascotAnimationOptions) => void` | 便捷注册动画配置预设 | 3.6 |
+| `usePreset` | `(name: string) => void` | 便捷切换全局当前激活预设 | 3.6 |
+| `getPreset` | `(name: string) => MascotAnimationOptions \| undefined` | 获取已注册预设的配置深拷贝 | 3.6 |
 | `Mascot` | `class` | 一只已挂载的宠物 | 3.3 |
 | `Mascot.engine` | `MascotEngine` | 引擎实例，取仿真状态（`snapshot()` / `position()`）用 | 3.3 |
 | `Mascot.label` | `string` | 稳定标识，形如 `1-Neuron` | 3.3 |
@@ -70,8 +74,11 @@ attach({ console: true });               // 观测日志：宠物移动史
 | `ViewportHost` | `class` | 全屏 Shadow DOM 隔离视口与占位图管理 | 3.6 |
 | `AnimationConfig` | `class` | 高级用法，**不承诺稳定** | 3.4 |
 | `BroadcastManager` | `class` | 高级用法，**不承诺稳定** | 3.4 |
+| `CLASSIC_ANIMATION_PRESET` | `MascotAnimationOptions` | 纯净 Qt 移植行为基线预设（`{}`） | 3.6 |
+| `LIVELY_ANIMATION_PRESET` | `MascotAnimationOptions` | 网页偏活跃默认预设（含防发呆与出池断环） | 3.6 |
+| `STANDARD_CONFIG_SAMPLE` | `AnimationPresetFile` | 标准化配置样例文档对象 | 3.6 |
 
-类型：`MascotOptions`、`MascotConfig`、`MascotGroupSpawnOptions`、`RuntimeOptions`、`RuntimeSnapshot`、`Pose`、`ActionNode`、`Behavior`、`Hotspot`、`EngineEvent`、`EngineObserver`、`MascotPackInput`、`ImportMascotPackOptions`、`ImportedMascotPack`、`MascotPackData`、`ShimejiFinderResult`、`ShimejiPackEntry`、`ShimejiWarning`。
+类型：`MascotOptions`、`MascotConfig`、`MascotGroupSpawnOptions`、`RuntimeOptions`、`RuntimeSnapshot`、`MascotAnimationOptions`、`AnimationPresetFile`、`Pose`、`ActionNode`、`Behavior`、`Hotspot`、`EngineEvent`、`EngineObserver`、`MascotPackInput`、`ImportMascotPackOptions`、`ImportedMascotPack`、`MascotPackData`、`ShimejiFinderResult`、`ShimejiPackEntry`、`ShimejiWarning`。
 
 ### 开发工具入口 `web-mascot/devtools`（13 个值 + 8 个类型）
 
@@ -180,8 +187,9 @@ function configure(options: MascotConfig): void
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `assets` | `string?` | 含每个 pack 目录的基址，**不带结尾斜杠**。**打包环境必须给出**；只在未打包环境下可省略（那时才用推导值 `PACK_BASE_URL`）。**当前是全局设置**：页面内所有宠物共用一个资源根 |
-| `animationConfigUrl` | `string?` | 动画配置文件 URL。省略则每页探测一次默认路径 `/animation.config.json`；文件不存在不报错，内置预设继续生效 |
-| `ignoreBuiltin` | `boolean?` | 设为 `true` 丢弃内置预设，回到 pack 原生行为（无 pacer、无权重覆盖、无长序列豁免）。默认 `false`。与 `animationConfigUrl` 正交：它拿掉的是**最底层**，不会禁用文件 |
+| `preset` | `string?` | 指定生效的动画预设名称。内置 `"lively"`（网页活跃默认预设）与 `"classic"`（纯净 Qt 移植无覆盖预设），支持传注册中心中的自定义预设名 |
+| `animationConfigUrl` | `string?` | 动画配置文件 URL。省略则每页探测一次默认路径 `/animation.config.json`；文件不存在不报错，所选预设继续生效 |
+| `ignoreBuiltin` | `boolean?` | *(已废弃，建议用 `preset: "classic"`)*。若为 `true`，等价于切换至经典基线预设 |
 | `runtime` | `RuntimeOptions?` | 仿真调参，见 3.5 |
 
 日志**不在这里**配置：观测日志走 `web-mascot/devtools` 的 `attach()`，库诊断走 `configureLogging()`（见第 4 节）。
@@ -189,9 +197,9 @@ function configure(options: MascotConfig): void
 行为与约束：
 
 - `assets` 在**创建每只宠物时被快照**：之后再调用 `configure()` 不会影响已存在的宠物，也不会让同一页面里的宠物读到不同 pack。
+- `preset` 可以在全局通过 `configure({ preset })` 或 `usePreset(name)` 设置，也可以在单个 `MascotEngine` 上通过 `engine.setPreset(name)` 独立切换。
 - `animationConfigUrl` 遵循同一规则（快照于首次生效）。这不影响 `runtime`——运行参数是**每 tick 读取**的，改了立刻对已有宠物生效。
 - 全部字段可选，且多次调用会合并；只传 `runtime` 不会清掉之前的 `assets`。
-- `ignoreBuiltin` 是**页面级**偏好：设过之后，后续加载的配置文件也不会把它顶掉；文件里的 `ignoreBuiltin` 只在页面没有显式设置时生效。
 
 > **虚拟包优先机制**：`configure({ assets })` 指定的是 HTTP 静态服务下的全局资源根路径。若要加载任意第三方或用户上传的宠物模型，推荐使用 `importMascotPack()` 或 `registerMascotPack()`。注册到内存注册中心（`PackRegistry`）的虚拟模型**优先于静态 HTTP 目录**被引擎读取，不同宠物无需存放在同一资源目录下，亦支持通过同名覆盖内置的 `"Neuron"` 或 `"Eviling"`。
 
@@ -252,25 +260,50 @@ function createMascot(options: MascotOptions): Promise<Mascot>
 
 **故意不暴露**的常量：`MAX_FRAME_DELTA_MS`、`MAX_BEHAVIOR_INITS_PER_TICK`、`STALL_LIMIT_TICKS`。它们是防止 bug 锁死页面的安全阀，调低会把"表现问题"变成"宠物坏掉"。
 
-### 3.6 动画配置里的节奏字段
+### 3.6 动画配置与预设系统（PresetRegistry）
 
-这些不在 `configure()` 里，而是写在**动画配置文件**（`animationConfigUrl` 指向的 JSON，或引擎默认请求的 `/animation.config.json`）的 `defaults` / `mascots` 中。列在这里是因为它们与 3.5 的运行参数容易混淆：**3.5 改的是引擎物理，这里改的是行为选择**。
+引擎采用分层解耦的配置体系。**3.5 改的是底层物理，这里改的是行为编排与节奏**。
 
-生效优先级：`内置预设 → defaults → reducedMotion → mascots.<名字>`（逐字段合并，对象型字段按 key 叠加）。引擎**自带一套默认预设**（`src/core/animationPreset.ts`，同一份数据生成随包的 `dist/animation.config.json`）；`ignoreBuiltin: true` 把最底层整层拿掉，等价于 0.0.3 之前"什么都不配"的行为。
+#### 3.6.1 预设注册与切换
 
-| 字段 | 说明 |
-| --- | --- |
-| `forcedSwitchTicks` | 静止超过这么多 tick 就换行为（pacer）。"静止"按**位置是否变化**判定，所以速度为零的长序列也算静止 |
-| `pacerExemptBehaviors` | 上面这条的**例外名单**。列出的行为不会被 pacer 打断，让长静止动画播完；普通 `Stay` 仍按时被推动 |
-| `maxBehaviorTicks` | 单个行为的**硬上限**，超时即换（掉落/拖拽除外）。pacer 的豁免不影响它，所以豁免的行为也不会无限持续 |
-| `exitToPoolBehaviors` | 列出的行为结束时回到**全局抽签池**，而不是走 pack 的 `<NextBehaviorList>` |
-| `behaviorWeights` | 覆盖 pack 的 `Frequency`（0 = 禁用；给 `Frequency="0"` 的行为赋正值可打开它） |
-| `interactionCooldownTicks` | 互动结束后，需要伙伴的行为移出候选池这么多 tick |
-| `maxTravelPx` | 水平游走目标的最大距离（px）。0/缺省 = 不限 |
-| `durationScale` | 全局时长倍率（0.05–20），只作用于 XML 自带的 `Duration` |
-| `actionDurations` | 按动作名覆盖持续 tick 数，可写单值或 `[min,max]` |
+引擎内置了预设注册中心 `PresetRegistry`，内置两个平等预设：
+- `"lively"`（默认）：针对网页端优化的活跃预设，包含防发呆推动机制与闭环打破。
+- `"classic"`：纯净对齐 Qt / Shimeji-ee 桌面原版的基线预设（`{}`），不注入任何覆盖。
 
-**为什么需要后两个字段**：pack 用 `<NextBehaviorList Add="false">` 串接相关行为，而部分链是**闭链**。内置 pack 的 `SitAndFaceMouse` 只能重新选自己或 `SitWhileDanglingLegs`，宠物一旦坐下就再也出不来。所以"让长静止动画播完"必须和"播完回主池"一起用：
+```ts
+import { registerPreset, usePreset, getPreset, PresetRegistry } from "web-mascot";
+
+// 1. 获取已有预设进行派生微调
+const custom = getPreset("lively")!;
+custom.forcedSwitchTicks = 300; // 调整为静止 12 秒推动
+
+// 2. 注册自定义预设
+registerPreset("my-chill-pet", custom);
+
+// 3. 激活预设（全局切换）
+usePreset("my-chill-pet");
+
+// 也可在单个宠物实例引擎上独立切换
+mascot.engine.setPreset("classic");
+```
+
+生效优先级：`PresetRegistry 预设（如 lively / classic） → 静态 JSON defaults → reducedMotion → mascots.<名字>`（逐字段合并，对象型字段按 key 叠加）。
+
+#### 3.6.2 核心行为控制字段
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `forcedSwitchTicks` | `number` | 静止超过这么多 tick 就换行为（pacer）。"静止"按**位置是否变化**判定，所以速度为零的长序列也算静止 |
+| `pacerExemptBehaviors` | `string[]` | 上面这条的**例外名单**。列出的行为不会被 pacer 打断，让长静止动画完整播完；普通 `Stay` 仍按时被推动 |
+| `maxBehaviorTicks` | `number` | 单个行为的**硬上限**，超时即换（掉落/拖拽除外）。pacer 的豁免不影响它，所以豁免的行为也不会无限持续 |
+| `exitToPoolBehaviors` | `string[]` | 列出的行为结束时强制回到**全局抽签池**，而不是走 pack 的 `<NextBehaviorList>` |
+| `behaviorWeights` | `Record<string, number>` | 覆盖 pack 的 `Frequency`（0 = 禁用；给 `Frequency="0"` 的行为赋正值可打开它） |
+| `interactionCooldownTicks` | `number` | 互动结束后，需要伙伴的行为移出候选池这么多 tick |
+| `maxTravelPx` | `number` | 水平游走目标的最大距离（px）。0/缺省 = 不限 |
+| `durationScale` | `number` | 全局时长倍率（0.05–20），只作用于 XML 自带的 `Duration` |
+| `actionDurations` | `Record<string, number | [number, number]>` | 按动作名覆盖持续 tick 数，可写单值或 `[min,max]` |
+
+**为什么需要 pacer 与出池破环**：pack 用 `<NextBehaviorList Add="false">` 串接相关行为，部分链条是**自闭环**（如 `SitAndFaceMouse` $\leftrightarrow$ `SitWhileDanglingLegs`）。如果不配置出池破环，网页宠物坐下后可能永远无法站起走动。预设系统将这一逻辑标准化解耦：
 
 ```json
 {
@@ -282,6 +315,8 @@ function createMascot(options: MascotOptions): Promise<Mascot>
   }
 }
 ```
+
+更多参数细节、取值约束及完整标准配置样例，请参阅专门文档 [ANIMATION_CONFIG.md](ANIMATION_CONFIG.md)。
 
 ### 3.7 输入与手势（与 NeurolingsCE 对齐）
 
