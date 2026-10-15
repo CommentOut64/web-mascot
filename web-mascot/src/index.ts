@@ -189,6 +189,75 @@ export async function createMascot(options: MascotOptions): Promise<Mascot> {
   return new Mascot(engine);
 }
 
+import { ShimejiFinder } from "./core/ShimejiFinder.js";
+import type { ImportOptions, ShimejiWarning, ShimejiFinderResult } from "./core/ShimejiFinder.js";
+import { PackRegistry } from "./core/PackRegistry.js";
+import type { MascotPack, MascotPackMeta } from "./core/PackRegistry.js";
+
+export type MascotPackInput = File | Blob | ArrayBuffer | Uint8Array | string;
+export type ImportMascotPackOptions = ImportOptions;
+export type MascotPackData = MascotPack;
+
+export interface ImportedMascotPack {
+  name: string;
+  warnings: ShimejiWarning[];
+  data: MascotPack;
+  unregister: () => boolean;
+  toString(): string;
+  valueOf(): string;
+}
+
+/**
+ * Quickly import and register a custom mascot pack from a ZIP/mascot archive (File, Blob, ArrayBuffer, or URL).
+ * Automatically decompress, normalize XML and sprites in memory, and register it for use with createMascot().
+ *
+ * @param source ZIP/mascot archive file, blob, buffer, or fetchable URL.
+ * @param options Optional pack name override, replaceBuiltin, onWarning, or encoding options.
+ * @returns An ImportedMascotPack object containing { name, warnings, data, unregister }.
+ */
+export async function importMascotPack(
+  source: MascotPackInput,
+  options?: ImportOptions,
+): Promise<ImportedMascotPack> {
+  const result = await ShimejiFinder.analyze(source, options);
+  PackRegistry.register(result);
+
+  const packName = result.name;
+  return {
+    name: packName,
+    warnings: result.warnings,
+    data: result,
+    unregister: () => PackRegistry.unregister(packName),
+    toString() {
+      return packName;
+    },
+    valueOf() {
+      return packName;
+    },
+  };
+}
+
+/**
+ * Manually register a custom in-memory mascot pack.
+ */
+export function registerMascotPack(pack: MascotPack): void {
+  PackRegistry.register(pack);
+}
+
+/**
+ * Unregister a custom mascot pack and revoke all its in-memory Blob URLs.
+ */
+export function unregisterMascotPack(name: string): boolean {
+  return PackRegistry.unregister(name);
+}
+
+/**
+ * Check if a custom in-memory mascot pack is registered.
+ */
+export function hasMascotPack(name: string): boolean {
+  return PackRegistry.has(name);
+}
+
 export { MascotEngine } from "./core/MascotEngine.js";
 export { MascotGroup } from "./core/MascotGroup.js";
 export type { MascotGroupSpawnOptions } from "./core/MascotGroup.js";
@@ -197,6 +266,16 @@ export type { RuntimeOptions, RuntimeSnapshot } from "./core/MascotEngine.js";
 export { AnimationConfig } from "./core/AnimationConfig.js";
 export { BroadcastManager } from "./core/Broadcast.js";
 export { DEFAULT_PACK_BASE_URL, resolveAssetBase } from "./core/Assets.js";
+export { PackRegistry } from "./core/PackRegistry.js";
+export { ShimejiFinder, normalizeSpriteKey } from "./core/ShimejiFinder.js";
+export { translateShimejiXml } from "./core/Translator.js";
+export type {
+  MascotPack,
+  MascotPackMeta,
+  ImportOptions,
+  ShimejiWarning,
+  ShimejiFinderResult,
+};
 export type { EngineEvent, EngineObserver } from "./core/MascotEngine.js";
 export type { Pose, ActionNode, Behavior, RelaySnapshot, RelayVisualSnapshot, RelayFrameSnapshot } from "./core/types.js";
 export type { Hotspot } from "./core/Hotspot.js";

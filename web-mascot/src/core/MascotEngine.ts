@@ -8,9 +8,12 @@ import { evaluateExpression } from "./ExpressionEvaluator.js";
 import { loggerFor } from "./Logger.js";
 import type { Hotspot } from "./Hotspot.js";
 import type { ActionNode, AnimationVariant, Behavior, BehaviorReference, MascotConfig, Pose, RelaySnapshot } from "./types.js";
+import { PackRegistry } from "./PackRegistry.js";
+import { normalizeSpriteKey } from "./ShimejiFinder.js";
 
 const expressionLog = loggerFor("engine");
 const loggedExpressionFailures = new Set<string>();
+const warnedUnsupportedClasses = new Set<string>();
 
 /**
  * Runtime tuning. Every field here is a *number the simulation reads*, exposed so a
@@ -1180,11 +1183,20 @@ export class MascotEngine {
     // Customisation is read first so the very first tick already obeys it.
     await MascotEngine.loadAnimationConfig();
     options?.signal?.throwIfAborted();
-    this.config = await XMLParser.loadConfig(
-      this.mascotName,
-      this.packBaseUrl,
-      options?.signal,
-    );
+    const registeredPack = PackRegistry.get(this.mascotName);
+    if (registeredPack) {
+      this.config = XMLParser.parseRawConfig(
+        registeredPack.actionsXml,
+        registeredPack.behaviorsXml,
+        this.mascotName,
+      );
+    } else {
+      this.config = await XMLParser.loadConfig(
+        this.mascotName,
+        this.packBaseUrl,
+        options?.signal,
+      );
+    }
     // Both awaits above are network-bound, so `destroy()` can legitimately have run
     // in between. Continuing would re-register a dead engine and re-attach its DOM,
     // leaving a zombie mascot that nothing can ever remove.
@@ -1250,9 +1262,22 @@ export class MascotEngine {
       this.loopId = requestAnimationFrame((t) => this.loop(t));
   }
 
-  /** URL of a pack sprite. */
+  /** URL of a pack sprite. Supports in-memory PackRegistry, path normalization, and HTTP fallback. */
   private spriteUrl(image: string): string {
-    return `${this.packBaseUrl}/img${image}`;
+    const registered = PackRegistry.get(this.mascotName);
+    if (registered) {
+      const key = normalizeSpriteKey(image);
+      const url = registered.sprites.get(key) || registered.sprites.get(image);
+      if (url) return url;
+      console.warn(
+        `[web-mascot] Sprite "${image}" (key: "${key}") not found in registered pack "${this.mascotName}"`,
+      );
+    }
+    const clean = image.replace(/^[/\\]+/, "");
+    const subPath = clean.toLowerCase().startsWith("img/")
+      ? clean.slice(4).replace(/^[/\\]+/, "")
+      : clean;
+    return `${this.packBaseUrl}/img/${subPath}`;
   }
 
   /**
@@ -1298,6 +1323,21 @@ export class MascotEngine {
       if (!this.elImg.naturalWidth)
         throw new Error("First sprite has no bitmap");
       this.applySpriteIntrinsicSize();
+    } catch (err) {
+      // Fallback: try default shime1.png if the original image was not shime1.png
+      if (pose?.image !== "/shime1.png" && pose?.image !== "shime1.png") {
+        try {
+          this.elImg.src = this.spriteUrl("/shime1.png");
+          await this.elImg.decode();
+          if (this.elImg.naturalWidth) {
+            this.applySpriteIntrinsicSize();
+            return;
+          }
+        } catch {
+          // fallback failed too, rethrow original error below
+        }
+      }
+      throw err;
     } finally {
       window.clearTimeout(timer);
     }
@@ -2909,6 +2949,23 @@ export class MascotEngine {
       return;
     }
 
+    if (node.className && !warnedUnsupportedClasses.has(node.className)) {
+      if (
+        node.className.endsWith(".ThrowIE") ||
+        node.className.endsWith(".ThrowWindow") ||
+        node.className.endsWith(".WalkWithIE") ||
+        node.className.endsWith(".PullWindow") ||
+        node.className.endsWith(".FallWithIE") ||
+        node.className.endsWith(".Breed") ||
+        node.className.endsWith(".Divide")
+      ) {
+        warnedUnsupportedClasses.add(node.className);
+        console.warn(
+          `[web-mascot] Action "${node.name ?? node.className}" uses desktop-specific class "${node.className}", which is gracefully degraded on web.`,
+        );
+      }
+    }
+
     if (node.className?.endsWith(".Look") || node.name === "Look") {
       // libshijima's look::tick(): looking_right = get_bool("LookRight", !looking_right),
       // so a Look without the attribute flips the mascot around.
@@ -3189,7 +3246,11 @@ export class MascotEngine {
    *  itself (and the embedded Fall class) counts here. */
   private isFallLike(node: ActionNode | undefined) {
     if (!node) return false;
-    return !!node.className?.endsWith(".Fall") || node.name === "Falling";
+    return (
+      !!node.className?.endsWith(".Fall") ||
+      !!node.className?.endsWith(".FallWithIE") ||
+      node.name === "Falling"
+    );
   }
 
   /** Actions that end when they reach their target. */
@@ -3243,7 +3304,10 @@ export class MascotEngine {
 
   /** Actions whose mascot-level feature this port does not implement. */
   private isUnsupportedAction(node: ActionNode | undefined) {
-    return !!node?.className?.endsWith(".Breed");
+    return (
+      !!node?.className?.endsWith(".Breed") ||
+      !!node?.className?.endsWith(".Divide")
+    );
   }
 
   private actionTreeMatches(
