@@ -51,6 +51,14 @@ attach({ console: true });               // 观测日志：宠物移动史
 | `Mascot.engine` | `MascotEngine` | 引擎实例，取仿真状态（`snapshot()` / `position()`）用 | 3.3 |
 | `Mascot.label` | `string` | 稳定标识，形如 `1-Neuron` | 3.3 |
 | `Mascot.destroy` | `() => void` | 移除宠物，释放 DOM / 定时器 / 监听器；**可重复调用** | 3.3 |
+| `importMascotPack` | `(input: MascotPackInput, options?: ImportMascotPackOptions) => Promise<ImportedMascotPack>` | 导入 Shimeji ZIP / Blob / URL 资源包，注册为虚拟模型 | 3.8 |
+| `registerMascotPack` | `(pack: MascotPackData) => void` | 注册自定义虚拟模型数据（支持替换内置模型） | 3.8 |
+| `unregisterMascotPack` | `(name: string) => void` | 注销虚拟模型并释放 Blob URL 内存 | 3.8 |
+| `hasMascotPack` | `(name: string) => boolean` | 查询是否已注册虚拟模型 | 3.8 |
+| `PackRegistry` | `class` | 虚拟模型包内存注册中心 | 3.8 |
+| `ShimejiFinder` | `class` | 纯前端 Shimeji 资源包解压与解析器 | 3.8 |
+| `translateShimejiXml` | `(xmlString: string) => string` | 日文 Shimeji XML 标签/属性/值翻译器 | 3.8 |
+| `normalizeSpriteKey` | `(raw: string) => string` | 精灵图片路径规范化工具函数 | 3.8 |
 | `assetBaseUrl` | `() => string` | 当前**生效**的资源基址（推导值或被覆盖值） | 3.4 |
 | `runtimeOptions` | `() => RuntimeSnapshot` | 当前生效的运行参数（含默认值） | 3.4 / 3.5 |
 | `isConfigured` | `() => boolean` | 是否显式调用过 `configure()`，仅诊断 | 3.4 |
@@ -63,7 +71,7 @@ attach({ console: true });               // 观测日志：宠物移动史
 | `AnimationConfig` | `class` | 高级用法，**不承诺稳定** | 3.4 |
 | `BroadcastManager` | `class` | 高级用法，**不承诺稳定** | 3.4 |
 
-类型：`MascotOptions`、`MascotConfig`、`MascotGroupSpawnOptions`、`RuntimeOptions`、`RuntimeSnapshot`、`Pose`、`ActionNode`、`Behavior`、`Hotspot`、`EngineEvent`、`EngineObserver`。
+类型：`MascotOptions`、`MascotConfig`、`MascotGroupSpawnOptions`、`RuntimeOptions`、`RuntimeSnapshot`、`Pose`、`ActionNode`、`Behavior`、`Hotspot`、`EngineEvent`、`EngineObserver`、`MascotPackInput`、`ImportMascotPackOptions`、`ImportedMascotPack`、`MascotPackData`、`ShimejiFinderResult`、`ShimejiPackEntry`、`ShimejiWarning`。
 
 ### 开发工具入口 `web-mascot/devtools`（13 个值 + 8 个类型）
 
@@ -185,7 +193,7 @@ function configure(options: MascotConfig): void
 - 全部字段可选，且多次调用会合并；只传 `runtime` 不会清掉之前的 `assets`。
 - `ignoreBuiltin` 是**页面级**偏好：设过之后，后续加载的配置文件也不会把它顶掉；文件里的 `ignoreBuiltin` 只在页面没有显式设置时生效。
 
-> **当前限制与路线图**：`assets` 是**全局**的（`MascotEngine.packBaseUrl` 是静态字段），所以"内置的 Neuron + 你自己放在别处的 MyPet"目前要求两者的 pack 目录位于同一个资源根下（把内置 pack 拷到你的静态目录即可）。**按宠物单独指定资源根在路线图上**，届时 `MascotOptions` 会新增可选的 `assets`，优先级为 per-mascot > 全局 > 推导默认值——纯追加，不会影响现在写好的代码。
+> **虚拟包优先机制**：`configure({ assets })` 指定的是 HTTP 静态服务下的全局资源根路径。若要加载任意第三方或用户上传的宠物模型，推荐使用 `importMascotPack()` 或 `registerMascotPack()`。注册到内存注册中心（`PackRegistry`）的虚拟模型**优先于静态 HTTP 目录**被引擎读取，不同宠物无需存放在同一资源目录下，亦支持通过同名覆盖内置的 `"Neuron"` 或 `"Eviling"`。
 
 ### 3.2 `createMascot(options)`
 
@@ -291,6 +299,72 @@ function createMascot(options: MascotOptions): Promise<Mascot>
 hotspot 来自 pack 的 `actions.xml`（`<Hotspot Shape/Origin/Size Behavior>`），随当前动画变化；动画配置的 `denyBehaviors` 依旧过滤它们。
 
 被抓起时：锚点 = **局部光标** + `OffsetX/OffsetY`（缺省 `dragOffsetX/dragOffsetY`），局部光标在按下时播种，因此**抓在哪里就从哪里跟手**，不会跳到 pack 的固定握点。指针事件里即时重钉锚点、且拖拽期间不做绘制插值（Qt 每 10 ms 重钉一次，且 `dragged::requests_interpolation() == false`），所以高速拖动不会落后于指针。`Resisting` 期间锚点不跟随（`resist::tick` 只比较），光标离开 `dragResistAbortPx` 即中止挣扎。
+
+### 3.8 自定义资源包导入与虚拟注册中心（Shimeji-ee / 日版 Shimeji 兼容）
+
+`web-mascot` 提供了纯 TypeScript 移植的 Shimeji 资源包解析与虚拟注册方案（基于 `fflate/browser`），能够在纯前端环境解压与加载任何通用 Shimeji 资源包。
+
+#### 3.8.1 `importMascotPack(input, options?)`
+
+```ts
+function importMascotPack(
+  input: File | Blob | ArrayBuffer | Uint8Array | string,
+  options?: ImportMascotPackOptions
+): Promise<ImportedMascotPack>
+```
+
+- **参数 `input`**：
+  - 可以是用户通过 `<input type="file">` 选取的 `File` 或 `Blob`。
+  - 可以是二进制 `ArrayBuffer` 或 `Uint8Array`。
+  - 可以是远程 ZIP 包的 URL 字符串（自动通过 `fetch` 下载）。
+- **参数 `options`**（可选）：
+  - `name?: string`：指定模型名称。若不指定，将自动从 ZIP 内的主目录名（或文件名前缀）推导。
+  - `replaceBuiltin?: boolean`：若名称与内置模型（如 `"Neuron"`、`"Eviling"`）冲突，是否允许替换。默认为 `true`。
+  - `onWarning?: (warning: ShimejiWarning) => void`：自定义警告监听器。若未提供，不兼容动作等警告将直接通过 `console.warn` 输出。
+- **返回值 `Promise<ImportedMascotPack>`**：
+  - `name: string`：注册后的模型名，可直接传给 `createMascot({ pack: name })` 或 `MascotGroup.spawn()`。
+  - `warnings: ShimejiWarning[]`：解析与降级过程产生的所有警告列表。
+  - `data: MascotPackData`：已注册的虚拟模型元数据（含 Blob URL 映射表）。
+  - `unregister: () => void`：一键注销函数（等价于 `unregisterMascotPack(name)`）。
+
+**使用示例**：
+
+```ts
+import { importMascotPack, createMascot } from "web-mascot";
+
+// 用户上传 zip 文件或传入 URL
+const { name, warnings, unregister } = await importMascotPack(fileOrUrl);
+
+// 挂载自定义模型（所有现有 API 完全无缝支持）
+const mascot = await createMascot({ container: document.body, pack: name });
+
+// 页面离开或不再需要时注销并释放 Blob URL 内存
+// unregister();
+```
+
+#### 3.8.2 `PackRegistry` 与内存模型生命周期
+
+```ts
+import { registerMascotPack, unregisterMascotPack, hasMascotPack, PackRegistry } from "web-mascot";
+```
+
+- `PackRegistry.register(pack: MascotPackData)`：底层注册 API。
+- `PackRegistry.unregister(name: string)`：注销指定名称的模型包，**并自动调用 `URL.revokeObjectURL()` 释放所有精灵图片占用的内存**，防止长时间运行导致内存泄漏。
+- `PackRegistry.has(name: string)`：检查指定名称的虚拟模型是否存在。
+- **替换内置模型**：只需导入或注册同名包（例如 `name: "Neuron"`），引擎在后续调用 `createMascot({ pack: "Neuron" })` 时便会自动优先读取新模型资源，而原有测试用例和控制逻辑保持原样。
+
+#### 3.8.3 格式兼容性与动作优雅降级
+
+1. **目录结构兼容**：
+   - 支持 Shimeji-ee 经典规范（`conf/actions.xml`、`conf/behaviors.xml`、`img/shime*.png`）。
+   - 支持扁平化结构（XML 位于根目录，`img/` 存放精灵）。
+   - 支持忽略大小写的精灵文件名、去除或补充 `.png` 扩展名。
+2. **日文 XML 自动翻译**：
+   - 自动翻译原版日文 XML 标签与属性（如 `<マスコット>`, `<動作>`, `<ポーズ>`, `画像`, `基準座標`, `枠`, `地面` 等），支持 Shift-JIS / UTF-8 编码自动探测。
+3. **46 帧无 XML 皮肤包合成**：
+   - 对于只有 46 张连续帧图片（`shime1.png` ~ `shime46.png`）的古早 Shimeji 资源包，自动为其注入官方通用的 `default_actions.xml` 和 `default_behaviors.xml` 模版，确保正常渲染与移动。
+4. **桌面动作优雅降级**：
+   - 网页环境无法操控系统窗口，对于 `ThrowIE`、`ThrowWindow`、`WalkWithIE`、`PullWindow`、`FallWithIE`、`Breed`、`Divide` 等桌面/克隆动作，引擎会自动降级为等价的常规动作（如 `Fall`、`Walk`、`Stand`）并输出诊断 warning，绝不抛出异常中断渲染。
 
 ## 4. 开发工具入口 `web-mascot/devtools`
 
