@@ -36,8 +36,9 @@ function engineFixture(options = {}) {
   const module = { exports: {} };
   const window = { innerWidth: 1000, innerHeight: 600, scrollY: 0,
     addEventListener(name, callback) { events.set(name, callback); }, setTimeout, clearTimeout };
-  vm.runInNewContext(options.api ? apiCode : engineCode, { module, exports: module.exports, console, performance,
-    window, document: { hidden: false, createElement: () => new Element(), addEventListener() {} },
+  const document = { hidden: false, createElement: () => new Element(), addEventListener() {} };
+  vm.runInNewContext(options.api ? apiCode : engineCode, { module, exports: module.exports, console,
+    performance: options.performance ?? performance, window, document,
     AbortController, fetch: options.fetch,
     requestAnimationFrame: () => ++rafs, cancelAnimationFrame() {} });
   const Engine = module.exports.MascotEngine;
@@ -64,7 +65,7 @@ function engineFixture(options = {}) {
     Engine.liveEngines.add(engine);
     return engine;
   };
-  return { make, config, window, leaf, reference, events, Engine,
+  return { make, config, window, document, leaf, reference, events, Engine,
     createMascot: module.exports.createMascot, rafs: () => rafs };
 }
 
@@ -149,15 +150,48 @@ test("opposing scroll before paint cancels instead of inventing a floor fall", (
   assert.equal(engine.y, 600); assert.equal(engine.currentBehavior.name, "StandUp");
 });
 
-test("camera movement onto the floor establishes support without a physical impact", () => {
-  const f = engineFixture(); const engine = falling(f, 500, 590, 0, 8);
+test("upward scroll meeting falling mascot triggers physical floor landing impact", () => {
+  const f = engineFixture();
+  f.config.actions.Land = { ...f.leaf("Land", "Animate"), borderType: "Floor" };
+  f.config.actions.Fall.children.push(f.reference("Land"));
+  const engine = falling(f, 500, 590, 0, 8);
   const events = []; f.Engine.addObserver((_, event) => events.push(event));
   engine.handleExternalScroll(-20); engine.tick();
   assert.equal(engine.y, 600); assert.equal(engine.prevY, 600);
-  assert.equal(engine.currentBehavior.name, "StandUp");
-  assert.equal(events.filter(e => e.name === "land").length, 0);
-  engine.handleExternalScroll(40); engine.tick();
-  assert.ok(engine.y < 600); assert.equal(engine.currentLeaf().name, "Falling");
+  assert.equal(engine.currentLeaf().name, "Land");
+  assert.equal(events.filter(e => e.name === "land").length, 1);
+});
+
+test("upward scroll releasing low wall climb lands with physical impact animation", () => {
+  const f = engineFixture();
+  f.config.actions.Land = { ...f.leaf("Land", "Animate"), borderType: "Floor" };
+  f.config.actions.Fall.children.push(f.reference("Land"));
+  f.config.actions.GrabWall.borderType = "Wall";
+  const engine = f.make();
+  engine.x = 0; engine.y = 590; engine.prevX = 0; engine.prevY = 590;
+  engine.setBehavior("HoldOntoWall", "test"); engine.advanceActionTree();
+  const events = []; f.Engine.addObserver((_, event) => events.push(event));
+  engine.handleExternalScroll(-20); engine.tick();
+  assert.equal(engine.y, 600);
+  assert.equal(engine.currentLeaf().name, "Land");
+  assert.equal(events.filter(e => e.name === "land").length, 1);
+});
+
+test("upward scroll on supported floor preserves standing without tripping", () => {
+  const f = engineFixture();
+  f.config.actions.Land = { ...f.leaf("Land", "Animate"), borderType: "Floor" };
+  f.config.actions.Fall.children.push(f.reference("Land"));
+  f.config.actions.Stand.borderType = "Floor";
+  const engine = f.make();
+  const events = []; f.Engine.addObserver((_, event) => events.push(event));
+  for (let i = 0; i < 20; i++) {
+    engine.handleExternalScroll(-50);
+    engine.loop(16 * (i + 1));
+    engine.tick();
+    assert.equal(engine.y, 600);
+    assert.notEqual(engine.currentLeaf().name, "Land");
+    assert.equal(events.filter(e => e.name === "land").length, 0);
+  }
 });
 
 test("upward page scroll and internal container scroll preserve floor support", () => {
@@ -179,7 +213,7 @@ test("floor scroll converts screen pixels by scale and allows a large release ab
   other.tick(); assert.ok(other.y < 0 && other.y > -300);
 });
 
-test("floor release lands through the pack animation and starts anew only after regaining support", () => {
+test("floor release lands through the pack animation and fresh input can detach immediately", () => {
   const f = engineFixture(); f.config.actions.Land = { ...f.leaf("Land", "Animate"), borderType: "Floor" };
   f.config.actions.Fall.children.push(f.reference("Land"));
   const engine = f.make(); const events = []; f.Engine.addObserver((_, event) => events.push(event));
@@ -188,8 +222,184 @@ test("floor release lands through the pack animation and starts anew only after 
   for (let i = 0; i < 40 && engine.currentLeaf().name !== "Land"; i++) engine.tick();
   assert.equal(engine.y, 600); assert.equal(engine.currentLeaf().name, "Land");
   assert.equal(events.filter((e) => e.name === "land").length, 1);
+  f.events.get("wheel")({ deltaY: 60 });
   engine.handleExternalScroll(60); engine.applyScrollIntent();
   assert.equal(engine.y, 540); assert.equal(engine.currentLeaf().name, "Falling");
+});
+
+test("decaying document scroll lands once and advances beyond the first impact pose", () => {
+  for (const squash of [false, true]) {
+    let now = 0;
+    const f = engineFixture({ performance: { now: () => now } });
+    f.config.actions.Land = { ...f.leaf("Land", "Animate"), borderType: "Floor", poses: [
+      { ...f.config.actions.Stand.poses[0], image: "/impact-first.png", duration: 6 },
+      { ...f.config.actions.Stand.poses[0], image: "/impact-next.png", duration: 100 },
+    ] };
+    f.config.actions.Fall.children.push(f.reference("Land"));
+    const engine = falling(f, 500, 598, 0, 8); engine.setScrollSquash(squash);
+    const events = []; f.Engine.addObserver((_, event) => events.push(event));
+    const images = new Set();
+    for (let i = 0; i < 40; i++) {
+      now = (i + 1) * 16;
+      engine.handleExternalScroll(0.8 * 0.9 ** i); engine.loop(now);
+      images.add(engine.currentPose()?.image);
+      if (i >= 2) assert.equal(engine.y, 600, "the easing tail must preserve floor support");
+    }
+    assert.equal(events.filter(e => e.name === "land").length, 1);
+    assert.equal(engine.currentLeaf().name, "Land");
+    assert.ok(images.has("/impact-next.png"), "impact animation must advance without restarting");
+    assert.ok(engine.actionStack.at(-1).elapsed >= 6);
+  }
+});
+
+test("one eased notch has a visible fall regardless of the starting physics phase", () => {
+  for (const phase of [0, 8, 16, 24, 32, 39]) {
+    let now = 0;
+    const f = engineFixture({ performance: { now: () => now } });
+    f.config.actions.Land = { ...f.leaf("Land", "Animate"), borderType: "Floor" };
+    f.config.actions.Fall.children.push(f.reference("Land"));
+    const engine = f.make(); engine.accumulator = phase; engine.lastTime = 0;
+    const deltas = [1, 5, 10, 20, 20, 15, 10, 8, 5, 3, 2, 1];
+    const impacts = []; let height = 0;
+    f.Engine.addObserver((_, event) => { if (event.name === "land") impacts.push(now); });
+    for (let i = 0; i < 80; i++) {
+      now = (i + 1) * 16;
+      if (i < deltas.length) engine.handleExternalScroll(deltas[i]);
+      engine.loop(now); height = Math.max(height, 600 - engine.lastRenderedY);
+    }
+    assert.ok(height > 50, `phase=${phase}: a 100px notch must leave visible airtime, height=${height}`);
+    assert.equal(impacts.length, 1, `phase=${phase}: only the real landing emits impact`);
+    assert.ok(impacts[0] > 160, `phase=${phase}: the first tiny shift must not consume the notch`);
+  }
+});
+
+test("a subpixel scroll responds immediately then settles without an impact animation", () => {
+  let now = 0;
+  const f = engineFixture({ performance: { now: () => now } });
+  f.config.actions.Land = { ...f.leaf("Land", "Animate"), borderType: "Floor" };
+  f.config.actions.Fall.children.push(f.reference("Land"));
+  const engine = f.make(); engine.lastTime = 0; engine.accumulator = 0;
+  const impacts = []; f.Engine.addObserver((_, event) => { if (event.name === "land") impacts.push(event); });
+  engine.handleExternalScroll(0.25); now = 16; engine.loop(now);
+  assert.equal(engine.lastRenderedY, 599.75, "the first delta must still be painted immediately");
+  for (let i = 2; i < 40; i++) { now = i * 16; engine.loop(now); }
+  assert.equal(impacts.length, 0);
+  assert.equal(engine.y, 600); assert.equal(engine.currentBehavior.name, "StandUp");
+});
+
+test("scroll startup uses CSS height and cannot suppress a separate physical fall", () => {
+  for (const scale of [0.5, 2]) {
+    let now = 0;
+    const f = engineFixture({ performance: { now: () => now } });
+    f.config.actions.Land = { ...f.leaf("Land", "Animate"), borderType: "Floor" };
+    f.config.actions.Fall.children.push(f.reference("Land"));
+    const engine = f.make(); Object.defineProperty(engine, "spriteScale", { get: () => scale });
+    const floor = engine.area().bottom; engine.y = engine.prevY = floor;
+    engine.handleExternalScroll(1); engine.applyScrollIntent(); engine.tick();
+    assert.equal(engine.currentLeaf().name, "Falling", "startup contact must not enter Land");
+    now = 16; engine.handleExternalScroll(20); engine.applyScrollIntent();
+    assert.ok((floor - engine.y) * scale >= 20, "scroll height must follow screen pixels");
+    engine.vy = 100 / scale; engine.tick();
+    assert.equal(engine.currentLeaf().name, "Land", "visible airtime must still land normally");
+    // A new behavior must discard the startup exemption, even during the same scroll.
+    engine.setBehavior("StandUp", "test"); engine.advanceActionTree();
+    f.events.get("wheel")({ deltaY: 1 }); engine.handleExternalScroll(0.25); engine.applyScrollIntent();
+    engine.setBehavior("Fall", "manual-test"); engine.advanceActionTree(); engine.vy = 8;
+    engine.tick(); assert.equal(engine.currentLeaf().name, "Land");
+  }
+});
+
+function scrollLanding(f) {
+  f.config.actions.Land = { ...f.leaf("Land", "Animate"), borderType: "Floor" };
+  f.config.actions.Fall.children.push(f.reference("Land"));
+  const engine = falling(f, 500, 590, 0, 8);
+  engine.handleExternalScroll(-20); engine.applyScrollIntent();
+  assert.equal(engine.currentLeaf().name, "Land");
+  return engine;
+}
+
+test("camera-induced landing protects its anchor, but fresh input releases on a tiny delta", () => {
+  for (const [name, event] of [
+    ["wheel", { deltaY: 1 }], ["touchmove", {}],
+    ["keydown", { key: "ArrowDown" }], ["keydown", { key: " " }],
+    ["pointerdown", { button: 0 }],
+    ["pointermove", { buttons: 1, pointerType: "mouse", clientX: 10, clientY: 10 }],
+  ]) {
+    const f = engineFixture(); f.Engine.externalScroll = true;
+    const engine = scrollLanding(f);
+    const landed = engine.actionStack.at(-1);
+    engine.handleExternalScroll(0.25); engine.applyScrollIntent(); engine.tick();
+    assert.equal(engine.y, 600); assert.equal(engine.actionStack.at(-1), landed);
+    // Suppressed movement must not be replayed when intent arrives before paint.
+    engine.handleExternalScroll(40);
+    f.events.get(name)(event); engine.applyScrollIntent();
+    assert.equal(engine.y, 600, "intent alone must not move the mascot");
+    engine.handleExternalScroll(0.25); engine.applyScrollIntent();
+    assert.equal(engine.y, 599.75); assert.equal(engine.currentLeaf().name, "Falling");
+  }
+});
+
+test("zoom, typing and unrelated key/pointer events do not rearm an easing tail", () => {
+  const f = engineFixture(); const engine = scrollLanding(f);
+  for (const [name, event] of [
+    ["wheel", { ctrlKey: true, deltaY: 1 }], ["wheel", { deltaY: 0 }],
+    ["keydown", { key: "a" }], ["keydown", { key: "ArrowDown", ctrlKey: true }],
+    ["keydown", { key: " ", target: { tagName: "INPUT" } }],
+    ["keydown", { key: "ArrowDown", target: { isContentEditable: true } }],
+    ["pointerdown", { button: 2 }],
+    ["pointermove", { buttons: 0, pointerType: "mouse", clientX: 10, clientY: 10 }],
+  ]) {
+    f.events.get(name)(event); engine.handleExternalScroll(0.25); engine.applyScrollIntent();
+    assert.equal(engine.y, 600); assert.equal(engine.currentLeaf().name, "Land");
+  }
+});
+
+test("per-frame scrollend from script easing cannot repeatedly unlock a landing", () => {
+  let now = 0;
+  const f = engineFixture({ performance: { now: () => now } }); f.window.onscrollend = null;
+  const engine = scrollLanding(f);
+  for (let i = 0; i < 100; i++) {
+    now += 16;
+    f.events.get("scrollend")?.({ target: f.document });
+    engine.handleExternalScroll(0.25); engine.applyScrollIntent();
+    assert.equal(engine.y, 600); assert.equal(engine.currentLeaf().name, "Land");
+  }
+  now += 201;
+  engine.handleExternalScroll(0.25); engine.applyScrollIntent();
+  assert.equal(engine.y, 599.75); assert.equal(engine.currentLeaf().name, "Falling");
+});
+
+test("the next script scroll after an idle gap responds immediately without scrollend", () => {
+  let now = 0;
+  const f = engineFixture({ performance: { now: () => now } }); const engine = scrollLanding(f);
+  now = 100; engine.handleExternalScroll(10); engine.applyScrollIntent();
+  assert.equal(engine.y, 600);
+  now = 301; engine.handleExternalScroll(0.25); engine.applyScrollIntent();
+  assert.equal(engine.y, 599.75); assert.equal(engine.currentLeaf().name, "Falling");
+});
+
+test("landing protection leaves airborne camera tracking and upward floor squash active", () => {
+  const f = engineFixture(); const engine = scrollLanding(f); engine.setScrollSquash(true);
+  engine.handleExternalScroll(-20); engine.applyScrollIntent();
+  assert.equal(engine.y, 600); assert.ok(engine.squashAmount > 0);
+  engine.y = engine.prevY = 300; engine.setBehavior("Fall", "test"); engine.advanceActionTree();
+  engine.vy = 7;
+  engine.handleExternalScroll(0.25); engine.applyScrollIntent();
+  assert.equal(engine.y, 299.75); assert.equal(engine.prevY, 299.75); assert.equal(engine.vy, 7);
+});
+
+test("reset, pause and drag discard the previous scroll landing protection", () => {
+  for (const boundary of ["reset", "pause", "drag"]) {
+    const f = engineFixture(); const engine = scrollLanding(f);
+    if (boundary === "reset") engine.resetToSpawn();
+    if (boundary === "pause") {
+      engine.setPauseReason("hidden", true); engine.setPauseReason("hidden", false);
+    }
+    if (boundary === "drag") { engine.beginDrag(500, 500); engine.isDragging = false; }
+    engine.y = engine.prevY = 600; engine.setBehavior("StandUp", "test"); engine.advanceActionTree();
+    engine.handleExternalScroll(0.25); engine.applyScrollIntent();
+    assert.equal(engine.y, 599.75); assert.equal(engine.currentLeaf().name, "Falling");
+  }
 });
 
 test("pause clears camera movement and changed support does not restart an existing fall", () => {
@@ -254,6 +464,61 @@ test("starting Fall on the supported floor returns to standing without an impact
   engine.tick();
   assert.equal(engine.y, 600); assert.equal(engine.currentBehavior.name, "StandUp");
   assert.equal(events.filter((e) => e.name === "land").length, 0);
+});
+
+function hurledFixture(nextVelocity = {}) {
+  const f = engineFixture();
+  f.config.actions.HurledKnockback2 = { ...f.leaf("HurledKnockback2", "Embedded"), className: "test.Fall" };
+  f.config.actions.HurledBounce = { ...f.leaf("HurledBounce", "Animate"), borderType: "Floor",
+    poses: [{ ...f.config.actions.Stand.poses[0], image: "/impact.png", duration: 6 }] };
+  f.config.actions.HurledSprawl = { ...f.leaf("HurledSprawl", "Animate"), borderType: "Floor",
+    poses: [{ ...f.config.actions.Stand.poses[0], image: "/sprawl.png", duration: 100 }] };
+  f.config.actions.IAmHurled = { name: "IAmHurled", type: "Sequence", children: [
+    f.reference("HurledKnockback2"), f.reference("Falling", { InitialVX: "-50", ...nextVelocity }),
+    f.reference("HurledBounce"), f.reference("HurledSprawl"),
+  ] };
+  const engine = f.make(); engine.y = engine.prevY = 590;
+  engine.setBehavior("IAmHurled", "test"); engine.advanceActionTree(); engine.vy = 20;
+  return { ...f, engine };
+}
+
+test("interaction throw landing passes adjacent fall stages and keeps bounce then sprawl", () => {
+  for (const cameraImpact of [false, true]) {
+    const f = hurledFixture(); const engine = f.engine;
+    const impacts = []; f.Engine.addObserver((_, event) => { if (event.name === "land") impacts.push(event); });
+    if (cameraImpact) { engine.handleExternalScroll(-20); engine.applyScrollIntent(); }
+    else engine.tick();
+    assert.equal(engine.currentBehavior.name, "IAmHurled");
+    assert.equal(engine.currentLeaf().name, "HurledBounce");
+    assert.equal(engine.currentPose().image, "/impact.png");
+    assert.equal(engine.vx, 0); assert.equal(engine.vy, 0);
+    for (let i = 0; i < 7; i++) engine.tick();
+    assert.equal(engine.currentBehavior.name, "IAmHurled");
+    assert.equal(engine.currentLeaf().name, "HurledSprawl");
+    assert.equal(engine.currentPose().image, "/sprawl.png");
+    assert.equal(impacts.length, 1);
+  }
+});
+
+test("a fall stage after landing can still deliberately launch upward", () => {
+  const { engine } = hurledFixture({ InitialVY: "-10" });
+  engine.tick();
+  assert.equal(engine.currentLeaf().name, "Falling"); assert.equal(engine.vy, -10);
+  engine.tick();
+  assert.ok(engine.y < 600); assert.ok(engine.vy < 0);
+  assert.equal(engine.currentBehavior.name, "IAmHurled");
+});
+
+test("landing also preserves recovery after nested consecutive fall actions", () => {
+  const f = hurledFixture(); const engine = f.engine;
+  const children = f.config.actions.IAmHurled.children;
+  children[0] = { type: "Sequence", children: [children[0]] };
+  children[1] = { type: "Select", children: [children[1]] };
+  engine.setBehavior("IAmHurled", "test"); engine.advanceActionTree(); engine.vy = 20;
+  engine.tick();
+  assert.equal(engine.currentBehavior.name, "IAmHurled");
+  assert.equal(engine.currentLeaf().name, "HurledBounce");
+  assert.equal(engine.currentPose().image, "/impact.png");
 });
 
 test("fall catches a wall impact and only its top can overflow", () => {
@@ -670,4 +935,38 @@ test("relay contains obsolete side/bottom overflow and preserves only Fall above
   source.setBehavior("Thrown", "test"); source.advanceActionTree(); source.y = -200; source.vy = -20; source.renderNow();
   assert.equal(target.restoreRelaySnapshot(source.createRelaySnapshot()), true);
   assert.equal(target.y, 0); assert.equal(target.vy, 0);
+});
+
+test("scrollSquash is disabled by default and toggles via MascotEngine and MascotGroup API", () => {
+  const f = engineFixture();
+  const engine = f.make();
+  assert.equal(engine.getScrollSquash(), false);
+  engine.setScrollSquash(true);
+  assert.equal(engine.getScrollSquash(), true);
+  engine.setScrollSquash(false);
+  assert.equal(engine.getScrollSquash(), false);
+});
+
+test("scrollSquash produces vertical compression on upward floor scroll and recovers smoothly", () => {
+  const f = engineFixture();
+  const engine = f.make();
+  f.config.actions.Stand.borderType = "Floor";
+  engine.setScrollSquash(true);
+  assert.equal(engine.y, 600);
+
+  const initialTransform = engine.elImg.style.transform;
+
+  engine.handleExternalScroll(-60);
+  engine.applyScrollIntent();
+  engine.render(false);
+
+  const transform1 = engine.elImg.style.transform;
+  assert.notEqual(transform1, initialTransform, "must apply squash transform on upward scroll");
+
+  // Verify spring recovery over frames
+  for (let i = 0; i < 35; i++) {
+    engine.render(false);
+  }
+  const transformRecovered = engine.elImg.style.transform;
+  assert.equal(transformRecovered, initialTransform, "must recover to initial transform");
 });

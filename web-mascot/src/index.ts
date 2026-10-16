@@ -97,6 +97,8 @@ export interface MascotOptions {
   signal?: AbortSignal;
   /** Set false to disable default single-origin page coordinator. */
   enablePageCoordinator?: boolean;
+  /** Enable elastic squash-and-stretch physical response on upward page scroll (default false). */
+  scrollSquash?: boolean;
 }
 
 let hasConfigured = false;
@@ -170,6 +172,14 @@ export class Mascot {
     this.engine.setClickThrough(enabled);
   }
 
+  public setScrollSquash(enabled: boolean): void {
+    this.engine.setScrollSquash(enabled);
+  }
+
+  public getScrollSquash(): boolean {
+    return this.engine.getScrollSquash();
+  }
+
   /** Name of the behavior currently running, or null if none. */
   public get currentBehavior(): string | null {
     return this.engine.currentBehaviorName;
@@ -227,7 +237,7 @@ export class Mascot {
  * the page.
  */
 export async function createMascot(options: MascotOptions): Promise<Mascot> {
-  const { container, pack, initialSnapshot, startPaused, signal, enablePageCoordinator } = options;
+  const { container, pack, initialSnapshot, startPaused, signal, enablePageCoordinator, scrollSquash } = options;
   if (!container) throw new Error("[web-mascot] createMascot() needs a container element");
   if (!pack) throw new Error("[web-mascot] createMascot() needs a pack name");
 
@@ -236,7 +246,7 @@ export async function createMascot(options: MascotOptions): Promise<Mascot> {
   signal?.addEventListener("abort", cancel, { once: true });
   try {
     signal?.throwIfAborted();
-    await engine.init({ initialSnapshot, startPaused, signal, enablePageCoordinator });
+    await engine.init({ initialSnapshot, startPaused, signal, enablePageCoordinator, scrollSquash });
     signal?.throwIfAborted();
   } catch (error) {
     engine.destroy();

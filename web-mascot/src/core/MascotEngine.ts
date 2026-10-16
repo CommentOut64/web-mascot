@@ -24,6 +24,10 @@ import { normalizeSpriteKey } from "./ShimejiFinder.js";
 const expressionLog = loggerFor("engine");
 const loggedExpressionFailures = new Set<string>();
 const warnedUnsupportedClasses = new Set<string>();
+/** Groups script-generated scroll frames; fresh user input never waits for this gap. */
+const SCROLL_IDLE_MS = 200;
+/** Subpixel easing startup is not a visible fall or a landing impact. CSS pixels. */
+const SCROLL_MIN_AIR_HEIGHT_PX = 4;
 
 /**
  * Runtime tuning. Every field here is a *number the simulation reads*, exposed so a
@@ -356,7 +360,14 @@ export class MascotEngine {
   /** Camera translation in sprite units, separate from physical velocity. */
   private pendingScrollShift = 0;
   private scrollDetachPending: Surface | null = null;
+  private lastDocumentScrollAt: number | null = null;
+  /** A landing consumes the current scroll, but fresh user input can detach again. */
+  private scrollFloorBlocked = false;
+  private scrollFallRoot: ActionFrame | null = null;
+  private scrollFallHeight = 0;
   private lastSurface: Surface | null = null;
+  private scrollSquashEnabled = false;
+  private squashAmount = 0;
   private cursorX = 0;
   private cursorY = 0;
   /** Cursor movement during the last logic tick, i.e. `environment.cursor.dx/dy`.
@@ -479,8 +490,14 @@ export class MascotEngine {
       delta === 0
     )
       return;
-    if (documentScroll) this.pendingScrollShift += delta / this.spriteScale;
     const surface = this.surfaceAt();
+    if (documentScroll) {
+      if (!this.documentScrollActive()) this.scrollFloorBlocked = false;
+      this.lastDocumentScrollAt = performance.now();
+      // Discard the tail here too: new input before paint must not revive an old delta.
+      if (this.scrollFloorBlocked && surface === "floor" && delta > 0) return;
+      this.pendingScrollShift += delta / this.spriteScale;
+    }
     if (
       (surface === "floor" && documentScroll && delta > 0) ||
       surface === "left-wall" ||
@@ -488,7 +505,25 @@ export class MascotEngine {
       surface === "ceiling"
     ) {
       this.scrollDetachPending = surface;
+    } else if (surface === "floor" && delta < 0 && this.scrollDetachPending === "floor") {
+      this.scrollDetachPending = null;
     }
+  }
+
+  private documentScrollActive(): boolean {
+    // Script easing can emit scrollend after *every* instant scrollTo, so only a
+    // gap in actual displacement ends the stream. No delta is debounced or delayed.
+    return this.lastDocumentScrollAt !== null &&
+      performance.now() - this.lastDocumentScrollAt < SCROLL_IDLE_MS;
+  }
+
+  private protectScrollLanding(): void {
+    this.scrollFloorBlocked = this.documentScrollActive();
+  }
+
+  private isScrollStartContact(): boolean {
+    return this.scrollFallRoot === this.actionStack[0] &&
+      this.scrollFallHeight < SCROLL_MIN_AIR_HEIGHT_PX && this.documentScrollActive();
   }
 
   public setClickThrough(enabled: boolean): void {
@@ -498,6 +533,15 @@ export class MascotEngine {
     if (this.elImg) {
       this.elImg.style.pointerEvents = enabled ? "none" : "auto";
     }
+  }
+
+  public setScrollSquash(enabled: boolean): void {
+    this.scrollSquashEnabled = enabled;
+    if (!enabled) this.squashAmount = 0;
+  }
+
+  public getScrollSquash(): boolean {
+    return this.scrollSquashEnabled;
   }
 
   public resetToSpawn(indexOverride?: number): void {
@@ -858,7 +902,28 @@ export class MascotEngine {
     if (MascotEngine.globalEventsInstalled || typeof window === "undefined")
       return;
     MascotEngine.globalEventsInstalled = true;
+    // Observe intent separately from scroll displacement, also in extension mode.
+    // These listeners never preventDefault or move a mascot on input alone.
+    const freshScrollInput = () => {
+      for (const engine of MascotEngine.liveEngines) engine.scrollFloorBlocked = false;
+    };
+    window.addEventListener("wheel", (event) => {
+      if (!event.ctrlKey && event.deltaY !== 0) freshScrollInput();
+    }, { capture: true, passive: true });
+    window.addEventListener("touchmove", freshScrollInput, { capture: true, passive: true });
+    window.addEventListener("pointerdown", (event) => {
+      // Includes scrollbar presses and clicks that start smooth anchor navigation.
+      if (event.button === 0) freshScrollInput();
+    }, { capture: true, passive: true });
+    window.addEventListener("keydown", (event) => {
+      const target = event.target as HTMLElement | null;
+      if (event.ctrlKey || event.altKey || event.metaKey || target?.isContentEditable ||
+          ["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName ?? "")) return;
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key))
+        freshScrollInput();
+    }, { capture: true });
     window.addEventListener("pointermove", (event) => {
+      if ((event.buttons & 1) !== 0 && event.pointerType !== "touch") freshScrollInput();
       for (const engine of MascotEngine.liveEngines) {
         if (engine.pressActive) {
           if (
@@ -1238,7 +1303,11 @@ export class MascotEngine {
     startPaused?: boolean;
     signal?: AbortSignal;
     enablePageCoordinator?: boolean;
+    scrollSquash?: boolean;
   }) {
+    if (options?.scrollSquash !== undefined) {
+      this.scrollSquashEnabled = options.scrollSquash;
+    }
     if (options?.startPaused) this.setPauseReason("relay-transfer", true);
     // Customisation is read first so the very first tick already obeys it.
     await MascotEngine.loadAnimationConfig();
@@ -1456,6 +1525,10 @@ export class MascotEngine {
     this.lastScrollY = window.scrollY;
     this.pendingScrollShift = 0;
     this.scrollDetachPending = null;
+    this.lastDocumentScrollAt = null;
+    this.scrollFloorBlocked = false;
+    this.scrollFallRoot = null;
+    this.scrollFallHeight = 0;
   }
 
   private setVisible(visible: boolean) {
@@ -2738,6 +2811,8 @@ export class MascotEngine {
       this.elImg.removeAttribute("src");
     }
     this.actionStack = [this.newFrame(action)];
+    this.scrollFallRoot = null;
+    this.scrollFallHeight = 0;
     if (from !== selected.name) {
       this.emit({
         kind: "behavior",
@@ -3731,30 +3806,87 @@ export class MascotEngine {
     this.pendingScrollShift = 0;
     if (this.isDragging || (!pending && shift === 0)) return;
     const surface = this.surfaceAt();
+    // Protect both the behavior and its anchor; translating a supported landing
+    // would otherwise lose BorderType=Floor on the next physics tick.
+    if (this.scrollFloorBlocked && surface === "floor" && shift > 0) return;
     if (pending && surface === pending && (surface !== "floor" || shift > 0)) {
       // Only losing support starts Fall. Airborne scroll preserves the action clock.
       this.vx = this.vy = 0;
       this.lastSurface = null;
       this.setBehavior("Fall", "scroll-detach");
       this.advanceActionTree();
+      if (surface === "floor" && this.isFallLike(this.currentLeaf())) {
+        this.scrollFallRoot = this.actionStack[0] ?? null;
+        this.scrollFallHeight = 0;
+      }
     }
     if (shift === 0) return;
+    if (this.scrollSquashEnabled && shift < 0) {
+      const leaf = this.currentLeaf();
+      const isSupportedOnFloor =
+        this.surfaceAt() === "floor" &&
+        !this.isDragging &&
+        !this.isFallLike(leaf) &&
+        !this.interactionVisualActive;
+
+      if (isSupportedOnFloor) {
+        const name = leaf?.name || "";
+        const isLowProfile =
+          name.includes("Sit") ||
+          name.includes("Lie") ||
+          name.includes("Crawl") ||
+          name.includes("Sprawl");
+        const profileFactor = isLowProfile ? 0.5 : 1.0;
+        const impulse = Math.min(0.5, (Math.abs(shift) / 30) * profileFactor);
+        this.squashAmount = Math.min(1.0, this.squashAmount + impulse);
+      }
+    }
     // Translating both interpolation endpoints keeps the physical segment intact:
     // documentY = viewportY + scrollY changes only through the mascot's own motion.
+    const beforeY = this.y;
+    const beforeX = this.x;
     this.y -= shift;
     this.prevY -= shift;
     this.offsetJumped = true;
     const area = this.area();
+    if (this.scrollFallRoot === this.actionStack[0]) {
+      this.scrollFallHeight = Math.max(
+        this.scrollFallHeight, (area.bottom - this.y) * this.spriteScale,
+      );
+    }
     if (this.y >= area.bottom) {
-      // A rising viewport floor is support, not a downward physical impact.
-      this.y = this.prevY = area.bottom;
-      if (
-        this.isFallLike(this.currentLeaf()) ||
-        this.isJumpLike(this.currentLeaf())
-      ) {
+      if (this.isFallLike(this.currentLeaf()) && beforeY < area.bottom) {
+        const fraction =
+          beforeY < this.y ? (area.bottom - beforeY) / (this.y - beforeY) : 0;
+        const impactX = Math.max(
+          area.left,
+          Math.min(area.right, beforeX + (this.x - beforeX) * fraction),
+        );
+        this.x = impactX;
+        this.y = this.prevY = area.bottom;
         this.vx = this.vy = 0;
-        this.setBehavior("StandUp", "scroll-floor-support");
-        this.advanceActionTree();
+        if (!this.isScrollStartContact()) {
+          this.protectScrollLanding();
+          this.emit({
+            kind: "milestone",
+            name: "land",
+            detail: "downward floor crossing",
+            x: this.x,
+            y: this.y,
+            leaf: this.leafLabel(),
+          });
+          this.finishFloorLanding();
+        }
+      } else {
+        this.y = this.prevY = area.bottom;
+        if (
+          this.isFallLike(this.currentLeaf()) ||
+          this.isJumpLike(this.currentLeaf())
+        ) {
+          this.vx = this.vy = 0;
+          this.setBehavior("StandUp", "scroll-floor-support");
+          this.advanceActionTree();
+        }
       }
     }
     this.constrainToWorkArea();
@@ -4009,6 +4141,9 @@ export class MascotEngine {
         this.borderTypeSatisfied("Floor")
       ) {
         this.vx = this.vy = 0;
+        // Keep consuming the notch after a tiny first shift. If it stops here,
+        // the ordinary supported-floor fallback settles it without a fake impact.
+        if (this.isScrollStartContact()) return;
         this.setBehavior("StandUp", "floor-supported");
         this.advanceActionTree();
         return;
@@ -4045,7 +4180,7 @@ export class MascotEngine {
       this.x += this.vx;
       this.y += this.vy;
       if (this.grabImpactSurface(beforeX, beforeY)) return;
-      if (this.landOnFloor(beforeX, beforeY)) this.popActionStack();
+      if (this.landOnFloor(beforeX, beforeY)) this.finishFloorLanding();
       return;
     }
     if (this.isJumpLike(leaf) && targetX !== null && targetY !== null) {
@@ -4278,6 +4413,11 @@ export class MascotEngine {
     this.x = impactX;
     this.y = area.bottom;
     this.vx = this.vy = 0;
+    if (this.isScrollStartContact()) {
+      this.prevY = this.y;
+      return false;
+    }
+    this.protectScrollLanding();
     this.emit({
       kind: "milestone",
       name: "land",
@@ -4287,6 +4427,27 @@ export class MascotEngine {
       leaf: this.leafLabel(),
     });
     return true;
+  }
+
+  /** Finish this flight without replacing the pack's remaining landing sequence. */
+  private finishFloorLanding(): void {
+    const root = this.actionStack[0];
+    // IAmHurled contains two consecutive Fall actions. After an impact, a
+    // supported Fall is complete too; StandUp would erase Bounce/Sprawl. Unwind
+    // nested containers as well, but preserve an explicit upward launch.
+    do {
+      if (this.isFallLike(this.currentLeaf())) {
+        this.vx = this.vy = 0;
+        this.popActionStack();
+      }
+      this.advanceActionTree();
+    } while (
+      this.actionStack[0] === root &&
+      this.actionExpansionsThisTick < MAX_ACTION_EXPANSIONS_PER_TICK &&
+      ((this.isFallLike(this.currentLeaf()) &&
+        this.y === this.area().bottom && this.vy >= 0) ||
+       ["Sequence", "Select", "ActionReference"].includes(this.currentLeaf()?.type ?? ""))
+    );
   }
 
   private onBehaviorEnd(reason = "behavior-end") {
@@ -4448,11 +4609,18 @@ export class MascotEngine {
     // would translate the *kept* frame by the whole ImageAnchor (64,128) — the sprite
     // visibly jumps down-right and reads as a second mascot at the floor for as long
     // as the hold lasts. libshijima leaves the transform alone in this case, and so
-    // does this now (the non-image fields of the pose still apply above).
+    let squashX = 1;
+    let squashY = 1;
+    if (this.scrollSquashEnabled && this.squashAmount > 0) {
+      squashY = 1 - 0.2 * this.squashAmount;
+      squashX = 1 + 0.1 * this.squashAmount;
+      this.squashAmount *= 0.85;
+      if (this.squashAmount < 0.005) this.squashAmount = 0;
+    }
     const ax = pose.imageAnchor.x;
     const ay = pose.imageAnchor.y;
     const flip = this.lookRight ? -1 : 1;
-    this.elImg.style.transform = `translate(${-flip * ax * scale}px, ${-ay * scale}px) scaleX(${flip * scale}) scaleY(${scale})`;
+    this.elImg.style.transform = `translate(${-flip * ax * scale * squashX}px, ${-ay * scale * squashY}px) scaleX(${flip * scale * squashX}) scaleY(${scale * squashY})`;
     this.elImg.style.transformOrigin = "0 0";
   }
 }

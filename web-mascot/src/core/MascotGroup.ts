@@ -9,6 +9,7 @@ export interface MascotGroupSpawnOptions {
   host?: ViewportHost;
   isClickThrough?: boolean;
   signal?: AbortSignal;
+  scrollSquash?: boolean;
   onSpawned?: (pack: string, isRestored: boolean) => void;
   onFailed?: (pack: string, error: unknown) => void;
 }
@@ -142,6 +143,7 @@ export class MascotGroup {
             startPaused: true,
             signal: abort.signal,
             enablePageCoordinator: false,
+            scrollSquash: options.scrollSquash,
           });
         } finally {
           abort.signal.removeEventListener("abort", cancel);
@@ -203,6 +205,12 @@ export class MascotGroup {
     this.isClickThrough = clickThrough;
     for (const engine of this.activeEngines) {
       engine.setClickThrough(clickThrough);
+    }
+  }
+
+  public setScrollSquash(enabled: boolean): void {
+    for (const engine of this.activeEngines) {
+      engine.setScrollSquash(enabled);
     }
   }
 

@@ -28,6 +28,18 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
 
   function syncActiveMascots(): void {
     activeMascots = group.engines.map((e) => new Mascot(e));
+    const effective = isScrollInteraction && isScrollSquash;
+    for (const mascot of activeMascots) {
+      mascot.engine.setScrollSquash(effective);
+    }
+  }
+
+  function applyScrollSquash(enabled: boolean): void {
+    isScrollSquash = enabled;
+    const effective = isScrollInteraction && isScrollSquash;
+    for (const mascot of activeMascots) {
+      mascot.engine.setScrollSquash(effective);
+    }
   }
 
   let debounceSpawnTimer: number | null = null;
@@ -41,6 +53,7 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
   let isClickThrough = false;
   let isDebugLog = false;
   let isScrollInteraction = false;
+  let isScrollSquash = false;
   let isAutoHideScrollbar = false;
   let blacklistHosts: string[] = [];
   let isOrphaned = false;
@@ -400,6 +413,7 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
         snapshots,
         host,
         isClickThrough,
+        scrollSquash: isScrollInteraction && isScrollSquash,
         onSpawned: (pack, isRestored) => {
           if (isRestored) {
             log(`桌宠【${pack}】已恢复接力状态`);
@@ -582,6 +596,7 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
           clickThrough: false,
           debugLog: false,
           scrollInteraction: false,
+          scrollSquash: false,
           autoHideScrollbar: false,
           blacklist: [],
         },
@@ -596,6 +611,8 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
           isClickThrough = Boolean(items.clickThrough);
           isDebugLog = Boolean(items.debugLog);
           isScrollInteraction = Boolean(items.scrollInteraction);
+          isScrollSquash = Boolean(items.scrollSquash);
+          applyScrollSquash(isScrollSquash);
           isAutoHideScrollbar = Boolean(items.autoHideScrollbar);
           blacklistHosts = Array.isArray(items.blacklist)
             ? items.blacklist
@@ -607,6 +624,7 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
             mode: mascotMode,
             clickThrough: isClickThrough,
             scrollInteraction: isScrollInteraction,
+            scrollSquash: isScrollSquash,
             autoHideScrollbar: isAutoHideScrollbar,
           });
 
@@ -649,11 +667,21 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
 
     if (changes.scrollInteraction !== undefined) {
       isScrollInteraction = Boolean(changes.scrollInteraction.newValue);
+      applyScrollSquash(isScrollSquash);
       resetScrollInput();
       log(
         isScrollInteraction
           ? "🌪️ 页面滚动互动已开启 (实验性)"
           : "🛡️ 页面滚动互动已关闭",
+      );
+    }
+
+    if (changes.scrollSquash !== undefined) {
+      applyScrollSquash(Boolean(changes.scrollSquash.newValue));
+      log(
+        isScrollSquash
+          ? "🌊 响应上滚弹性形变已开启"
+          : "🛡️ 响应上滚弹性形变已关闭",
       );
     }
 
