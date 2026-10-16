@@ -389,6 +389,8 @@ export class MascotEngine {
    * pickup) is only decided by how long and how far the pointer moved.
    */
   private pressActive = false;
+  /** Active pointer ID for the current press/drag session to isolate touches in multi-touch environments. */
+  private activePointerId: number | null = null;
   private pressStartAt = 0;
   private pressClientX = 0;
   private pressClientY = 0;
@@ -516,10 +518,7 @@ export class MascotEngine {
     }
     this.cancelPress();
     if (this.isDragging) {
-      this.endDrag();
-      this.setBehavior("Thrown", "relay-release");
-      this.actionExpansionsThisTick = 0;
-      this.advanceActionTree();
+      this.releaseDrag("relay-release");
     }
     this.prevX = this.x;
     this.prevY = this.y;
@@ -849,12 +848,18 @@ export class MascotEngine {
     if (MascotEngine.globalEventsInstalled || typeof window === "undefined")
       return;
     MascotEngine.globalEventsInstalled = true;
-    window.addEventListener("mousemove", (event) => {
+    window.addEventListener("pointermove", (event) => {
       for (const engine of MascotEngine.liveEngines) {
-        engine.cursorX = event.clientX;
-        engine.cursorY = event.clientY;
-        engine.cursorButtons = event.buttons;
         if (engine.pressActive) {
+          if (
+            engine.activePointerId !== null &&
+            engine.activePointerId !== event.pointerId
+          ) {
+            continue;
+          }
+          engine.cursorX = event.clientX;
+          engine.cursorY = event.clientY;
+          engine.cursorButtons = event.buttons;
           if ((event.buttons & 1) === 0) {
             // `MascotHoldGesture::leftButtonIsDown`: a release that never reached the
             // window must not leave a press (or a drag) stuck.
@@ -865,30 +870,55 @@ export class MascotEngine {
             // event is what keeps a fast drag from trailing the cursor.
             if (engine.isDragging) engine.applyDragAnchor();
           }
+        } else if (!engine.isDragging) {
+          if ((event.pointerType ?? "mouse") !== "touch") {
+            engine.cursorX = event.clientX;
+            engine.cursorY = event.clientY;
+            engine.cursorButtons = event.buttons;
+            engine.elRoot.style.cursor = engine.hotspotUnderCursor(
+              event.clientX,
+              event.clientY,
+            )
+              ? "pointer"
+              : "grab";
+          }
         }
-        if (!engine.isDragging)
-          engine.elRoot.style.cursor = engine.hotspotUnderCursor(
-            event.clientX,
-            event.clientY,
-          )
-            ? "pointer"
-            : "grab";
       }
     });
-    window.addEventListener("mouseup", (event) => {
+    window.addEventListener("pointerup", (event) => {
       for (const engine of MascotEngine.liveEngines) {
+        if (
+          engine.activePointerId !== null &&
+          engine.activePointerId !== event.pointerId
+        ) {
+          continue;
+        }
         engine.cursorButtons = event.buttons;
         // ShijimaWidget::mouseReleaseEvent(): click or throw, decided by the gesture.
         if (engine.pressActive)
           engine.finishPress(event.clientX, event.clientY);
       }
     });
+    window.addEventListener("pointercancel", (event) => {
+      for (const engine of MascotEngine.liveEngines) {
+        if (
+          engine.activePointerId !== null &&
+          engine.activePointerId !== event.pointerId
+        ) {
+          continue;
+        }
+        engine.cursorButtons = 0;
+        if (engine.isDragging) {
+          engine.releaseDrag("drag-release");
+        }
+        engine.cancelPress();
+      }
+    });
     document.addEventListener("visibilitychange", () => {
       for (const engine of MascotEngine.liveEngines) {
         if (document.hidden) {
           if (engine.isDragging) {
-            engine.endDrag();
-            engine.setBehavior("Thrown", "drag-release");
+            engine.releaseDrag("drag-release");
           }
           // MascotHoldGesture::cancelsForEvent(Hide): a hidden page drops the press.
           engine.cancelPress();
@@ -1158,6 +1188,7 @@ export class MascotEngine {
       zIndex: "1",
       userSelect: "none",
       visibility: "hidden",
+      touchAction: "none",
       // A definite box as well: the root carries a transform and nothing else, so
       // without this it has a zero-size hit box and is invisible to hit testing.
       width: `${SPRITE_WIDTH}px`,
@@ -1168,6 +1199,7 @@ export class MascotEngine {
     this.elImg.style.visibility = "hidden";
     this.elImg.style.pointerEvents = "auto";
     this.elImg.style.cursor = "inherit";
+    this.elImg.style.touchAction = "none";
     this.elImg.ondragstart = () => false;
     // Give the sprite a *definite* size from its bitmap instead of relying on
     // intrinsic sizing to inflate a shrink-to-fit box.
@@ -1496,6 +1528,7 @@ export class MascotEngine {
     this.unregisterPage = null;
     this.intersectionObserver?.disconnect();
     this.intersectionObserver = null;
+    this.cancelPress();
     this.eventsAbortController.abort();
 
     for (const timer of this.pendingTimers) window.clearTimeout(timer);
@@ -1687,9 +1720,16 @@ export class MascotEngine {
     const signal = this.eventsAbortController.signal;
 
     this.elRoot.addEventListener(
-      "mousedown",
+      "pointerdown",
       (e) => {
         if (e.button !== 0) return;
+        if (
+          this.pressActive &&
+          this.activePointerId !== null &&
+          this.activePointerId !== e.pointerId
+        ) {
+          return;
+        }
         // A press has to be mapped through the *drawn* position, so measure any host CSS
         // offset now instead of reusing this tick's cached value.
         this.hostShift(true);
@@ -1697,6 +1737,12 @@ export class MascotEngine {
         // lands on an opaque pixel of the frame it is showing, so the transparent
         // corners of the 128 px box are not a handle.
         if (!this.isOpaqueAt(e.clientX, e.clientY)) return;
+        this.activePointerId = e.pointerId;
+        try {
+          this.elRoot.setPointerCapture?.(e.pointerId);
+        } catch {
+          // Ignore if pointer capture fails in test/mock environments
+        }
         this.pressActive = true;
         this.pressStartAt = performance.now();
         this.pressClientX = e.clientX;
@@ -1799,6 +1845,37 @@ export class MascotEngine {
     this.elRoot.style.cursor = "grab";
   }
 
+  /** Release a held mascot: snap to wall if held against a boundary, otherwise throw. */
+  private releaseDrag(reason = "drag-release"): void {
+    this.endDrag();
+    const area = this.area();
+    const onLeftWall = this.borderIsOn("left", { x: this.x, y: this.y }, area);
+    const onRightWall = this.borderIsOn("right", { x: this.x, y: this.y }, area);
+    if (this.y < area.bottom && (onLeftWall || onRightWall)) {
+      const cursor = this.simulationCursorVirtual();
+      const frame = this.actionStack[this.actionStack.length - 1];
+      const offsetX = this.varNumber(frame, "OffsetX") ?? runtime.dragOffsetX;
+      const dragAnchorX = cursor.x + offsetX;
+      if (
+        (onRightWall && (dragAnchorX >= area.right || this.cursorTickDX >= 0)) ||
+        (onLeftWall && (dragAnchorX <= area.left || this.cursorTickDX <= 0))
+      ) {
+        const surface: Surface = onLeftWall ? "left-wall" : "right-wall";
+        this.x = surface === "left-wall" ? area.left : area.right;
+        this.vx = this.vy = 0;
+        this.lookRight = surface === "right-wall";
+        this.lastSurface = surface;
+        this.setBehavior("HoldOntoWall", "wall-supported");
+        this.actionExpansionsThisTick = 0;
+        this.advanceActionTree();
+        return;
+      }
+    }
+    this.setBehavior("Thrown", reason);
+    this.actionExpansionsThisTick = 0;
+    this.advanceActionTree();
+  }
+
   /** Pick the mascot up: Qt does this from `beginLeftPress()` when the press is not on
    *  a hotspot, and from `mouseMoveEvent()` when a hotspot candidate leaves the hold
    *  tolerance. */
@@ -1899,6 +1976,16 @@ export class MascotEngine {
    *  a release after a pickup throws the mascot (`dragged::handle_dragging`). */
   private finishPress(clientX: number, clientY: number): void {
     if (!this.pressActive) return;
+    if (this.activePointerId !== null) {
+      try {
+        if (this.elRoot.hasPointerCapture?.(this.activePointerId)) {
+          this.elRoot.releasePointerCapture(this.activePointerId);
+        }
+      } catch {
+        // Ignore if release fails
+      }
+      this.activePointerId = null;
+    }
     const elapsed = performance.now() - this.pressStartAt;
     const triggeredHold = this.hotspotHoldTriggered;
     const hadCandidate = this.hotspotHold !== null;
@@ -1907,8 +1994,7 @@ export class MascotEngine {
     this.hotspotHold = null;
     this.hotspotHoldTriggered = false;
     if (this.isDragging) {
-      this.endDrag();
-      this.setBehavior("Thrown", "drag-release");
+      this.releaseDrag("drag-release");
       return;
     }
     // A release that follows a completed hold simply stops patting; only a short,
@@ -1924,6 +2010,16 @@ export class MascotEngine {
 
   /** Drop a press without deciding a gesture (the tab went hidden mid-press). */
   private cancelPress(): void {
+    if (this.activePointerId !== null) {
+      try {
+        if (this.elRoot.hasPointerCapture?.(this.activePointerId)) {
+          this.elRoot.releasePointerCapture(this.activePointerId);
+        }
+      } catch {
+        // Ignore if release fails
+      }
+      this.activePointerId = null;
+    }
     this.pressActive = false;
     this.hotspotHold = null;
     this.hotspotHoldTriggered = false;
@@ -3741,6 +3837,23 @@ export class MascotEngine {
       ) {
         this.vx = this.vy = 0;
         this.setBehavior("StandUp", "floor-supported");
+        this.advanceActionTree();
+        return;
+      }
+      const area = this.area();
+      const onLeftWall = this.borderIsOn("left", { x: this.x, y: this.y }, area);
+      const onRightWall = this.borderIsOn("right", { x: this.x, y: this.y }, area);
+      if (
+        this.currentBehavior?.name !== "Fall" &&
+        this.y < area.bottom &&
+        ((onLeftWall && this.vx <= 0) || (onRightWall && this.vx >= 0))
+      ) {
+        const surface: Surface = onLeftWall ? "left-wall" : "right-wall";
+        this.x = surface === "left-wall" ? area.left : area.right;
+        this.vx = this.vy = 0;
+        this.lookRight = surface === "right-wall";
+        this.lastSurface = surface;
+        this.setBehavior("HoldOntoWall", "wall-supported");
         this.advanceActionTree();
         return;
       }
