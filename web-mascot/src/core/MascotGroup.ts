@@ -1,5 +1,5 @@
 import { MascotEngine } from "./MascotEngine.js";
-import type { RelaySnapshot } from "./types.js";
+import type { ForceBehaviorOptions, RelaySnapshot } from "./types.js";
 import type { ViewportHost } from "./ViewportHost.js";
 
 export interface MascotGroupSpawnOptions {
@@ -204,6 +204,41 @@ export class MascotGroup {
     for (const engine of this.activeEngines) {
       engine.setClickThrough(clickThrough);
     }
+  }
+
+  /**
+   * Set behavior on active engines in this group.
+   * If `pack` is specified, only targets that pack; otherwise targets all mascots in the group.
+   * Returns true if at least one mascot switched behavior successfully.
+   */
+  public setBehavior(
+    name: string,
+    options?: ForceBehaviorOptions,
+    pack?: string,
+  ): boolean {
+    const targets = pack
+      ? this.activeEngines.filter((e) => e.mascotName === pack)
+      : this.activeEngines;
+    let anySuccess = false;
+    for (const engine of targets) {
+      if (engine.setBehavior(name, options)) {
+        anySuccess = true;
+      }
+    }
+    return anySuccess;
+  }
+
+  /**
+   * Force behavior on active engines in this group (ignoring surface constraints and snapping by default).
+   * If `pack` is specified, only targets that pack; otherwise targets all mascots in the group.
+   * Returns true if at least one mascot switched behavior successfully.
+   */
+  public forceBehavior(
+    name: string,
+    options?: Omit<ForceBehaviorOptions, "force">,
+    pack?: string,
+  ): boolean {
+    return this.setBehavior(name, { ...options, force: true }, pack);
   }
 
   public resetToSpawn(): void {

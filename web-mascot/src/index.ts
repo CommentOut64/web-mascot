@@ -2,6 +2,7 @@ import { MascotEngine } from "./core/MascotEngine.js";
 import type { RuntimeOptions, RuntimeSnapshot } from "./core/MascotEngine.js";
 import { defaultPackBaseUrl } from "./core/Assets.js";
 import { PresetRegistry } from "./core/animationPreset.js";
+import type { BehaviorInfo, ForceBehaviorOptions } from "./core/types.js";
 
 /**
  * Public entry point of the web-mascot library.
@@ -169,6 +170,49 @@ export class Mascot {
     this.engine.setClickThrough(enabled);
   }
 
+  /** Name of the behavior currently running, or null if none. */
+  public get currentBehavior(): string | null {
+    return this.engine.currentBehaviorName;
+  }
+
+  /** Name of the behavior currently running, or null if none. */
+  public getCurrentBehavior(): string | null {
+    return this.engine.currentBehaviorName;
+  }
+
+  /**
+   * Get list of all distinct behaviors with surface requirements and immediate availability.
+   */
+  public getBehaviors(): BehaviorInfo[] {
+    return this.engine.getBehaviors();
+  }
+
+  /**
+   * Check whether a behavior or action can immediately execute on the mascot's current surface.
+   */
+  public canExecuteBehavior(name: string): boolean {
+    return this.engine.canExecuteBehavior(name);
+  }
+
+  /**
+   * Switch the mascot to a target behavior or action.
+   * If surface constraints are not met, returns false unless `options.force` is true.
+   */
+  public setBehavior(name: string, options?: ForceBehaviorOptions): boolean {
+    return this.engine.setBehavior(name, options);
+  }
+
+  /**
+   * Force the mascot to switch to a target behavior, bypassing surface constraints
+   * and automatically snapping to the required surface by default.
+   */
+  public forceBehavior(
+    name: string,
+    options?: Omit<ForceBehaviorOptions, "force">,
+  ): boolean {
+    return this.engine.forceBehavior(name, options);
+  }
+
   /** Remove the mascot from the page. Safe to call more than once. */
   public destroy(): void {
     if (this.destroyed) return;
@@ -322,7 +366,16 @@ export type {
   ShimejiFinderResult,
 };
 export type { EngineEvent, EngineObserver } from "./core/MascotEngine.js";
-export type { Pose, ActionNode, Behavior, RelaySnapshot, RelayVisualSnapshot, RelayFrameSnapshot } from "./core/types.js";
+export type {
+  Pose,
+  ActionNode,
+  Behavior,
+  BehaviorInfo,
+  ForceBehaviorOptions,
+  RelaySnapshot,
+  RelayVisualSnapshot,
+  RelayFrameSnapshot,
+} from "./core/types.js";
 export type { Hotspot } from "./core/Hotspot.js";
 
 

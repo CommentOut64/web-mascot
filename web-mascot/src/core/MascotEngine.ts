@@ -7,7 +7,17 @@ import { mapRelayPoint, relayPosition } from "./RelayPosition.js";
 import { evaluateExpression } from "./ExpressionEvaluator.js";
 import { loggerFor } from "./Logger.js";
 import type { Hotspot } from "./Hotspot.js";
-import type { ActionNode, AnimationVariant, Behavior, BehaviorReference, MascotConfig, Pose, RelaySnapshot } from "./types.js";
+import type {
+  ActionNode,
+  AnimationVariant,
+  Behavior,
+  BehaviorInfo,
+  BehaviorReference,
+  ForceBehaviorOptions,
+  MascotConfig,
+  Pose,
+  RelaySnapshot,
+} from "./types.js";
 import { PackRegistry } from "./PackRegistry.js";
 import { normalizeSpriteKey } from "./ShimejiFinder.js";
 
@@ -1572,6 +1582,68 @@ export class MascotEngine {
     };
   }
 
+  /** Name of the behavior currently running, or null if none. */
+  public get currentBehaviorName(): string | null {
+    return this.currentBehavior?.name ?? null;
+  }
+
+  /**
+   * Get list of all distinct behaviors with surface requirements and immediate availability.
+   */
+  public getBehaviors(): BehaviorInfo[] {
+    if (!this.config) return [];
+    const result: BehaviorInfo[] = [];
+    const seen = new Set<string>();
+    const standingOn = this.currentBorderAt(undefined);
+
+    for (const b of this.config.behaviors) {
+      if (seen.has(b.name)) continue;
+      seen.add(b.name);
+      const border = this.firstBorderOf(b.name);
+      const requiredSurface =
+        border === "Floor" || border === "Wall" || border === "Ceiling"
+          ? border
+          : null;
+      const available =
+        requiredSurface === null ||
+        border === FLEXIBLE_BORDER ||
+        requiredSurface === standingOn;
+      result.push({
+        name: b.name,
+        requiredSurface,
+        available,
+        hidden: b.hidden,
+      });
+    }
+    return result;
+  }
+
+  /**
+   * Check whether a behavior or action can immediately execute on the mascot's current surface.
+   */
+  public canExecuteBehavior(name: string): boolean {
+    if (!this.config) return false;
+    const hasBehavior = this.config.behaviors.some((b) => b.name === name);
+    const hasAction = !!this.config.actions[name];
+    if (!hasBehavior && !hasAction) return false;
+
+    const border = this.firstBorderOf(name);
+    if (border === null || border === FLEXIBLE_BORDER) return true;
+    const standingOn = this.currentBorderAt(undefined);
+    return border === standingOn;
+  }
+
+  /**
+   * Force the mascot to switch to a target behavior, bypassing surface constraints and
+   * snapping to the required surface by default.
+   */
+  public forceBehavior(
+    name: string,
+    options?: Omit<ForceBehaviorOptions, "force">,
+  ): boolean {
+    return this.setBehavior(name, { ...options, force: true });
+  }
+
   /** Convert a virtual length or coordinate to viewport pixels (the log's unit). */
   private toPage(value: number): number {
     return value * this.spriteScale;
@@ -2509,14 +2581,107 @@ export class MascotEngine {
     for (const frame of this.actionStack) this.releaseFrame(frame);
   }
 
-  private setBehavior(name: string, reason = "engine", behaviorId?: number) {
-    if (!this.config) return;
-    if (this.behaviorInitsThisTick >= MAX_BEHAVIOR_INITS_PER_TICK) {
-      if (name === "StandUp") return;
-      name = "StandUp";
-      reason = "init-limit";
+  /**
+   * Switch the mascot to a target behavior or action.
+   *
+   * @param name Target behavior or action name (e.g. "StandUp", "SitDown", "Dance").
+   * @param optionsOrReason Configuration options or legacy string reason.
+   * @param behaviorId Optional specific behavior entry id.
+   * @returns `true` if the switch succeeded, `false` otherwise.
+   */
+  public setBehavior(
+    name: string,
+    optionsOrReason?: ForceBehaviorOptions | string,
+    behaviorId?: number,
+  ): boolean {
+    if (!this.config) return false;
+
+    const isInternalStringCall = typeof optionsOrReason === "string";
+    const options: ForceBehaviorOptions = isInternalStringCall
+      ? { reason: optionsOrReason, force: true }
+      : (optionsOrReason ?? {});
+
+    let reason =
+      options.reason ?? (isInternalStringCall ? optionsOrReason : "manual-api");
+    const force = options.force ?? false;
+    const snapToSurface = isInternalStringCall
+      ? false
+      : (options.snapToSurface ?? (force ? true : false));
+
+    const hasBehavior = this.config.behaviors.some((b) => b.name === name);
+    const hasAction = !!this.config.actions[name];
+    if (!hasBehavior && !hasAction) return false;
+
+    if (!force && !this.canExecuteBehavior(name)) {
+      return false;
     }
-    this.behaviorInitsThisTick++;
+
+    if (!isInternalStringCall && (this.pressActive || this.isDragging)) {
+      if (this.activePointerId !== null) {
+        try {
+          if (this.elRoot.hasPointerCapture?.(this.activePointerId)) {
+            this.elRoot.releasePointerCapture(this.activePointerId);
+          }
+        } catch {
+          // Ignore if pointer capture release fails
+        }
+        this.activePointerId = null;
+      }
+      this.pressActive = false;
+      this.hotspotHold = null;
+      this.isDragging = false;
+      this.dragGrab = null;
+      this.elRoot.style.cursor = "grab";
+    }
+
+    if (snapToSurface) {
+      const requiredBorder = this.firstBorderOf(name);
+      if (requiredBorder && requiredBorder !== FLEXIBLE_BORDER) {
+        const area = this.area();
+        if (requiredBorder === "Floor") {
+          this.y = area.bottom;
+          this.prevY = area.bottom;
+          this.lastSurface = "floor";
+          this.vx = 0;
+          this.vy = 0;
+        } else if (requiredBorder === "Wall") {
+          const distLeft = Math.abs(this.x - area.left);
+          const distRight = Math.abs(this.x - area.right);
+          if (distLeft <= distRight) {
+            this.x = area.left;
+            this.prevX = area.left;
+            this.lookRight = false;
+            this.lastSurface = "left-wall";
+          } else {
+            this.x = area.right;
+            this.prevX = area.right;
+            this.lookRight = true;
+            this.lastSurface = "right-wall";
+          }
+          this.vx = 0;
+          this.vy = 0;
+        } else if (requiredBorder === "Ceiling") {
+          this.y = area.top;
+          this.prevY = area.top;
+          this.lastSurface = "ceiling";
+          this.vx = 0;
+          this.vy = 0;
+        }
+        this.constrainToWorkArea();
+      }
+    }
+
+    if (!isInternalStringCall) {
+      this.behaviorInitsThisTick = 0;
+    } else {
+      if (this.behaviorInitsThisTick >= MAX_BEHAVIOR_INITS_PER_TICK) {
+        if (name === "StandUp") return false;
+        name = "StandUp";
+        reason = "init-limit";
+      }
+      this.behaviorInitsThisTick++;
+    }
+
     const behavior =
       this.config.behaviors.find(
         (entry) =>
@@ -2530,7 +2695,7 @@ export class MascotEngine {
       behavior ||
       this.config.behaviors.find((entry) => entry.name === "StandUp") ||
       this.config.behaviors[0];
-    if (!selected) return;
+    if (!selected) return false;
     const action = this.config.actions[selected.name];
     const from = this.currentBehavior?.name ?? "";
     this.behaviorTicks = 0;
@@ -2542,7 +2707,7 @@ export class MascotEngine {
       this.interactionVisualActive = false;
       this.currentBehavior = selected;
       this.onBehaviorEnd(reason);
-      return;
+      return true;
     }
     // libshijima activate_queued_behavior(): running the behaviour a live handshake
     // asked for marks that handshake as started.
@@ -2584,6 +2749,14 @@ export class MascotEngine {
         leaf: this.leafLabel(),
       });
     }
+
+    if (!isInternalStringCall) {
+      this.actionExpansionsThisTick = 0;
+      this.advanceActionTree();
+      this.renderNow();
+    }
+
+    return true;
   }
 
   private loop(timestamp: number) {
