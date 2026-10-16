@@ -54,6 +54,12 @@ attach({ console: true });               // 观测日志：宠物移动史
 | `Mascot` | `class` | 一只已挂载的宠物 | 3.3 |
 | `Mascot.engine` | `MascotEngine` | 引擎实例，取仿真状态（`snapshot()` / `position()`）用 | 3.3 |
 | `Mascot.label` | `string` | 稳定标识，形如 `1-Neuron` | 3.3 |
+| `Mascot.currentBehavior` | `string \| null` | 当前正在运行的行为名称（只读属性 / `getCurrentBehavior()`） | 3.3 |
+| `Mascot.getBehaviors` | `() => BehaviorInfo[]` | 获取所有支持的顶层动作列表及其表面约束与可用性 | 3.3 |
+| `Mascot.canExecuteBehavior` | `(name: string) => boolean` | 查询指定动作在当前表面是否可立即执行 | 3.3 |
+| `Mascot.setBehavior` | `(name: string, options?: ForceBehaviorOptions) => boolean` | 安全切换至指定动作（受当前表面约束，不满足返回 `false`） | 3.3 |
+| `Mascot.forceBehavior` | `(name: string, options?: ForceBehaviorOptions) => boolean` | 强制切换动作（绕过表面检查，默认自动吸附/瞬移至目标表面） | 3.3 |
+| `Mascot.setClickThrough` | `(enabled: boolean) => void` | 设置该宠物的鼠标穿透（忽略交互命中） | 3.3 |
 | `Mascot.destroy` | `() => void` | 移除宠物，释放 DOM / 定时器 / 监听器；**可重复调用** | 3.3 |
 | `importMascotPack` | `(input: MascotPackInput, options?: ImportMascotPackOptions) => Promise<ImportedMascotPack>` | 导入 Shimeji ZIP / Blob / URL 资源包，注册为虚拟模型 | 3.8 |
 | `registerMascotPack` | `(pack: MascotPackData) => void` | 注册自定义虚拟模型数据（支持替换内置模型） | 3.8 |
@@ -70,7 +76,7 @@ attach({ console: true });               // 观测日志：宠物移动史
 | `DEFAULT_PACK_BASE_URL` | `string` | 兜底常量 `"/mascot_pack"` | 3.4 |
 | `resolveAssetBase` | `(url?: string) => string \| undefined` | 从模块 URL 推导包根目录，纯函数 | 3.4 |
 | `MascotEngine` | `class` | 高级用法，**不承诺稳定** | 3.4 |
-| `MascotGroup` | `class` | 多宠群组生命周期与编排管理 | 3.6 |
+| `MascotGroup` | `class` | 多宠群组生命周期与编排管理（含群组级 `setBehavior` / `forceBehavior`） | 3.9 |
 | `ViewportHost` | `class` | 全屏 Shadow DOM 隔离视口与占位图管理 | 3.6 |
 | `AnimationConfig` | `class` | 高级用法，**不承诺稳定** | 3.4 |
 | `BroadcastManager` | `class` | 高级用法，**不承诺稳定** | 3.4 |
@@ -78,7 +84,7 @@ attach({ console: true });               // 观测日志：宠物移动史
 | `LIVELY_ANIMATION_PRESET` | `MascotAnimationOptions` | 网页偏活跃默认预设（含防发呆与出池断环） | 3.6 |
 | `STANDARD_CONFIG_SAMPLE` | `AnimationPresetFile` | 标准化配置样例文档对象 | 3.6 |
 
-类型：`MascotOptions`、`MascotConfig`、`MascotGroupSpawnOptions`、`RuntimeOptions`、`RuntimeSnapshot`、`MascotAnimationOptions`、`AnimationPresetFile`、`Pose`、`ActionNode`、`Behavior`、`Hotspot`、`EngineEvent`、`EngineObserver`、`MascotPackInput`、`ImportMascotPackOptions`、`ImportedMascotPack`、`MascotPackData`、`ShimejiFinderResult`、`ShimejiPackEntry`、`ShimejiWarning`。
+类型：`MascotOptions`、`MascotConfig`、`MascotGroupSpawnOptions`、`RuntimeOptions`、`RuntimeSnapshot`、`MascotAnimationOptions`、`AnimationPresetFile`、`Pose`、`ActionNode`、`Behavior`、`BehaviorInfo`、`ForceBehaviorOptions`、`Hotspot`、`EngineEvent`、`EngineObserver`、`MascotPackInput`、`ImportMascotPackOptions`、`ImportedMascotPack`、`MascotPackData`、`ShimejiFinderResult`、`ShimejiPackEntry`、`ShimejiWarning`。
 
 ### 开发工具入口 `web-mascot/devtools`（13 个值 + 8 个类型）
 
@@ -220,11 +226,101 @@ function createMascot(options: MascotOptions): Promise<Mascot>
 
 ### 3.3 `class Mascot`
 
-| 成员 | 说明 |
-| --- | --- |
-| `engine: MascotEngine` | 引擎实例，供控制台调试或需要仿真状态时使用 |
-| `label: string` | 稳定标识，形如 `1-Neuron`；dev 构建下用于命名日志文件 |
-| `destroy(): void` | 移除宠物，释放 DOM、定时器与监听器。**可重复调用** |
+一只已挂载到页面的宠物主控制对象，由 `createMascot()` 返回。
+
+#### 3.3.1 属性与方法
+
+| 成员 | 签名 / 类型 | 说明 |
+| --- | --- | --- |
+| `engine` | `MascotEngine` | 底层仿真引擎实例，供调试或高级底层调度使用 |
+| `label` | `string` | 宠物的稳定会话标识，形如 `1-Neuron` |
+| `currentBehavior` | `string \| null` | 当前正在运行的行为名称（只读属性），等价于 `getCurrentBehavior()` |
+| `getCurrentBehavior()` | `() => string \| null` | 获取当前正在运行的行为名称，未就绪时返回 `null` |
+| `getBehaviors()` | `() => BehaviorInfo[]` | 查询该宠物支持的全部顶层动作列表及其表面约束与即时可用性 |
+| `canExecuteBehavior(name)` | `(name: string) => boolean` | 查询指定动作在宠物**当前所处表面**是否可立即执行 |
+| `setBehavior(name, options?)` | `(name: string, options?: ForceBehaviorOptions) => boolean` | 安全切换动作。默认受当前物理表面约束；若不匹配则返回 `false` 且不中断当前行为 |
+| `forceBehavior(name, options?)` | `(name: string, options?: Omit<ForceBehaviorOptions, "force">) => boolean` | 强制切换动作。绕过表面检查，**默认自动吸附/瞬移至目标所需表面** |
+| `setClickThrough(enabled)` | `(enabled: boolean) => void` | 设置是否开启鼠标穿透模式（开启后宠物忽略所有指针事件） |
+| `destroy()` | `() => void` | 移除宠物，销毁 DOM 节点、定时器及事件监听器。**安全且可重复调用** |
+
+#### 3.3.2 动作控制类型定义
+
+```ts
+export interface BehaviorInfo {
+  /** 行为名称，如 "StandUp"、"SitDown"、"ClimbAlongWall" */
+  name: string;
+  /** 该动作所要求的起始接触表面；若为 null 则表示空中动作或无表面约束 */
+  requiredSurface: "Floor" | "Wall" | "Ceiling" | null;
+  /** 当前表面是否可立即执行该动作（true 表示无需强切瞬移即可运行） */
+  available: boolean;
+  /** 该动作在模型配置中是否被标记为隐藏（如爬墙、天花板动作通常为 true） */
+  hidden: boolean;
+}
+
+export interface ForceBehaviorOptions {
+  /**
+   * 是否绕过表面约束检查。
+   * - false（默认）：若当前表面与动作要求的表面不符，切换失败并返回 false。
+   * - true：强制切换至该动作。
+   */
+  force?: boolean;
+  /**
+   * 是否在强制切换时自动将宠物吸附/瞬移至目标表面。
+   * - force 为 true 时默认为 true：地面动作吸附至底部、墙壁动作就近吸附至左/右墙并同步朝向、天花板动作吸附至顶部，重置速度为 0。
+   * - 若显式设为 false，宠物将在原地强行切入该动作（若无表面支撑可能在后续物理帧触发掉落）。
+   */
+  snapToSurface?: boolean;
+  /**
+   * 触发原因标识，用于 EngineEvent 与开发日志追踪。默认为 "manual-api"。
+   */
+  reason?: string;
+}
+```
+
+#### 3.3.3 动作切换机制与边缘保护
+
+1. **零延迟即刻响应**：调用 `setBehavior` 或 `forceBehavior` 后，引擎会在当前调用内重置动作展开深度，立即展开动作树并完成首帧绘制（`renderNow()`），开发者无需等待 40ms 的物理步长间隔。
+2. **指针与拖拽防护**：若在宠物正被用户鼠标/手指拖拽（`isDragging`）或长按时调用了主动切换 API，引擎会自动释放 Pointer Capture 并中止拖拽状态，恢复正常指针样式，确保不会因拖拽状态滞留导致逻辑死锁。
+3. **智能表面就近吸附 (`snapToSurface`)**：
+   - 切换至 `Floor` 动作：瞬移至工作区底部边界（`area.bottom`），纵向速度归零，表面标记为 `floor`。
+   - 切换至 `Wall` 动作：计算宠物当前坐标距左墙与右墙的水平距离，就近吸附至最近的一侧边缘，自动同步朝向（在右墙面向右，在左墙面向左），横纵向速度归零。
+   - 切换至 `Ceiling` 动作：瞬移至工作区顶部边界（`area.top`），纵向速度归零，表面标记为 `ceiling`。
+
+#### 3.3.4 右键菜单与控制面板实战示例
+
+```ts
+import { createMascot } from "web-mascot";
+
+const mascot = await createMascot({
+  container: document.body,
+  pack: "Neuron",
+});
+
+// 1. 获取所有支持的行为构建自定义右键菜单
+const menuItems = mascot.getBehaviors().map((b) => ({
+  label: b.name,
+  // 可以在 UI 上标记当前是否可直接点击
+  enabled: b.available,
+  onClick: () => {
+    // 强制切换并就近吸附到对应表面（推荐）
+    mascot.forceBehavior(b.name);
+  },
+}));
+
+// 2. 快捷键直接让宠物坐下（只有在地面时才生效）
+window.addEventListener("keydown", (e) => {
+  if (e.key === "s") {
+    const success = mascot.setBehavior("SitDown");
+    if (!success) {
+      console.log("当前宠物不在地面，无法就地坐下！");
+    }
+  }
+  // 3. 快捷键强制让宠物爬墙（无论身在何处，自动就近吸附到最近的墙壁爬墙）
+  if (e.key === "w") {
+    mascot.forceBehavior("ClimbAlongWall");
+  }
+});
+```
 
 ### 3.4 其余导出
 
@@ -400,6 +496,30 @@ import { registerMascotPack, unregisterMascotPack, hasMascotPack, PackRegistry }
    - 对于只有 46 张连续帧图片（`shime1.png` ~ `shime46.png`）的古早 Shimeji 资源包，自动为其注入官方通用的 `default_actions.xml` 和 `default_behaviors.xml` 模版，确保正常渲染与移动。
 4. **桌面动作优雅降级**：
    - 网页环境无法操控系统窗口，对于 `ThrowIE`、`ThrowWindow`、`WalkWithIE`、`PullWindow`、`FallWithIE`、`Breed`、`Divide` 等桌面/克隆动作，引擎会自动降级为等价的常规动作（如 `Fall`、`Walk`、`Stand`）并输出诊断 warning，绝不抛出异常中断渲染。
+
+### 3.9 `class MascotGroup` 多宠群组编排与批量动作控制
+
+管理多只桌宠（如 Neuron 与 Eviling 伴侣双宠）的并发创建、快照接力以及群组动作同步调度。
+
+#### 3.9.1 动作控制方法
+
+| 成员 | 签名 | 说明 |
+| --- | --- | --- |
+| `setBehavior(name, options?, pack?)` | `(name: string, options?: ForceBehaviorOptions, pack?: string) => boolean` | 在群组上设置动作。若指定 `pack` 则仅控制该特定模型，未指定则向所有宠物分发；至少有一只成功即返回 `true` |
+| `forceBehavior(name, options?, pack?)` | `(name: string, options?: Omit<ForceBehaviorOptions, "force">, pack?: string) => boolean` | 在群组上强制切换动作（绕过表面检查并默认自动吸附）；若指定 `pack` 则仅控制该模型 |
+
+```ts
+import { MascotGroup } from "web-mascot";
+
+const group = new MascotGroup();
+await group.spawn({ packs: ["Neuron", "Eviling"], container: document.body });
+
+// 1. 全员坐下（地面动作受表面检查约束）
+group.setBehavior("SitDown");
+
+// 2. 仅让 Neuron 强制去爬墙（自动就近吸附至墙壁）
+group.forceBehavior("ClimbAlongWall", {}, "Neuron");
+```
 
 ## 4. 开发工具入口 `web-mascot/devtools`
 
