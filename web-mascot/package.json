@@ -1,6 +1,6 @@
 {
   "name": "web-mascot",
-  "version": "0.0.4",
+  "version": "0.1.0",
   "private": false,
   "type": "module",
   "description": "Embeddable browser mascot engine: run Shimeji-format mascot packs inside any web page (NeurolingsCE-Qt web port).",
@@ -64,6 +64,7 @@
   ],
   "scripts": {
     "dev": "vite",
+    "test": "node --test tests/*.test.mjs",
     "build": "vue-tsc && vite build",
     "build:lib": "vue-tsc && vite build && tsc -p tsconfig.lib.json",
     "build:extension": "vue-tsc --noEmit && node scripts/build-extension.mjs",

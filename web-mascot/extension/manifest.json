@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "106",
   "name": "Web Mascot - 网页桌宠 (Unofficial Fan)",
-  "version": "0.0.4",
+  "version": "0.1.0",
   "description": "基于 Shimeji 规范的网页桌面萌宠扩展，可在任意网页与桌宠互动（非官方同人项目）。",
   "icons": {
     "16": "icons/icon-16.png",

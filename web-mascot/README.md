@@ -233,7 +233,7 @@ const pet = await createMascot({ container: document.body, pack: "MyPet" });
 
 ## 状态
 
-`0.0.4` — 接口尚未承诺语义化版本稳定性（0.x 允许破坏性变更）。
+`0.1.0` — 接口尚未承诺语义化版本稳定性（0.x 允许破坏性变更）。全面升级交互层为标准 Pointer Events，提供触控屏/移动端触摸拖拽与抛掷基础兼容，完善多指触控隔离与指针捕获。
 
 **动画预设架构**：引擎内置标准化的预设注册体系（`PresetRegistry`），默认采用偏活跃的 `"lively"` 预设（`src/core/animationPreset.ts`）；要回到 Qt / Shimeji-ee 原生桌面行为的宿主，传入 `configure({ preset: "classic" })` 即可。用户亦可拿已有预设派生并调用 `registerPreset()` 注册专属风格。随包的 `dist/animation.config.json` 为标准化配置导出模版。
 

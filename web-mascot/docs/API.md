@@ -578,7 +578,7 @@ const mascot = await createMascot({ container: document.querySelector("#pet-root
 
 ## 8. 发布状态与许可
 
-`version` 为 `0.0.4`。接口尚未承诺语义化版本稳定性：0.x 允许破坏性变更，其中 `MascotEngine` / `AnimationConfig` / `BroadcastManager` 属于**明确不稳定**的高级用法（见 3.4）。
+`version` 为 `0.1.0`。接口尚未承诺语义化版本稳定性：0.x 允许破坏性变更，其中 `MascotEngine` / `AnimationConfig` / `BroadcastManager` 属于**明确不稳定**的高级用法（见 3.4）。
 
 许可拆成两部分，不要混：
 
