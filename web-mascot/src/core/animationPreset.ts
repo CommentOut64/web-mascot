@@ -6,7 +6,7 @@
  *
  * Layers & Responsibilities:
  *   1. Engine Baseline (Runtime Defaults): Hard physics & engine constraints (in MascotEngine).
- *   2. Classic Preset ("classic"): 100% faithful to the original Shimeji / Qt desktop pet.
+ *   2. Classic Preset ("classic"): native XML timing and selection weights.
  *   3. Lively Preset ("lively"): Tuned specifically for web pages (anti-freeze, active wandering).
  *   4. PresetRegistry: Allows getting, modifying, registering, and switching presets without coupling.
  */
@@ -30,6 +30,12 @@ export function cloneOptions(options: MascotAnimationOptions): MascotAnimationOp
           ]),
         )
       : undefined,
+    actionHoldLimits: options.actionHoldLimits
+      ? Object.fromEntries(Object.entries(options.actionHoldLimits).map(([key, value]) => [
+          key, { ticks: Array.isArray(value?.ticks) ? [...value.ticks] : value?.ticks,
+            waitPoses: Array.isArray(value?.waitPoses) ? [...value.waitPoses] : value?.waitPoses },
+        ]))
+      : undefined,
     partnerWeights: options.partnerWeights ? { ...options.partnerWeights } : undefined,
     zone: options.zone ? { ...options.zone } : undefined,
     spawn: options.spawn ? { ...options.spawn } : undefined,
@@ -39,7 +45,7 @@ export function cloneOptions(options: MascotAnimationOptions): MascotAnimationOp
 /**
  * Classic (Qt) animation preset.
  *
- * 100% faithful to the original Shimeji / NeurolingsCE-Qt desktop pet behavior:
+ * Native Shimeji / NeurolingsCE-Qt timing and weights among eligible behaviors:
  * - Empty patch layer (no pacer, no behavior caps, no weight overrides, raw XML).
  * - All options fall back directly to XML definitions and engine runtime defaults.
  */
@@ -49,18 +55,26 @@ export const CLASSIC_ANIMATION_PRESET: Readonly<MascotAnimationOptions> = Object
  * Lively (Web Default) animation preset.
  *
  * Tuned specifically for web pages:
- * - 8s pacer (forcedSwitchTicks: 200): nudges stationary mascots into movement so page never looks frozen.
- * - Safe behavior cap (maxBehaviorTicks: 1100, 44s): prevents indefinite wall-climbing / crawling.
- * - Pacer exemption: allows long characterful animations (e.g. SitWhileDanglingLegs) to complete.
+ * - Moderate hold budgets for known idle leaves; short transitions stay short.
+ * - Pacer and age budgets request a pick at completion, never erase a finite sequence.
+ * - Long performances retain their XML timing; repeated global picks are gently reduced.
  * - Loop breaker (exitToPoolBehaviors): breaks closed nextBehavior loops so pets don't get stuck sitting.
  * - Boosts selection weight for expressive actions.
  */
-export const LIVELY_ANIMATION_PRESET: Readonly<MascotAnimationOptions> = Object.freeze({
+export const LIVELY_ANIMATION_PRESET: Readonly<MascotAnimationOptions> = Object.freeze<MascotAnimationOptions>({
   spawn: { topOffset: 100, staggerPx: 180 },
-  forcedSwitchTicks: 200,
+  forcedSwitchTicks: 300,
   pacerExemptBehaviors: ["SitWhileDanglingLegs"],
   exitToPoolBehaviors: ["SitWhileDanglingLegs"],
   maxBehaviorTicks: 1100,
+  actionHoldLimits: {
+    Stand: { ticks: [150, 250], waitPoses: [0, 2, 4] },
+    Sit: { ticks: [200, 350], waitPoses: [0, 2, 4] },
+    Sprawl: { ticks: [200, 350], waitPoses: [0, 2, 4] },
+    GrabWall: { ticks: [200, 300], waitPoses: [0, 2, 4] },
+    GrabCeiling: { ticks: [200, 300], waitPoses: [0, 2, 4] },
+  },
+  repeatBehaviorWeight: 0.65,
   behaviorWeights: {
     SitWhileDanglingLegs: 150,
     SitAndFaceMouse: 8,
@@ -136,15 +150,13 @@ export const STANDARD_CONFIG_SAMPLE = {
   respectReducedMotion: true, // Follow system prefers-reduced-motion (boolean, default true)
   defaults: {
     // --- 1. Pacing & Travel Limits ---
-    // [forcedSwitchTicks] Inactivity pacer: nudges mascot to move after N ticks of zero displacement.
-    // Unit: ticks (1 tick = 40 ms; 25 ticks = 1 s; 200 = 8 s). 0 = disabled. Classic = 0, Lively = 200.
-    forcedSwitchTicks: 200,
+    // Request travel after 12s of stillness; finish finite behaviors and whole loops first.
+    forcedSwitchTicks: 300,
 
-    // [maxBehaviorTicks] Hard cap on single behavior duration (except Fall & Dragged).
-    // Unit: ticks (0 = unlimited). Classic = 0, Lively = 1100 (44 s).
+    // Request a global-pool pick after 44s; never discard a finite sequence.
     maxBehaviorTicks: 1100,
 
-    // [pacerExemptBehaviors] Behaviors exempt from forcedSwitchTicks so stationary animations play out.
+    // Behaviors exempt from the travel request.
     pacerExemptBehaviors: ["SitWhileDanglingLegs"],
 
     // [exitToPoolBehaviors] Behaviors that return to global pool on end, breaking closed XML loops.
@@ -164,6 +176,9 @@ export const STANDARD_CONFIG_SAMPLE = {
     actionDurations: {
       // Sit: [80, 150]
     },
+    // Explicit idle wait poses share a budget; other poses retain native timing.
+    actionHoldLimits: cloneOptions(LIVELY_ANIMATION_PRESET).actionHoldLimits,
+    repeatBehaviorWeight: 0.65,
 
     // [durationScale] Multiplier applied to all XML Duration attributes (0.05 ~ 20.0, 1 = unscaled).
     durationScale: 1.0,
@@ -220,8 +235,8 @@ export const ANIMATION_PRESET_FILE = {
   _readme: [
     "web-mascot 动画配置规范文件 (Standard Animation Configuration File)。",
     "引擎支持双预设体系：",
-    "  - preset: 'lively' (默认)：专为网页端调优，8秒静止换位防呆滞，放行晃腿等长动画，打破坐姿闭环；",
-    "  - preset: 'classic'：100% 忠实还原原版 Qt / Shimeji 桌面桌宠表现，无 pacer，无权重篡改。",
+    "  - preset: 'lively' (默认)：温和缩短已知保持段，完整播放表演；12秒静止后请求在完成点换位；",
+    "  - preset: 'classic'：沿用素材原生时长与合法候选权重，不启用 pacer 或保持预算。",
     "你可以在本文件中基于 preset 微调 defaults，或在 mascots 中按宠物定制。",
     "字段详细说明与约束区间见 ANIMATION_CONFIG.md 与 src/core/animationPreset.ts。",
   ],

@@ -32,6 +32,10 @@ export interface RelayFrameSnapshot {
   progressX: number;
   progressY: number;
   durationLimit: number | null;
+  /** Shortened holds wait for their active animation cycle, including after relay. */
+  finishCycle?: boolean;
+  conditions?: Record<string, boolean>;
+  poseDurations?: number[];
 }
 
 export interface RelayVisualSnapshot {

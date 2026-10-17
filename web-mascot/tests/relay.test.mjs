@@ -564,6 +564,9 @@ test("ground movement, wall climbing, offsets and dragging keep four bounds", ()
   engine.x = 0; engine.y = 2; engine.setBehavior("HoldOntoWall", "test"); engine.advanceActionTree();
   engine.tick(); assert.equal(engine.x, 0); assert.equal(engine.y, 0);
   f.config.actions.Offset = { name: "Offset", type: "Embedded", className: "test.Offset" };
+  // Test containment after Offset, independently of the random next action.
+  // Fall deliberately permits top overflow and is covered separately above.
+  engine.onBehaviorEnd = () => engine.setBehavior("StandUp", "test-offset-complete");
   engine.setBehavior("Offset", "test");
   engine.actionStack[0].vars = { X: "-500", Y: "-500" }; engine.tick();
   assert.ok(engine.x >= 0 && engine.y >= 0);

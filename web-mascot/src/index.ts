@@ -332,7 +332,7 @@ export type { MascotGroupSpawnOptions } from "./core/MascotGroup.js";
 export { ViewportHost } from "./core/ViewportHost.js";
 export type { RuntimeOptions, RuntimeSnapshot } from "./core/MascotEngine.js";
 export { AnimationConfig } from "./core/AnimationConfig.js";
-export type { MascotAnimationOptions, AnimationConfigFile } from "./core/AnimationConfig.js";
+export type { MascotAnimationOptions, AnimationConfigFile, IdleHoldSetting } from "./core/AnimationConfig.js";
 export {
   PresetRegistry,
   CLASSIC_ANIMATION_PRESET,

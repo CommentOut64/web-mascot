@@ -6,8 +6,8 @@
  *   behaviorWeights                 selection weight (probability) of each
  *   actionDurations                 how long an action holds, in 40 ms ticks
  *   durationScale                   global multiplier on the pack's own holds
- *   forcedSwitchTicks               never stand still longer than this
- *   maxBehaviorTicks                hard cap on one behaviour (never cuts a fall)
+ *   forcedSwitchTicks               travel request consumed at a complete boundary
+ *   maxBehaviorTicks                behavior-age request, never a finite sequence cutoff
  *   maxTravelPx                     how far a wander target may be (border
  *                                   targets, i.e. "walk to the wall", are kept)
  *   zone                            the rectangle the mascot lives in; it becomes
@@ -97,6 +97,14 @@ export interface MascotAnimationOptions {
    */
   actionDurations?: Record<string, DurationSetting>;
 
+  /** Idle cycle budget and explicit zero-based waiting poses. Only these poses
+   * may change duration; all other poses retain their XML duration and order. */
+  actionHoldLimits?: Record<string, IdleHoldSetting>;
+
+  /** Multiplier for immediately repeating a behavior in the global pool (0 ~ 1).
+   * Applied only when another runnable behavior exists. Default 1. */
+  repeatBehaviorWeight?: number;
+
   /**
    * [durationScale] Global multiplier applied to all pack Duration attributes (Stay actions).
    * Range: 0.05 ~ 20.0. 1.0 = unchanged / native speed.
@@ -111,16 +119,16 @@ export interface MascotAnimationOptions {
   scale?: number;
 
   /**
-   * [forcedSwitchTicks] Inactivity pacer: nudges mascot to pick a travel behaviour if standing still for N ticks.
+   * [forcedSwitchTicks] Request travel after N stationary ticks. Finite behaviors
+   * finish normally; indefinite loops yield only at a complete cycle boundary.
    * Unit: ticks (1 tick = 40 ms; 25 ticks = 1 s; 200 = 8 s). Range: 0 ~ 1,000,000. 0 = disabled.
-   * Classic = 0 (disabled, natural XML 20-60s rest); Lively = 200 (8s anti-freeze).
+   * Classic = 0; Lively = 300 (12s, followed by a safe completion point).
    */
   forcedSwitchTicks?: number;
 
   /**
    * [pacerExemptBehaviors] Behaviours exempt from forcedSwitchTicks.
-   * Since pacer measures zero velocity as "still", long stationary animations (e.g. SitWhileDanglingLegs, ~400 ticks)
-   * would be cut mid-way without this exemption.
+   * Exempt behaviors keep their own next-list and loop rules under the pacer.
    */
   pacerExemptBehaviors?: string[];
 
@@ -137,9 +145,10 @@ export interface MascotAnimationOptions {
   interactionCooldownTicks?: number;
 
   /**
-   * [maxBehaviorTicks] Hard cap on single behaviour duration, in ticks.
+   * [maxBehaviorTicks] Request a global-pool pick after this behavior age.
    * Unit: ticks (1 tick = 40 ms). Range: 0 ~ 1,000,000. 0 = unlimited.
-   * Fall and Dragged are never interrupted. Classic = 0, Lively = 1100 (44 s).
+   * Finite sequences finish; indefinite loops yield after a complete cycle.
+   * Fall, dragging and active interactions are protected. Classic = 0, Lively = 1100.
    */
   maxBehaviorTicks?: number;
 
@@ -174,6 +183,11 @@ export interface MascotAnimationOptions {
 
 /** A duration may be written as one fixed value or as a `[min,max]` range. */
 export type DurationSetting = number | [number, number];
+
+export interface IdleHoldSetting {
+  ticks: DurationSetting;
+  waitPoses: number[];
+}
 
 export interface AnimationConfigFile {
   version?: number;
@@ -342,6 +356,18 @@ function normalizeOptions(value: unknown): MascotAnimationOptions {
   if (weightMap) options.behaviorWeights = weightMap;
   const durationMap = durations(value.actionDurations);
   if (durationMap) options.actionDurations = durationMap;
+  if (isRecord(value.actionHoldLimits)) {
+    const holds: Record<string, IdleHoldSetting> = {};
+    for (const [name, raw] of Object.entries(value.actionHoldLimits)) {
+      if (!isRecord(raw) || !Array.isArray(raw.waitPoses) || !raw.waitPoses.length ||
+          raw.waitPoses.some((index) => !Number.isInteger(index) || index < 0)) continue;
+      const ticks = durations({ hold: raw.ticks })?.hold;
+      if (name.trim() && ticks !== undefined) holds[name.trim()] = { ticks, waitPoses: [...new Set(raw.waitPoses as number[])] };
+    }
+    if (Object.keys(holds).length) options.actionHoldLimits = holds;
+  }
+  const repeat = numberOr(value.repeatBehaviorWeight);
+  if (repeat !== undefined) options.repeatBehaviorWeight = Math.max(0, Math.min(1, repeat));
   const scale = numberOr(value.durationScale);
   if (scale !== undefined) options.durationScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale));
   const spriteScale = numberOr(value.scale);
@@ -375,6 +401,8 @@ function mergeOptions(base: MascotAnimationOptions, override: MascotAnimationOpt
     denyBehaviors: override.denyBehaviors ?? base.denyBehaviors,
     behaviorWeights: { ...base.behaviorWeights, ...override.behaviorWeights },
     actionDurations: { ...base.actionDurations, ...override.actionDurations },
+    actionHoldLimits: { ...base.actionHoldLimits, ...override.actionHoldLimits },
+    repeatBehaviorWeight: override.repeatBehaviorWeight ?? base.repeatBehaviorWeight,
     durationScale: override.durationScale ?? base.durationScale,
     scale: override.scale ?? base.scale,
     forcedSwitchTicks: override.forcedSwitchTicks ?? base.forcedSwitchTicks,
@@ -396,6 +424,8 @@ function hasContent(options: MascotAnimationOptions): boolean {
     options.denyBehaviors !== undefined ||
     (options.behaviorWeights !== undefined && Object.keys(options.behaviorWeights).length > 0) ||
     (options.actionDurations !== undefined && Object.keys(options.actionDurations).length > 0) ||
+    (options.actionHoldLimits !== undefined && Object.keys(options.actionHoldLimits).length > 0) ||
+    options.repeatBehaviorWeight !== undefined ||
     options.durationScale !== undefined ||
     options.scale !== undefined ||
     options.forcedSwitchTicks !== undefined ||
@@ -561,8 +591,7 @@ export class AnimationConfig {
     return this.optionsFor(mascot).forcedSwitchTicks ?? 0;
   }
 
-  /** May the pacer interrupt this behaviour? False only for the exempted ones, so a
-   *  long stationary animation can finish while a plain idle `Stay` is still nudged. */
+  /** May the pacer request a new pick after this behavior or a complete loop? */
   public pacerApplies(mascot: string, behavior: string | undefined): boolean {
     if (!behavior) return true;
     return !(this.optionsFor(mascot).pacerExemptBehaviors?.includes(behavior) ?? false);
@@ -617,13 +646,19 @@ export class AnimationConfig {
    * once per action instance: calling it per tick would re-roll the range.
    */
   public durationTicks(mascot: string, action: string | undefined): number | null {
-    if (!action) return null;
-    const setting = this.optionsFor(mascot).actionDurations?.[action];
+    return this.sampleDuration(action ? this.optionsFor(mascot).actionDurations?.[action] : undefined);
+  }
+
+  public holdLimitTicks(mascot: string, action: string | undefined): number | null {
+    return this.sampleDuration(action ? this.optionsFor(mascot).actionHoldLimits?.[action]?.ticks : undefined);
+  }
+
+  private sampleDuration(setting: DurationSetting | undefined): number | null {
     if (setting === undefined) return null;
     if (typeof setting === "number") return setting;
     const [low, high] = setting;
     if (high <= low) return low;
-    return low + Math.round(Math.random() * (high - low));
+    return low + Math.floor(Math.random() * (high - low + 1));
   }
 
   /** True when this action has an explicit duration override. */
@@ -667,6 +702,8 @@ export class AnimationConfig {
       `deny=${options.denyBehaviors ? options.denyBehaviors.length : 0}`,
       `weights=${options.behaviorWeights ? Object.keys(options.behaviorWeights).length : 0}`,
       `durations=${options.actionDurations ? Object.keys(options.actionDurations).length : 0}`,
+      `holds=${Object.keys(options.actionHoldLimits ?? {}).length}`,
+      `repeat=${options.repeatBehaviorWeight ?? 1}`,
       `zone=${options.zone && Object.keys(options.zone).length ? JSON.stringify(options.zone) : "full"}`,
       `spawn=${options.spawn && Object.keys(options.spawn).length ? JSON.stringify(options.spawn) : "default"}`,
       `reduced=${this.reducedActive ? "on" : "off"}`,
@@ -695,6 +732,10 @@ export class AnimationConfig {
           .join(", ")}`,
       );
     }
+    if (options.actionHoldLimits && Object.keys(options.actionHoldLimits).length > 0) {
+      lines.push(`actionHoldLimits: ${JSON.stringify(options.actionHoldLimits)} (idle waits only; complete pose order)`);
+    }
+    if (options.repeatBehaviorWeight !== undefined) lines.push(`repeatBehaviorWeight: ${options.repeatBehaviorWeight}`);
     if (options.durationScale !== undefined) lines.push(`durationScale: ${options.durationScale}`);
     if (options.scale !== undefined) {
       lines.push(`scale: ${options.scale}x (1 virtual unit = 1 sprite px, drawn ${options.scale}x)`);

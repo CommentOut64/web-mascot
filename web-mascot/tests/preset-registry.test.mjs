@@ -23,7 +23,7 @@ test("PresetRegistry: contains standard lively and classic presets by default", 
 test("PresetRegistry: provides accurate definitions for lively vs classic", () => {
   const lively = getPreset("lively");
   assert.ok(lively);
-  assert.equal(lively.forcedSwitchTicks, 200);
+  assert.equal(lively.forcedSwitchTicks, 300);
   assert.equal(lively.maxBehaviorTicks, 1100);
   assert.deepEqual(lively.pacerExemptBehaviors, ["SitWhileDanglingLegs"]);
   assert.deepEqual(lively.exitToPoolBehaviors, ["SitWhileDanglingLegs"]);
@@ -43,7 +43,7 @@ test("PresetRegistry: returns deep clone to prevent external mutation leakage", 
   p1.pacerExemptBehaviors.push("HackedBehavior");
 
   const p2 = getPreset("lively");
-  assert.equal(p2.forcedSwitchTicks, 200, "original preset must not be mutated");
+  assert.equal(p2.forcedSwitchTicks, 300, "original preset must not be mutated");
   assert.deepEqual(p2.pacerExemptBehaviors, ["SitWhileDanglingLegs"]);
 });
 
@@ -106,7 +106,7 @@ test("STANDARD_CONFIG_SAMPLE: provides complete, structured sample", () => {
   assert.equal(STANDARD_CONFIG_SAMPLE.version, 1);
   assert.equal(STANDARD_CONFIG_SAMPLE.preset, "lively");
   assert.ok(STANDARD_CONFIG_SAMPLE.defaults);
-  assert.equal(STANDARD_CONFIG_SAMPLE.defaults.forcedSwitchTicks, 200);
+  assert.equal(STANDARD_CONFIG_SAMPLE.defaults.forcedSwitchTicks, 300);
   assert.equal(STANDARD_CONFIG_SAMPLE.defaults.scale, 1.0);
 });
 

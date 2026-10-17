@@ -1,174 +1,245 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import vm from "node:vm";
-import { build } from "esbuild";
+import { fixture } from "./helpers/engine-fixture.mjs";
 
-async function bundle(entry) {
-  const result = await build({
-    entryPoints: [entry],
-    bundle: true,
-    write: false,
-    platform: "node",
-    format: "cjs",
-    logLevel: "silent",
+function pacingFixture(defaults = {}) {
+  const f = fixture({ random: () => 0.5 });
+  f.Engine.setAnimationConfig({ preset: "classic", defaults });
+  const pose = (image, duration = 2, vx = 0) => ({ image,
+    imageAnchor: { x: 64, y: 128 }, velocity: { x: vx, y: 0 }, duration });
+  const leaf = (name, type = "Stay", poses = [pose(`/${name}.png`)]) =>
+    ({ name, type, poses, attributes: {} });
+  const ref = (name, attributes = {}) => ({ type: "ActionReference", referenceName: name, attributes });
+  const sequence = (name, children, loop = false) => ({ name, type: "Sequence", children, loop });
+  Object.assign(f.config.actions, {
+    Performance: leaf("Performance", "Animate", [pose("/first.png", 5), pose("/last.png", 5)]),
+    Finish: leaf("Finish", "Animate"),
+    Rest: sequence("Rest", [ref("Sit", { Duration: "1000" })]),
+    Travel: sequence("Travel", [ref("Walk", { TargetX: "800" })]),
+    Walk: { ...leaf("Walk", "Move", [pose("/walk.png", 2, 2)]), borderType: "Floor" },
+    Show: sequence("Show", [ref("Performance"), ref("Finish")]),
   });
-  return result.outputFiles[0].text;
+  f.config.behaviors = ["Show", "Rest", "Travel"].map((name, id) =>
+    ({ name, id, frequency: 100, hidden: false, nextBehaviors: [] }));
+  const engine = f.createEngine(); engine.x = 500; engine.y = 600;
+  const events = []; f.Engine.addObserver((_, event) => events.push(event));
+  const start = (name) => engine.forceBehavior(name);
+  const ticks = (count) => { for (let i = 0; i < count; i++) engine.tick(); };
+  return { ...f, engine, events, leaf, pose, ref, sequence, start, ticks };
 }
 
-const libCode = await bundle("src/index.ts");
+test("Pacing: timers preserve finite performances and their final step before selecting travel", () => {
+  const f = pacingFixture({ forcedSwitchTicks: 3, maxBehaviorTicks: 4 });
+  f.start("Show"); f.ticks(5);
+  assert.equal(f.engine.currentBehaviorName, "Show", "Pacer must not replace a performance halfway through");
+  assert.equal(f.engine.currentPose().image, "/last.png");
+  f.ticks(6);
+  assert.equal(f.engine.currentLeaf().name, "Finish", "The final sequence step must execute");
+  f.ticks(4);
+  assert.equal(f.engine.currentBehaviorName, "Travel", "A completed stationary behavior should still select travel");
+  assert.equal(f.events.filter((e) => e.name === "forced-switch").length, 1);
+});
 
-class MockElement {
-  style = {};
-  attributes = new Map();
-  complete = true;
-  naturalWidth = 128;
-  naturalHeight = 128;
-  capturedPointers = new Set();
-  listeners = new Map();
+test("Pacing: behavior age does not cut a finite target move or the following pose", () => {
+  const f = pacingFixture({ maxBehaviorTicks: 3 });
+  f.config.actions.Travel.children.push(f.ref("Finish"));
+  f.start("Travel"); f.ticks(10);
+  assert.equal(f.engine.currentBehaviorName, "Travel");
+  assert.equal(f.engine.currentLeaf().name, "Walk");
+  f.ticks(140);
+  assert.equal(f.engine.x, 800);
+  assert.equal(f.engine.currentLeaf().name, "Finish");
+});
 
-  addEventListener(name, callback) {
-    if (!this.listeners.has(name)) this.listeners.set(name, []);
-    this.listeners.get(name).push(callback);
-  }
+test("Pacing: an indefinite sequence yields only after all children finish", () => {
+  const f = pacingFixture({ forcedSwitchTicks: 3 });
+  f.config.actions.Show.loop = true;
+  f.start("Show"); f.ticks(5);
+  assert.equal(f.engine.currentPose().image, "/last.png");
+  f.ticks(6); assert.equal(f.engine.currentLeaf().name, "Finish");
+  f.ticks(4); assert.equal(f.engine.currentBehaviorName, "Travel");
+});
 
-  dispatchEvent(name, event) {
-    const handlers = this.listeners.get(name) ?? [];
-    for (const h of handlers) h(event);
-  }
+test("Pacing: a nested indefinite animation yields at its cycle end and preserves the tail", () => {
+  const f = pacingFixture({ maxBehaviorTicks: 3 });
+  f.config.actions.Performance.loop = true;
+  f.start("Show"); f.ticks(5);
+  assert.equal(f.engine.currentLeaf().name, "Performance");
+  f.ticks(6); assert.equal(f.engine.currentLeaf().name, "Finish");
+});
 
-  setPointerCapture(id) {
-    this.capturedPointers.add(id);
-  }
+test("Pacing: explicit container budgets cannot discard a finite sequence tail", () => {
+  const f = pacingFixture({ actionDurations: { Show: 3 } });
+  f.start("Show"); f.ticks(11);
+  assert.equal(f.engine.currentLeaf().name, "Finish");
+});
 
-  releasePointerCapture(id) {
-    this.capturedPointers.delete(id);
-  }
+test("Pacing: an explicit loop duration finishes its current animation cycle", () => {
+  const f = pacingFixture({ actionDurations: { Performance: 3 } });
+  f.config.actions.Performance.loop = true;
+  f.start("Show"); f.ticks(5);
+  assert.equal(f.engine.currentPose().image, "/last.png");
+  f.ticks(6);
+  assert.equal(f.engine.currentLeaf().name, "Finish");
+});
 
-  hasPointerCapture(id) {
-    return this.capturedPointers.has(id);
-  }
+test("Pacing: only marked waits change and short XML transitions remain short", () => {
+  const f = pacingFixture({ actionHoldLimits: { Sit: { ticks: 6, waitPoses: [0, 2] } } });
+  f.config.actions.Sit.poses = [f.pose("/wait-a.png", 8), f.pose("/blink.png", 2), f.pose("/wait-b.png", 8)];
+  f.config.actions.Rest.children = [f.ref("Sit", { Duration: "1000" }), f.ref("Finish")];
+  f.start("Rest");
+  assert.deepEqual(Array.from(f.engine.actionStack.at(-1).poseDurations), [2, 2, 2]);
+  f.ticks(2); assert.equal(f.engine.currentPose().image, "/blink.png");
+  f.ticks(2); assert.equal(f.engine.currentPose().image, "/wait-b.png");
+  f.ticks(2); assert.equal(f.engine.currentLeaf().name, "Rest");
+  f.ticks(1); assert.equal(f.engine.currentLeaf().name, "Finish");
+  f.config.actions.Rest.children[0].attributes.Duration = "2";
+  f.start("Rest"); f.ticks(3);
+  assert.equal(f.engine.currentLeaf().name, "Finish");
+});
 
-  appendChild(child) {
-    child.parentNode = this;
-  }
-  removeChild(child) {
-    child.parentNode = null;
-  }
-  getAttribute(key) {
-    return this.attributes.get(key) ?? null;
-  }
-  setAttribute(key, val) {
-    this.attributes.set(key, val);
-  }
-  removeAttribute(key) {
-    this.attributes.delete(key);
-  }
-  set src(value) {
-    this.attributes.set("src", value);
-  }
-  get src() {
-    return this.getAttribute("src");
-  }
-  async decode() {}
-  getBoundingClientRect() {
-    return { left: 0, top: 0, right: 1000, bottom: 600, width: 1000, height: 600 };
-  }
-}
+test("Pacing: unknown long holds and classic timing retain the XML duration", () => {
+  const f = pacingFixture({ actionHoldLimits: { Sit: { ticks: 5, waitPoses: [0] } } });
+  f.config.actions.Custom = f.leaf("Custom");
+  f.config.actions.Rest.children = [f.ref("Custom", { Duration: "40" })];
+  f.start("Rest"); f.ticks(20);
+  assert.equal(f.engine.currentLeaf().name, "Custom");
+  f.Engine.setAnimationConfig({ preset: "classic" });
+  f.config.actions.Rest.children = [f.ref("Sit", { Duration: "40" })];
+  f.start("Rest"); f.ticks(20);
+  assert.equal(f.engine.currentLeaf().name, "Sit");
+});
 
-function fixture() {
-  const events = new Map();
-  const module = { exports: {} };
-  const window = {
-    innerWidth: 1000,
-    innerHeight: 600,
-    scrollY: 0,
-    addEventListener(name, callback) {
-      if (!events.has(name)) events.set(name, []);
-      events.get(name).push(callback);
-    },
-    setTimeout,
-    clearTimeout,
-  };
-  const createdElements = [];
-  vm.runInNewContext(libCode, {
-    module,
-    exports: module.exports,
-    console,
-    performance,
-    window,
-    document: {
-      hidden: false,
-      createElement: () => {
-        const el = new MockElement();
-        createdElements.push(el);
-        return el;
-      },
-      addEventListener() {},
-    },
-    AbortController,
-    requestAnimationFrame: () => 1,
-    cancelAnimationFrame() {},
-  });
+test("Pacing: changing hold configuration affects the next entry without restarting the current hold", () => {
+  const f = pacingFixture({ actionHoldLimits: { Sit: { ticks: 8, waitPoses: [0] } } });
+  f.config.actions.Sit.poses = [f.pose("/sit.png", 2)];
+  f.start("Rest"); f.ticks(2);
+  f.Engine.setAnimationConfig({ preset: "classic", defaults: { actionHoldLimits: { Sit: { ticks: 2, waitPoses: [0] } } } });
+  f.ticks(5);
+  assert.equal(f.engine.currentLeaf().name, "Sit");
+  assert.equal(f.engine.actionStack.at(-1).elapsed, 7, "Changing a table must preserve the current action clock");
+  f.start("Rest"); f.ticks(2);
+  assert.equal(f.engine.currentLeaf().name, "Rest", "A new entry must use the new budget");
+});
 
-  const pkg = module.exports;
-  const Engine = pkg.MascotEngine;
-
-  const pose = {
-    image: "/stand.png",
-    imageAnchor: { x: 64, y: 128 },
-    velocity: { x: 0, y: 0 },
-    duration: 100,
-  };
-
-  const leaf = (name, type = "Stay", borderType = "") => ({
-    name,
-    type,
-    poses: [pose],
-    attributes: borderType ? { BorderType: borderType } : {},
-  });
-
-  const reference = (name) => ({
-    type: "ActionReference",
-    referenceName: name,
-    attributes: {},
-  });
-
-  const actions = {
-    Stand: leaf("Stand", "Stay", "Floor"),
-    Sit: leaf("Sit", "Stay", "Floor"),
-    Climb: leaf("Climb", "Stay", "Wall"),
-    Hang: leaf("Hang", "Stay", "Ceiling"),
-    FreeFly: leaf("FreeFly", "Stay", ""),
-    Dragged: leaf("Dragged", "Stay", ""),
-    Thrown: leaf("Thrown", "Stay", ""),
-    StandUp: { name: "StandUp", type: "Sequence", children: [reference("Stand")] },
-    SitDown: { name: "SitDown", type: "Sequence", children: [reference("Sit")] },
-    ClimbWall: { name: "ClimbWall", type: "Sequence", children: [reference("Climb")] },
-    HangCeiling: { name: "HangCeiling", type: "Sequence", children: [reference("Hang")] },
-    FlyAround: { name: "FlyAround", type: "Sequence", children: [reference("FreeFly")] },
-  };
-
-  const behaviors = [
-    { name: "StandUp", id: 1, frequency: 10, hidden: false, nextBehaviors: [] },
-    { name: "SitDown", id: 2, frequency: 10, hidden: false, nextBehaviors: [] },
-    { name: "ClimbWall", id: 3, frequency: 10, hidden: true, nextBehaviors: [] },
-    { name: "HangCeiling", id: 4, frequency: 10, hidden: true, nextBehaviors: [] },
-    { name: "FlyAround", id: 5, frequency: 10, hidden: false, nextBehaviors: [] },
-    // Duplicate behavior entry to verify de-duplication in getBehaviors()
-    { name: "SitDown", id: 6, frequency: 5, hidden: false, nextBehaviors: [] },
+test("Pacing: conditional animation variants retain native timing", () => {
+  const f = pacingFixture({ actionHoldLimits: { Sit: { ticks: 4, waitPoses: [0] } } });
+  f.config.actions.Sit.animations = [
+    { condition: "#{mascot.lookRight}", poses: [f.pose("/right-a.png", 4), f.pose("/right-b.png", 4)] },
+    { poses: [f.pose("/left.png", 2)] },
   ];
+  f.start("Rest"); f.ticks(1); f.engine.lookRight = true; f.ticks(1);
+  const restored = f.createEngine();
+  assert.equal(restored.restoreRelaySnapshot(JSON.parse(JSON.stringify(f.engine.createRelaySnapshot()))), true);
+  for (let i = 0; i < 10; i++) restored.tick();
+  assert.equal(restored.currentLeaf().name, "Sit");
+  assert.equal(restored.actionStack.at(-1).durationLimit, 1000);
+});
 
-  const config = { actions, behaviors };
+test("Pacing: relay restoration retains a pending loop exit and its remaining poses", () => {
+  const f = pacingFixture({ maxBehaviorTicks: 3 });
+  f.config.actions.Show.loop = true;
+  f.start("Show"); f.ticks(5);
+  const snapshot = JSON.parse(JSON.stringify(f.engine.createRelaySnapshot()));
+  const restored = f.createEngine();
+  assert.equal(restored.restoreRelaySnapshot(snapshot), true);
+  assert.equal(restored.currentPose().image, "/last.png");
+  for (let i = 0; i < 6; i++) restored.tick();
+  assert.equal(restored.currentLeaf().name, "Finish");
+  for (let i = 0; i < 4; i++) restored.tick();
+  assert.notEqual(restored.currentBehaviorName, "Show", "The restored age budget must release the loop after its tail");
+});
 
-  const createEngine = (pack = "Neuron") => {
-    const engine = new Engine(new MockElement(), pack);
-    engine.config = config;
-    Engine.liveEngines.add(engine);
-    return engine;
-  };
+test("Pacing: wall contact preserves the remaining steps of a compound behavior", () => {
+  const f = pacingFixture();
+  f.config.actions.Travel.children.push(f.ref("Finish"));
+  f.config.actions.Travel.children[0].attributes.TargetX = "1500";
+  f.start("Travel"); f.engine.x = 999; f.ticks(1);
+  assert.equal(f.engine.x, 1000);
+  assert.equal(f.engine.currentBehaviorName, "Travel");
+  assert.equal(f.engine.currentLeaf().name, "Finish");
+});
 
-  return { pkg, Engine, createEngine, config, window };
-}
+test("Pacing: a long stationary pose inside a move is not mistaken for a stall", () => {
+  const f = pacingFixture({ maxBehaviorTicks: 3 });
+  f.config.actions.Walk.poses = [f.pose("/pause.png", 200), f.pose("/walk.png", 2, 2)];
+  f.start("Travel"); f.ticks(160);
+  assert.equal(f.engine.currentLeaf().name, "Walk");
+  assert.equal(f.engine.x, 500);
+  f.ticks(42);
+  assert.ok(f.engine.x > 500, "The movement must resume after its authored pause");
+});
+
+test("Pacing: an unreachable target with no moving poses still recovers into the tail", () => {
+  const f = pacingFixture();
+  f.config.actions.Walk.poses = [f.pose("/broken-move.png", 2)];
+  f.config.actions.Travel.children.push(f.ref("Finish"));
+  f.start("Travel"); f.ticks(151);
+  assert.equal(f.engine.currentBehaviorName, "Travel");
+  assert.equal(f.engine.currentLeaf().name, "Finish");
+});
+
+test("Pacing: a claimed advertisement and a live interaction keep their running loops", () => {
+  for (const protection of ["claim", "interaction"]) {
+    const f = pacingFixture({ forcedSwitchTicks: 3, maxBehaviorTicks: 4 });
+    f.config.actions.Performance.loop = true;
+    f.start("Show");
+    const frame = f.engine.actionStack.at(-1);
+    if (protection === "claim") frame.server = { isClaimed: true, active: false, didMeetUp: false };
+    else f.engine.interaction = { ongoing: true };
+    f.ticks(25);
+    assert.equal(f.engine.currentLeaf().name, "Performance", `${protection} must protect the loop`);
+  }
+});
+
+test("Pacing: short finite holds continue random switching without any pacer", () => {
+  const f = pacingFixture();
+  f.config.behaviors.find((entry) => entry.name === "Rest").frequency = 0;
+  f.config.actions.Rest.children[0].attributes.Duration = "3";
+  f.start("Rest"); f.ticks(6);
+  assert.notEqual(f.engine.currentBehaviorName, "Rest");
+  assert.equal(f.events.find((e) => e.kind === "behavior" && e.from === "Rest").reason, "behavior-end");
+});
+
+test("Pacing: repeat weighting changes a global pick but preserves a required next-list", () => {
+  const f = pacingFixture({ repeatBehaviorWeight: 0.65 });
+  f.config.behaviors = ["Rest", "Show"].map((name, id) =>
+    ({ name, id, frequency: 100, nextBehaviors: [] }));
+  f.start("Show"); f.engine.onBehaviorEnd();
+  assert.equal(f.engine.currentBehaviorName, "Rest", "Equal global weights should favor the alternative at this fixed draw");
+  f.config.behaviors[1].addNext = false;
+  f.config.behaviors[1].nextBehaviors = [{ name: "Show", frequency: 100 }];
+  f.start("Show"); f.engine.onBehaviorEnd();
+  assert.equal(f.engine.currentBehaviorName, "Show", "Required XML next-list must remain authoritative");
+});
+
+test("Pacing: registered hold policies survive layer merging, cloning and JSON reload", () => {
+  const f = pacingFixture();
+  f.config.actions.Sit.poses = [f.pose("/sit.png", 2)];
+  f.pkg.registerPreset("gentle", { actionHoldLimits: { Sit: { ticks: [8, 8], waitPoses: [0] }, Sprawl: { ticks: 12, waitPoses: [0] } }, repeatBehaviorWeight: 0.8 });
+  const copy = f.pkg.getPreset("gentle"); copy.actionHoldLimits.Sit.ticks[0] = 999; copy.actionHoldLimits.Sit.waitPoses[0] = 999;
+  f.pkg.usePreset("gentle");
+  const cfg = f.Engine.setAnimationConfig({ preset: "gentle",
+    defaults: { actionHoldLimits: { Sit: { ticks: 6, waitPoses: [0] } } },
+    reducedMotion: { actionHoldLimits: { Sit: { ticks: 5, waitPoses: [0] } } },
+    mascots: { Neuron: { actionHoldLimits: { Sit: { ticks: 4, waitPoses: [0] } } } } });
+  cfg.setReducedMotion(true);
+  const reloaded = f.Engine.setAnimationConfig(cfg.toJSON()); reloaded.setReducedMotion(true);
+  assert.equal(reloaded.holdLimitTicks("Neuron", "Sit"), 4);
+  assert.equal(reloaded.holdLimitTicks("Eviling", "Sit"), 5);
+  assert.equal(reloaded.holdLimitTicks("Neuron", "Sprawl"), 12);
+  assert.equal(reloaded.optionsFor("Neuron").repeatBehaviorWeight, 0.8);
+  f.config.actions.Rest.children[0].attributes.Duration = "1000";
+  f.start("Rest"); f.ticks(4);
+  assert.equal(f.engine.currentLeaf().name, "Rest", "Reloaded policy must actually shorten the hold");
+  f.pkg.usePreset("classic");
+  f.Engine.setAnimationConfig({ preset: "classic" });
+  f.start("Rest"); f.ticks(4);
+  assert.equal(f.engine.currentLeaf().name, "Sit", "Switching to classic must remove the hold policy");
+  f.Engine.setAnimationConfig({ preset: "gentle" });
+  f.start("Rest"); f.ticks(8);
+  assert.equal(f.engine.currentLeaf().name, "Rest", "Mutating a returned preset must not mutate registered ranges");
+});
 
 test("Behavior API: getBehaviors() returns distinct behavior list with surface requirements", () => {
   const { createEngine } = fixture();

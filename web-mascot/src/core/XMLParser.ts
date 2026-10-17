@@ -253,14 +253,22 @@ export class XMLParser {
       const frequency = Number.isFinite(frequencyValue) ? Math.max(0, frequencyValue) : 0;
       const hidden = node.getAttribute("Hidden") === "true";
 
-      let condition: string | undefined = undefined;
-      const parent = node.parentNode as Element;
-      if (
-        parent &&
-        (parent.localName === "Condition" || parent.tagName === "Condition")
-      ) {
-        condition = parent.getAttribute("Condition") || undefined;
+      const conditions: string[] = [];
+      const ownCondition = node.getAttribute("Condition");
+      if (ownCondition) conditions.push(ownCondition);
+      let parent = node.parentNode as Element | null;
+      while (parent) {
+        if (parent.localName === "Condition" || parent.tagName === "Condition") {
+          const inherited = parent.getAttribute("Condition");
+          if (inherited) conditions.unshift(inherited);
+        }
+        parent = parent.parentNode as Element | null;
       }
+      // Behavior conditions are evaluated at selection, so their conjunction is
+      // live. Keep a single expression intact for diagnostics.
+      const condition = conditions.length > 1
+        ? `#{${conditions.map((entry) => `(${entry.replace(/^[#$]\{|\}$/g, "")})`).join(" && ")}}`
+        : conditions[0];
 
       const nextBehaviors: BehaviorReference[] = [];
       let addNext = true;

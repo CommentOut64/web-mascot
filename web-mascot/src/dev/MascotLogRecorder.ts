@@ -409,6 +409,12 @@ function observe(engine: MascotEngine, event: EngineEvent) {
         from: event.from || "",
         to: event.to,
         reason: event.reason,
+        selectionPolicy: event.selectionPolicy,
+        restart: event.restart,
+        instance: event.instance,
+        tick: event.tick,
+        entryId: event.entryId,
+        previousTicks: event.previousTicks,
         x,
         y,
       });
@@ -461,11 +467,11 @@ function observe(engine: MascotEngine, event: EngineEvent) {
         track.lastEvent = "";
         break;
       }
-      if (event.name === "broadcast-connect" || event.name === "interaction-arrived") {
+      if (event.name === "broadcast-reserve" || event.name === "broadcast-connect" || event.name === "interaction-arrived") {
         push(pet, {
           t,
           k: "peer",
-          event: event.name === "broadcast-connect" ? "connect" : "arrive",
+          event: event.name === "broadcast-reserve" ? "reserve" : event.name === "broadcast-connect" ? "connect" : "arrive",
           affordance: event.affordance || undefined,
           behavior: event.behavior || undefined,
           distance:

@@ -5,6 +5,7 @@ import { hotspotAt } from "./Hotspot.js";
 import { registerMascotPage } from "./MascotPageCoordinator.js";
 import { mapRelayPoint, relayPosition } from "./RelayPosition.js";
 import { evaluateExpression } from "./ExpressionEvaluator.js";
+import { idlePoseTicks } from "./idleTiming.js";
 import { loggerFor } from "./Logger.js";
 import type { Hotspot } from "./Hotspot.js";
 import type {
@@ -28,6 +29,16 @@ const warnedUnsupportedClasses = new Set<string>();
 const SCROLL_IDLE_MS = 200;
 /** Subpixel easing startup is not a visible fall or a landing impact. CSS pixels. */
 const SCROLL_MIN_AIR_HEIGHT_PX = 4;
+/**
+ * Being landed by the page's scroll is not the mascot's own idea.
+ *
+ * While this many ticks are on the clock, partner behaviours stay out of the pool,
+ * so a scroll cannot hand the mascot straight to a hug. The value is aligned with
+ * the `StandUp` hold budget (150–250 ticks): the first pick after a landing lands
+ * inside the window, so it is covered exactly once, and the mascot can join the
+ * normal schedule again right after that.
+ */
+const SCROLL_LANDING_GRACE_TICKS = 250;
 
 /**
  * Runtime tuning. Every field here is a *number the simulation reads*, exposed so a
@@ -202,7 +213,8 @@ const MAX_FRAME_DELTA_MS = 200;
 export type EngineEvent =
   | { kind: "spawn"; detail: string }
   | { kind: "despawn"; detail: string }
-  | { kind: "behavior"; from: string; to: string; reason: string; x: number; y: number; leaf: string }
+  | { kind: "behavior"; from: string; to: string; reason: string; selectionPolicy?: string; restart: boolean;
+      instance: number; tick: number; entryId?: number; previousTicks: number; x: number; y: number; leaf: string }
   | {
       kind: "stack";
       path: string;
@@ -262,7 +274,11 @@ type ActionFrame = {
   /** Values of the #{...} attributes, re-evaluated once per tick. */
   live: Record<string, unknown>;
   liveTick: number;
+  conditions: Record<string, boolean>;
+  conditionTick?: number;
   durationLimit: number | null;
+  finishCycle: boolean;
+  poseDurations?: number[];
   elapsed: number;
   poseIndex: number;
   poseTick: number;
@@ -283,6 +299,7 @@ type ActionFrame = {
 };
 
 type Area = { top: number; right: number; bottom: number; left: number };
+type PendingScan = { affordance: string; clientBehavior: string; serverBehavior: string; client: ClientHandle };
 type Surface = "floor" | "left-wall" | "right-wall" | "ceiling";
 type PauseReason = "hidden" | "viewport" | "background-page" | "relay-transfer";
 
@@ -447,6 +464,8 @@ export class MascotEngine {
   private offsetJumped = false;
   /** How long the current behaviour has been running, for the hard cap. */
   private behaviorTicks = 0;
+  private behaviorInstance = 0;
+  private pendingScan: PendingScan | null = null;
   /** Consecutive ticks the anchor has not moved, for the "standing still" pacer. */
   private stillTicks = 0;
   /** Same, but only reset by real movement: it is what guarantees a lively page. */
@@ -519,6 +538,31 @@ export class MascotEngine {
 
   private protectScrollLanding(): void {
     this.scrollFloorBlocked = this.documentScrollActive();
+  }
+
+  /**
+   * A landing is not "stood still for a while".
+   *
+   * `stillTicks` is advanced by *net displacement*, and a mascot that is carried by
+   * the page (or pinned to the floor while the document scrolls) barely displaces,
+   * so it could reach the pacer threshold without ever deciding to stand around.
+   * The first pick after such a landing was then forced to be a travelling
+   * behaviour — the "it just fell and immediately ran off" report. Resetting here
+   * makes the pacer measure stillness the mascot actually chose, and drops any
+   * pending "must travel" intent from before the fall.
+   */
+  private settleAfterLanding(): void {
+    this.stillTicks = 0;
+    this.anchorStillTicks = 0;
+    this.wantMovement = false;
+  }
+
+  /** Keep partner behaviours out of the pool for a moment after a scroll landing. */
+  private graceAfterScrollLanding(): void {
+    this.interactionCooldownUntil = Math.max(
+      this.interactionCooldownUntil,
+      this.tickCount + SCROLL_LANDING_GRACE_TICKS,
+    );
   }
 
   private isScrollStartContact(): boolean {
@@ -646,6 +690,8 @@ export class MascotEngine {
         childIndex: f.childIndex,
         vars: { ...f.vars },
         resolved: { ...f.resolved },
+        conditions: { ...f.conditions },
+        poseDurations: f.poseDurations ? [...f.poseDurations] : undefined,
         elapsed: f.elapsed,
         poseIndex: f.poseIndex,
         poseTick: f.poseTick,
@@ -654,6 +700,7 @@ export class MascotEngine {
         progressX: f.progressX,
         progressY: f.progressY,
         durationLimit: f.durationLimit,
+        finishCycle: f.finishCycle,
       })),
     };
     // Use the last actual bitmap, including image-less holds, for the loading placeholder.
@@ -799,6 +846,11 @@ export class MascotEngine {
           (saved.durationLimit !== null &&
             (!Number.isFinite(saved.durationLimit) ||
               saved.durationLimit < 0)) ||
+          (saved.finishCycle !== undefined && typeof saved.finishCycle !== "boolean") ||
+          (saved.conditions !== undefined && (typeof saved.conditions !== "object" || saved.conditions === null ||
+            Object.values(saved.conditions).some((value) => typeof value !== "boolean"))) ||
+          (saved.poseDurations !== undefined && (!Array.isArray(saved.poseDurations) ||
+            saved.poseDurations.length !== poses?.length || saved.poseDurations.some((ticks) => !Number.isInteger(ticks) || ticks < 1))) ||
           (node.children && saved.childIndex > node.children.length) ||
           (poses?.length && saved.poseIndex >= poses.length) ||
           (saved.animationIndex !== -1 &&
@@ -825,7 +877,10 @@ export class MascotEngine {
           resolved,
           live: {},
           liveTick: -1,
+          conditions: { ...saved.conditions },
+          poseDurations: saved.poseDurations ? [...saved.poseDurations] : undefined,
           durationLimit: saved.durationLimit,
+          finishCycle: saved.finishCycle ?? false,
           elapsed: saved.elapsed,
           poseIndex: saved.poseIndex,
           poseTick: saved.poseTick,
@@ -895,6 +950,7 @@ export class MascotEngine {
 
   public static addObserver(observer: EngineObserver) {
     MascotEngine.observers.add(observer);
+    return () => { MascotEngine.observers.delete(observer); };
   }
 
   /** One page-level dispatcher handles events for all mascots. */
@@ -2402,90 +2458,53 @@ export class MascotEngine {
   private resolveVars(
     attributes: Record<string, string>,
     inherited: Record<string, unknown> = {},
-  ) {
-    const resolved: Record<string, unknown> = { ...inherited };
-    // Two passes: an attribute may reference another attribute of the same
-    // <ActionReference> (TargetX="#{...cursor.x+Gap}" Gap="${...}"), which only
-    // evaluates correctly once its dependency has been resolved.
-    for (let pass = 0; pass < 2; pass++) {
-      for (const [key, raw] of Object.entries(attributes)) {
-        if (/^#\{/.test(raw)) continue; // dynamic (every frame)
-        if (/^\$\{/.test(raw)) {
-          try {
-            resolved[key] = this.run(
-              raw,
-              this.mascotScope({ ...attributes, ...resolved }),
-            );
-          } catch {
-            if (!(key in resolved)) resolved[key] = raw;
-          }
-        } else if (raw === "true" || raw === "false") {
-          resolved[key] = raw === "true";
-        } else if (raw.trim() !== "" && Number.isFinite(Number(raw))) {
-          resolved[key] = Number(raw);
-        } else {
-          resolved[key] = raw;
-        }
-      }
+    includeLive = false,
+  ): Record<string, unknown> {
+    const resolved = { ...inherited };
+    const expressions: Record<string, string> = {};
+    for (const [key, raw] of Object.entries(attributes)) {
+      if (key === "Condition" || Object.prototype.hasOwnProperty.call(resolved, key)) continue;
+      if (raw.startsWith("#{") && !includeLive) continue;
+      if (/^[#$]\{/.test(raw)) expressions[key] = raw;
+      else if (raw === "true" || raw === "false") resolved[key] = raw === "true";
+      else resolved[key] = raw.trim() !== "" && Number.isFinite(Number(raw)) ? Number(raw) : raw;
     }
+    // Resolve dependencies lazily, so declaration order never requires re-running
+    // an expression (in particular Math.random) in a second pass.
+    const scope = this.mascotScope({ ...attributes, ...resolved });
+    const resolving = new Set<string>();
+    const read = (key: string): unknown => {
+      if (Object.prototype.hasOwnProperty.call(resolved, key)) return resolved[key];
+      if (resolving.has(key)) throw new Error(`Cyclic action attribute: ${key}`);
+      resolving.add(key);
+      try { resolved[key] = this.run(expressions[key], scope); }
+      catch { resolved[key] = expressions[key]; }
+      finally { resolving.delete(key); }
+      return resolved[key];
+    };
+    for (const key of Object.keys(expressions)) {
+      Object.defineProperty(scope, key, { configurable: true, get: () => read(key) });
+      Object.defineProperty(scope.mascot as object, key, { configurable: true, get: () => read(key) });
+    }
+    for (const key of Object.keys(expressions)) read(key);
     return resolved;
   }
 
-  /** Every attribute of the frame as a value: frozen for ${...} (evaluated once,
-   *  the first time it is needed) and re-evaluated per tick for #{...}. */
+  /** Frozen attributes are evaluated once per instance; live attributes once per tick. */
   private frameVars(frame: ActionFrame | undefined): Record<string, unknown> {
     if (!frame) return {};
-    const raw = frame.vars || {};
-    // ${...} on an <ActionReference> is already frozen when the frame is created;
-    // this covers the attributes declared on the action node itself.
-    for (const [key, value] of Object.entries(raw)) {
-      if (key in frame.resolved || !/^\$\{/.test(value)) continue;
-      try {
-        frame.resolved[key] = this.run(
-          value,
-          this.mascotScope({ ...raw, ...frame.resolved }),
-        );
-      } catch {
-        frame.resolved[key] = value;
-      }
-    }
-    const frozen = frame.resolved;
-    // While the mascot is held, the pack's own `Pinched` action picks its pose from
-    // FootX/FootDX (libshijima dragged::init/subtick maintain them). Without them
-    // every one of its animation conditions is false and the held pose never
-    // changes. `resolved` is where a live attribute value belongs: it overrides the
-    // raw attribute and the ${...} freezer leaves existing keys alone.
+    const raw = frame.vars;
+    const frozen = frame.resolved = this.resolveVars(raw, frame.resolved);
     if (this.isDragging) {
-      frozen.FootX = this.footX;
-      frozen.footX = this.footX;
-      frozen.FootDX = this.footDX;
-      frozen.footDX = this.footDX;
+      frozen.FootX = this.footX; frozen.footX = this.footX;
+      frozen.FootDX = this.footDX; frozen.footDX = this.footDX;
     }
-    const hasDynamic = Object.values(raw).some((value) => /^#\{/.test(value));
-    if (!hasDynamic) return { ...raw, ...frozen };
-    if (frame.liveTick === this.tickCount) return { ...raw, ...frame.live };
-    const live: Record<string, unknown> = { ...frozen };
-    for (let pass = 0; pass < 2; pass++) {
-      for (const [key, value] of Object.entries(raw)) {
-        if (key in frozen) continue;
-        if (/^#\{/.test(value)) {
-          try {
-            live[key] = this.run(value, this.mascotScope({ ...raw, ...live }));
-          } catch {
-            live[key] = value;
-          }
-        } else if (value === "true" || value === "false") {
-          live[key] = value === "true";
-        } else if (value.trim() !== "" && Number.isFinite(Number(value))) {
-          live[key] = Number(value);
-        } else {
-          live[key] = value;
-        }
-      }
+    if (!Object.entries(raw).some(([key, value]) => key !== "Condition" && value.startsWith("#{"))) return { ...raw, ...frozen };
+    if (frame.liveTick !== this.tickCount) {
+      frame.live = this.resolveVars(raw, frozen, true);
+      frame.liveTick = this.tickCount;
     }
-    frame.live = live;
-    frame.liveTick = this.tickCount;
-    return { ...raw, ...live };
+    return { ...raw, ...frame.live };
   }
 
   private varValue(frame: ActionFrame | undefined, key: string): unknown {
@@ -2544,12 +2563,22 @@ export class MascotEngine {
     frame?: ActionFrame,
   ) {
     if (!condition) return true;
-    return Boolean(this.evaluate(condition, frame));
+    if (!frame) return Boolean(this.evaluate(condition, frame));
+    if (!condition.startsWith("${") && frame.conditionTick !== this.tickCount) {
+      for (const key of Object.keys(frame.conditions)) if (!key.startsWith("${")) delete frame.conditions[key];
+      frame.conditionTick = this.tickCount;
+    }
+    if (!Object.prototype.hasOwnProperty.call(frame.conditions, condition)) frame.conditions[condition] = Boolean(this.evaluate(condition, frame));
+    return frame.conditions[condition];
   }
 
   private evaluateNumber(expression: string | undefined, frame?: ActionFrame) {
     const value = this.evaluate(expression, frame);
     return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+
+  private frameConditionsSatisfied(frame: ActionFrame): boolean {
+    return this.evaluateCondition(frame.node.condition, frame) && this.evaluateCondition(frame.vars.Condition, frame);
   }
 
   private newFrame(
@@ -2558,6 +2587,7 @@ export class MascotEngine {
     resolved: Record<string, unknown> = {},
     parentIndex = -1,
     referenceDepth = 0,
+    conditionSource?: ActionFrame,
   ): ActionFrame {
     const frame: ActionFrame = {
       node,
@@ -2569,7 +2599,10 @@ export class MascotEngine {
       resolved,
       live: {},
       liveTick: -1,
+      conditions: { ...conditionSource?.conditions },
+      conditionTick: conditionSource?.conditionTick,
       durationLimit: null,
+      finishCycle: false,
       elapsed: 0,
       poseIndex: 0,
       poseTick: 0,
@@ -2581,8 +2614,19 @@ export class MascotEngine {
       animation: undefined,
       bornTick: this.tickCount,
     };
-    this.initBroadcast(frame);
+    if (node.type !== "ActionReference" && this.frameConditionsSatisfied(frame)) this.initBroadcast(frame);
     return frame;
+  }
+
+  private childFrame(parent: ActionFrame, node: ActionNode, index: number): ActionFrame {
+    const resolved = { ...parent.resolved };
+    const vars = { ...parent.vars };
+    delete vars.Condition;
+    delete resolved.Condition;
+    // A child's explicit attributes define a new instance, including fresh ${}
+    // values. Only attributes actually inherited retain their frozen values.
+    for (const key of Object.keys(node.attributes ?? {})) delete resolved[key];
+    return this.newFrame(node, { ...vars, ...node.attributes }, resolved, index);
   }
 
   /** libshijima `base::init()`: an action that advertises an `Affordance` starts a
@@ -2599,16 +2643,31 @@ export class MascotEngine {
         x: this.x,
         y: this.y,
       });
-      frame.client = MascotEngine.broadcasts.tryConnect(
+      const pending = this.pendingScan;
+      if (pending && pending.affordance === probe && pending.clientBehavior === this.varString(frame, "Behavior") &&
+          pending.serverBehavior === this.varString(frame, "TargetBehavior")) {
+        this.pendingScan = null;
+        frame.client = pending.client;
+      }
+      frame.client ??= MascotEngine.broadcasts.tryConnect(
         probe,
         { x: this.x, y: this.y },
         this.varString(frame, "Behavior"),
         this.varString(frame, "TargetBehavior"),
-        MascotEngine.animationConfig.scanDistancePx(this.mascotName),
+        MascotEngine.animationConfig.scanDistancePx(this.mascotName) / this.spriteScale,
+        this,
+      );
+      frame.client ??= MascotEngine.broadcasts.tryReserve(
+        probe,
+        { x: this.x, y: this.y },
+        this.varString(frame, "Behavior"),
+        this.varString(frame, "TargetBehavior"),
+        this.varString(frame, "BorderType"),
+        this,
       );
       this.emit({
         kind: "milestone",
-        name: frame.client ? "broadcast-connect" : "broadcast-scan",
+        name: frame.client?.reserved ? "broadcast-reserve" : frame.client ? "broadcast-connect" : "broadcast-scan",
         detail: `affordance=${affordance} live=${scan.live} nearest=${scan.nearest === null ? "-" : this.toPage(scan.nearest).toFixed(0)}px found=${!!frame.client}`,
         affordance: probe,
         side: "client",
@@ -2623,7 +2682,7 @@ export class MascotEngine {
     frame.server = MascotEngine.broadcasts.startBroadcast(affordance.trim(), {
       x: this.x,
       y: this.y,
-    });
+    }, this, (behavior) => this.acceptsInteraction(behavior), this.varString(frame, "BorderType"));
     const vars = { ...frame.vars };
     delete vars.Affordance;
     frame.vars = vars;
@@ -2651,6 +2710,8 @@ export class MascotEngine {
   }
 
   private releaseStack() {
+    this.pendingScan?.client.finalize();
+    this.pendingScan = null;
     for (const frame of this.actionStack) this.releaseFrame(frame);
   }
 
@@ -2666,6 +2727,7 @@ export class MascotEngine {
     name: string,
     optionsOrReason?: ForceBehaviorOptions | string,
     behaviorId?: number,
+    selectionPolicy?: string,
   ): boolean {
     if (!this.config) return false;
 
@@ -2771,6 +2833,7 @@ export class MascotEngine {
     if (!selected) return false;
     const action = this.config.actions[selected.name];
     const from = this.currentBehavior?.name ?? "";
+    const previousTicks = this.behaviorTicks;
     this.behaviorTicks = 0;
     // The pacer measures how long *this* behaviour has been standing still. Without
     // this reset an exhausted counter would switch behaviours on every tick, which
@@ -2800,6 +2863,7 @@ export class MascotEngine {
     }
     // Frames that are being replaced stop advertising and let go of scan targets.
     this.releaseStack();
+    this.pendingScan = isInternalStringCall ? this.reserveInteraction(selected.name) ?? null : null;
     this.currentBehavior = selected;
     this.interactionVisualActive =
       !!action &&
@@ -2813,12 +2877,18 @@ export class MascotEngine {
     this.actionStack = [this.newFrame(action)];
     this.scrollFallRoot = null;
     this.scrollFallHeight = 0;
-    if (from !== selected.name) {
+    {
       this.emit({
         kind: "behavior",
         from,
         to: selected.name,
         reason,
+        selectionPolicy,
+        restart: from === selected.name,
+        instance: ++this.behaviorInstance,
+        tick: this.tickCount,
+        entryId: selected.id,
+        previousTicks,
         x: this.x,
         y: this.y,
         leaf: this.leafLabel(),
@@ -2894,6 +2964,9 @@ export class MascotEngine {
     this.prevX = this.x;
     this.prevY = this.y;
     this.tickCount++;
+    for (const frame of this.actionStack) {
+      if (frame.node.type === "Sequence" || frame.node.type === "Select") frame.elapsed++;
+    }
     this.behaviorInitsThisTick = 0;
     this.actionExpansionsThisTick = 0;
     this.applyScrollIntent();
@@ -2955,7 +3028,6 @@ export class MascotEngine {
     this.stillTicks = moved ? 0 : this.stillTicks + 1;
     this.anchorStillTicks = moved ? 0 : this.anchorStillTicks + 1;
     if (moved) this.wantMovement = false;
-    if (!this.isDragging) this.enforceBehaviorSwitch();
     this.lastSurface = this.surfaceAt();
     this.observeTick(beforeX, beforeY);
   }
@@ -3031,51 +3103,38 @@ export class MascotEngine {
     );
   }
 
-  /**
-   * Animation configuration, two different limits with two different jobs:
-   *
-   *   forcedSwitchTicks  how long the mascot may stand still before it is nudged
-   *                      into something else, so a page never looks frozen. Travel
-   *                      is never cut: it is moving, so the counter is zero.
-   *   maxBehaviorTicks   a hard cap on any one behaviour, so a long wall climb or
-   *                      a crawl cannot monopolise the mascot. A fall (and a drag)
-   *                      is still left alone, since those are engine-driven states.
-   */
-  private enforceBehaviorSwitch() {
+  /** Scheduling intent, consumed only after a behavior or a whole indefinite
+   * loop completes. Deriving it from the clocks also preserves relay snapshots. */
+  private behaviorSwitchReason(): "forced-switch" | "behavior-cap" | null {
     const animation = MascotEngine.animationConfig;
     // A held mascot keeps the behaviour the drag put it in: libshijima only moves on
     // to Resisting from inside that action, and never re-picks from the pool.
-    if (this.isDragging) return;
-    if (this.isFallLike(this.currentLeaf())) return;
-    if (this.currentBehavior?.name === "Dragged") return;
+    if (this.isDragging || this.interaction.ongoing || this.interactionVisualActive)
+      return null;
+    if (this.isFallLike(this.currentLeaf())) return null;
+    if (this.currentBehavior?.name === "Dragged") return null;
     // A claimed advertisement holds its pose for the approaching partner. The pacer
     // exists so the page never looks asleep, but a mascot that is waiting to be
     // hugged is not idle — and pulling it away here is exactly what drops the scan.
     // The wait is bounded by runtime.broadcastServeTimeoutTicks, so this cannot last.
     if (this.holdingClaim(this.actionStack[this.actionStack.length - 1]))
-      return;
+      return null;
     const pacer = animation.forcedSwitchTicks(this.mascotName);
     if (
       pacer > 0 &&
       this.stillTicks >= pacer &&
       !this.isTravelling() &&
-      // A behaviour may opt out of the pacer so a long *stationary* animation can
-      // finish. The check is on the behaviour, not on the mascot: a plain idle Stay
-      // still gets nudged on time.
       animation.pacerApplies(this.mascotName, this.currentBehavior?.name)
     ) {
-      // A long stretch of stillness means the page looks asleep: the behaviour that
-      // replaces this one has to be one that moves the mascot somewhere.
-      if (this.anchorStillTicks >= pacer) this.wantMovement = true;
-      this.switchBehavior("forced-switch");
-      return;
+      return "forced-switch";
     }
     const cap = animation.maxBehaviorTicks(this.mascotName);
     if (cap > 0 && this.behaviorTicks >= cap)
-      this.switchBehavior("behavior-cap");
+      return "behavior-cap";
+    return null;
   }
 
-  private switchBehavior(reason: string) {
+  private observeScheduledSwitch(reason: string) {
     this.emit({
       kind: "milestone",
       name: reason,
@@ -3084,11 +3143,9 @@ export class MascotEngine {
       y: this.y,
       leaf: this.leafLabel(),
     });
-    this.onBehaviorEnd(reason);
   }
 
-  /** Is the mascot currently going somewhere? Used so the pacer only interrupts
-   *  standing still, never a walk, run, climb or jump in progress. */
+  /** Is the mascot currently going somewhere? Travel is not idle. */
   private isTravelling() {
     const node = this.currentLeaf();
     const frame = this.actionStack[this.actionStack.length - 1];
@@ -3198,7 +3255,7 @@ export class MascotEngine {
     if (node.type === "ActionReference") {
       // A reference carries its own Condition; it has to be honoured before the
       // reference is expanded, otherwise it is silently dropped inside a Sequence.
-      if (node.condition && !this.evaluateCondition(node.condition, frame)) {
+      if (!this.frameConditionsSatisfied(frame)) {
         this.popActionStack();
         return;
       }
@@ -3224,6 +3281,7 @@ export class MascotEngine {
         resolved,
         frame.parentIndex,
         frame.referenceDepth + 1,
+        frame,
       );
       // libshijima: stay::tick() runs for Duration ticks, defaulting to 250;
       // animate ends with its animation and move ends at its target. On top of
@@ -3234,10 +3292,7 @@ export class MascotEngine {
         node.referenceName,
       );
       if (override !== null) next.durationLimit = override;
-      else if (referenced.type === "Stay")
-        next.durationLimit = this.scaledTicks(
-          this.varNumber(next, "Duration") ?? runtime.stayDurationTicks,
-        );
+      else if (referenced.type === "Stay") next.durationLimit = this.holdDuration(next);
       else next.durationLimit = null;
       this.actionStack[this.actionStack.length - 1] = next;
       const initialVX = this.varNumber(next, "InitialVX");
@@ -3249,38 +3304,27 @@ export class MascotEngine {
       return this.advanceActionTree();
     }
 
-    if (node.condition && !this.evaluateCondition(node.condition, frame)) {
+    if (!this.frameConditionsSatisfied(frame)) {
       this.popActionStack();
       return;
     }
-    if (node.type === "Sequence" || node.type === "Select") {
-      // `actionDurations` may name a container action too (`HoldOntoWall` is a
-      // Sequence around a 500–1500 tick Stay, `ClimbAlongWall` a Sequence around a
-      // climb). The limit has to be enforced here as well, otherwise pinning a
-      // sequence silently does nothing and only the leaf actions respond.
-      frame.elapsed++;
-      if (
-        frame.durationLimit !== null &&
-        frame.elapsed >= frame.durationLimit
-      ) {
-        this.popActionStack();
-        return;
-      }
+    if ((node.type === "Sequence" || node.type === "Select") && frame.durationLimit === null) {
+      frame.durationLimit = MascotEngine.animationConfig.durationTicks(this.mascotName, node.name);
     }
     if (node.type === "Select") {
       if (frame.childIndex > 0) {
         this.popActionStack();
         return;
       }
-      const index = (node.children || []).findIndex((candidate) =>
-        this.evaluateCondition(candidate.condition, frame),
-      );
-      const child = node.children?.[index];
       frame.childIndex = 1;
-      if (child)
-        this.actionStack.push(
-          this.newFrame(child, { ...frame.vars }, { ...frame.resolved }, index),
-        );
+      const children = node.children || [];
+      let chosen: ActionFrame | undefined;
+      for (let index = 0; index < children.length; index++) {
+        const candidate = this.childFrame(frame, children[index], index);
+        if (this.frameConditionsSatisfied(candidate)) { chosen = candidate; break; }
+        this.releaseFrame(candidate);
+      }
+      if (chosen) this.actionStack.push(chosen);
       else this.popActionStack();
       return this.advanceActionTree();
     }
@@ -3288,24 +3332,18 @@ export class MascotEngine {
       const children = node.children || [];
       while (frame.childIndex < children.length) {
         const child = children[frame.childIndex++];
-        if (
-          child.condition !== undefined &&
-          !this.evaluateCondition(child.condition, frame)
-        )
-          continue;
-        this.actionStack.push(
-          this.newFrame(
-            child,
-            { ...frame.vars },
-            { ...frame.resolved },
-            frame.childIndex - 1,
-          ),
-        );
+        const candidate = this.childFrame(frame, child, frame.childIndex - 1);
+        if (!this.frameConditionsSatisfied(candidate)) { this.releaseFrame(candidate); continue; }
+        this.actionStack.push(candidate);
         return this.advanceActionTree();
       }
       if (node.loop) {
-        frame.childIndex = 0;
-        return this.advanceActionTree();
+        // The whole sequence is the completion boundary, never an arbitrary child.
+        const budgetElapsed = frame.durationLimit !== null && frame.elapsed >= frame.durationLimit;
+        if (!budgetElapsed && !this.behaviorSwitchReason()) {
+          frame.childIndex = 0;
+          return this.advanceActionTree();
+        }
       }
       this.popActionStack();
       return;
@@ -3488,16 +3526,15 @@ export class MascotEngine {
         node.name,
       );
       if (override !== null) frame.durationLimit = override;
-      else if (node.type === "Stay")
-        frame.durationLimit = this.scaledTicks(
-          this.varNumber(frame, "Duration") ?? runtime.stayDurationTicks,
-        );
+      else if (node.type === "Stay") frame.durationLimit = this.holdDuration(frame);
     }
     frame.elapsed++;
     frame.poseTick++;
     if (
       frame.durationLimit !== null &&
       frame.elapsed >= frame.durationLimit &&
+      (!(node.loop || frame.finishCycle) || (frame.poseIndex === poses.length - 1 &&
+        frame.poseTick >= (frame.poseDurations?.[frame.poseIndex] ?? Math.max(1, poses[frame.poseIndex].duration)))) &&
       !this.holdingClaim(frame)
     ) {
       this.popActionStack();
@@ -3508,7 +3545,7 @@ export class MascotEngine {
       this.popActionStack();
       return;
     }
-    if (frame.poseTick >= Math.max(1, pose.duration)) {
+    if (frame.poseTick >= (frame.poseDurations?.[frame.poseIndex] ?? Math.max(1, pose.duration))) {
       frame.poseTick = 0;
       frame.poseIndex++;
       if (frame.poseIndex >= poses.length) {
@@ -3544,10 +3581,14 @@ export class MascotEngine {
         // ends on arrival, or when the interaction goes away (handled above).
         const drivenByInteraction =
           this.isScanMove(node) && !!frame.client?.connected;
+        const loopMayYield = node.loop && frame.durationLimit === null &&
+          !this.hasTarget(frame) && !endsByPhysics && !this.isInteract(node) &&
+          !this.isDraggedAction(node) && !drivenByInteraction && !this.holdingClaim(frame) &&
+          this.behaviorSwitchReason() !== null;
         // The dragged action loops its animation for as long as the mascot is held;
         // only its own timer (see above) ends it.
         if (
-          !node.loop &&
+          (!node.loop || loopMayYield) &&
           !this.isDraggedAction(node) &&
           !drivenByInteraction &&
           !this.holdingClaim(frame) &&
@@ -3875,6 +3916,7 @@ export class MascotEngine {
             y: this.y,
             leaf: this.leafLabel(),
           });
+          this.graceAfterScrollLanding();
           this.finishFloorLanding();
         }
       } else {
@@ -3884,6 +3926,10 @@ export class MascotEngine {
           this.isJumpLike(this.currentLeaf())
         ) {
           this.vx = this.vy = 0;
+          // The replacement behaviour is picked inside setBehavior(), so the grace
+          // has to be on the clock before this call, not after it.
+          this.graceAfterScrollLanding();
+          this.settleAfterLanding();
           this.setBehavior("StandUp", "scroll-floor-support");
           this.advanceActionTree();
         }
@@ -3908,7 +3954,7 @@ export class MascotEngine {
     // Without this, the pacer's "you have stood still long enough, go somewhere" pick
     // could never choose a hug, and the partner behaviours were diluted to a fraction
     // of the picks their weight asked for.
-    return this.partnerReachable();
+    return this.hasReachableInteractionOpportunity(behaviorName);
   }
 
   /** Structural part of `canTravel`: does the tree contain a Move / a ScanMove? */
@@ -3960,6 +4006,15 @@ export class MascotEngine {
    */
   private effectiveWeight(behaviorName: string, packFrequency: number): number {
     const animation = MascotEngine.animationConfig;
+    const roles = this.interactionRoles(behaviorName);
+    if (roles.scans.length && !this.hasReachableInteractionOpportunity(behaviorName)) return 0;
+    if (roles.offers.length && !roles.scans.length && ![...MascotEngine.liveEngines].some((other) =>
+      other !== this && other.config?.behaviors.some((behavior) =>
+        other.behaviorUsable(behavior) && animation.allows(other.mascotName, behavior.name) &&
+        (animation.weightOverride(other.mascotName, behavior.name) ?? behavior.frequency) > 0 &&
+        other.interactionRoles(behavior.name).scans.some((scan) => roles.offers.includes(scan.affordance) &&
+          this.acceptsInteraction(scan.serverBehavior) && other.acceptsInteraction(scan.clientBehavior))))) return 0;
+    if (this.needsPartnerToAct(behaviorName) && this.tickCount < this.interactionCooldownUntil) return 0;
     const override = animation.weightOverride(this.mascotName, behaviorName);
     if (override !== undefined) return override;
     if (this.needsPartnerToAct(behaviorName)) {
@@ -3996,6 +4051,62 @@ export class MascotEngine {
     return false;
   }
 
+  private acceptsInteraction(behavior: string): boolean {
+    return !!this.config?.actions[behavior] && MascotEngine.animationConfig.allows(this.mascotName, behavior);
+  }
+
+  /** Read the roles from the action tree, including ActionReference overlays. */
+  private interactionRoles(behavior: string): { offers: string[]; scans: { affordance: string; clientBehavior: string; serverBehavior: string }[] } {
+    const offers: string[] = [];
+    const scans: { affordance: string; clientBehavior: string; serverBehavior: string }[] = [];
+    const visit = (node: ActionNode, overlay: Record<string, string> = {}, path = new Set<ActionNode>()) => {
+      if (path.has(node)) return;
+      const nextPath = new Set(path).add(node);
+      const attrs = { ...node.attributes, ...overlay };
+      if (node.type === "ActionReference") {
+        const target = this.config?.actions[node.referenceName ?? ""];
+        if (target) visit(target, attrs, nextPath);
+        return;
+      }
+      if (attrs.Affordance) {
+        if (this.isScanMove(node)) scans.push({ affordance: attrs.Affordance.trim(), clientBehavior: attrs.Behavior ?? "", serverBehavior: attrs.TargetBehavior ?? "" });
+        else offers.push(attrs.Affordance.trim());
+      }
+      for (const child of node.children ?? []) visit(child, {}, nextPath);
+    };
+    const action = this.config?.actions[behavior];
+    if (action) visit(action);
+    return { offers, scans };
+  }
+
+  private hasInteractionOpportunity(behavior: string): boolean {
+    return this.interactionRoles(behavior).scans.some((scan) => this.acceptsInteraction(scan.clientBehavior) &&
+      !!MascotEngine.broadcasts.findAvailable(scan.affordance, { x: this.x, y: this.y },
+        MascotEngine.animationConfig.scanDistancePx(this.mascotName) / this.spriteScale, this, scan.serverBehavior));
+  }
+
+  /** Candidate lookup used by scheduling: a compatible same-surface offer can be
+   * approached by the ScanMove action even when it is outside direct scan range. */
+  private hasReachableInteractionOpportunity(behavior: string): boolean {
+    return this.hasInteractionOpportunity(behavior) || this.interactionRoles(behavior).scans.some((scan) => this.acceptsInteraction(scan.clientBehavior) &&
+      !!MascotEngine.broadcasts.findReachable(scan.affordance, { x: this.x, y: this.y },
+        this.firstBorderOf(behavior) ?? undefined, this, scan.serverBehavior));
+  }
+
+  private reserveInteraction(behavior: string): PendingScan | undefined {
+    for (const scan of this.interactionRoles(behavior).scans) {
+      if (!this.acceptsInteraction(scan.clientBehavior)) continue;
+      const client = MascotEngine.broadcasts.tryConnect(scan.affordance, { x: this.x, y: this.y },
+        scan.clientBehavior, scan.serverBehavior,
+        MascotEngine.animationConfig.scanDistancePx(this.mascotName) / this.spriteScale, this);
+      if (client) return { ...scan, client };
+      const reserved = MascotEngine.broadcasts.tryReserve(scan.affordance, { x: this.x, y: this.y },
+        scan.clientBehavior, scan.serverBehavior, this.firstBorderOf(behavior) ?? undefined, this);
+      if (reserved) return { ...scan, client: reserved };
+    }
+    return undefined;
+  }
+
   /** A behavior can only be offered when its action is present and this engine
    *  can actually carry it out. */
   private behaviorUsable(behavior: Behavior) {
@@ -4017,6 +4128,12 @@ export class MascotEngine {
    *  it can never reach, or a border it is pressed against. */
   private guardStall(frame: ActionFrame | undefined) {
     if (!frame) return;
+    const pose = this.currentPose();
+    // A motionless pose can be an intentional pause inside a moving animation.
+    // Count only attempted displacement, but retain failures across pause frames.
+    const poses = this.activeAnimation(frame)?.poses ?? frame.node.poses ?? [];
+    if (!pose || ((pose.velocity.x === 0 && pose.velocity.y === 0) &&
+        (frame.durationLimit !== null || poses.some((p) => p.velocity.x !== 0 || p.velocity.y !== 0)))) return;
     if (frame.progressX === this.x && frame.progressY === this.y) {
       frame.stallTicks++;
       if (frame.stallTicks >= STALL_LIMIT_TICKS) this.popActionStack();
@@ -4033,6 +4150,29 @@ export class MascotEngine {
       1,
       Math.round(ticks * MascotEngine.animationConfig.scale(this.mascotName)),
     );
+  }
+
+  /** Reschedule only explicitly identified idle waits, preserving all pose order
+   * and performance timing. Unknown actions and short transitions keep XML timing. */
+  private holdDuration(frame: ActionFrame): number {
+    const original = this.scaledTicks(this.varNumber(frame, "Duration") ?? runtime.stayDurationTicks);
+    const limit = MascotEngine.animationConfig.holdLimitTicks(this.mascotName, frame.node.name);
+    if (limit === null || limit >= original || this.interactionVisualActive || this.interaction.ongoing ||
+        this.hasTarget(frame) || this.isInteract(frame.node) ||
+        this.isDraggedAction(frame.node) || this.isResistAction(frame.node)) return original;
+    const setting = MascotEngine.animationConfig.optionsFor(this.mascotName).actionHoldLimits?.[frame.node.name ?? ""];
+    if (!setting || frame.node.animations?.some((animation) => animation.condition)) return original;
+    const poses = this.activeAnimation(frame)?.poses ?? frame.node.poses ?? [];
+    if (poses.some((pose) => pose.velocity.x !== 0 || pose.velocity.y !== 0)) return original;
+    const timings = idlePoseTicks(poses.map((pose) => pose.duration), setting.waitPoses, limit);
+    if (!timings) return original;
+    const duration = timings.reduce((sum, ticks) => sum + ticks, 0);
+    if (duration >= original) return original;
+    frame.poseDurations = timings;
+    frame.finishCycle = true;
+    this.emit({ kind: "milestone", name: "idle-timing", detail: `action=${frame.node.name} requested=${limit} effective=${duration} original=${original}`,
+      x: this.x, y: this.y, leaf: `${frame.node.name}|${frame.node.type}` });
+    return duration;
   }
 
   /**
@@ -4100,6 +4240,12 @@ export class MascotEngine {
       if (!handle || !handle.connected) return;
       const target = handle.target;
       if (!target) return;
+      if (Math.abs(target.y - this.y) > 1) {
+        // The horizontal route disappeared. Release the claim and let the normal
+        // disconnected-scan path report and finish it on the next tick.
+        handle.finalize();
+        return;
+      }
       const beforeX = this.x;
       if (pose && pose.velocity.x !== 0) {
         this.lookRight =
@@ -4113,6 +4259,20 @@ export class MascotEngine {
       if (passed) {
         this.x = target.x;
         handle.notifyArrival();
+        if (handle.reserved) {
+          this.emit({
+            kind: "milestone",
+            name: "broadcast-connect",
+            detail: `affordance=${frame.vars.Affordance ?? "-"} reserved target reached`,
+            affordance: frame.vars.Affordance,
+            side: "client",
+            behavior: this.varString(frame, "Behavior"),
+            distance: 0,
+            x: this.x,
+            y: this.y,
+            leaf: this.leafLabel(),
+          });
+        }
         this.interaction = handle.interaction();
         const next = this.interaction.behavior;
         this.emit({
@@ -4279,6 +4439,17 @@ export class MascotEngine {
           (this.x > beforeX && this.x >= area.right))
       ) {
         this.constrainToWorkArea();
+        // A collision completes this movement step. Preserve a pack's remaining
+        // turn/sit/landing steps instead of replacing the entire behavior.
+        const hasFollowingStep = this.actionStack.slice(0, -1).some((parent) =>
+          parent.node.type === "Sequence" && parent.childIndex < (parent.node.children?.length ?? 0),
+        );
+        if (hasFollowingStep) {
+          this.vx = this.vy = 0;
+          this.popActionStack();
+          this.advanceActionTree();
+          return;
+        }
         this.lookRight = this.x === area.right;
         this.vx = this.vy = 0;
         this.setBehavior("ClimbAlongWall", "floor-wall-contact");
@@ -4431,6 +4602,10 @@ export class MascotEngine {
 
   /** Finish this flight without replacing the pack's remaining landing sequence. */
   private finishFloorLanding(): void {
+    // Every landing path funnels through here (physics landing and the two scroll
+    // crossings), so this is the one place that has to clear the stillness clock
+    // before the sequence winds down into the next pick.
+    this.settleAfterLanding();
     const root = this.actionStack[0];
     // IAmHurled contains two consecutive Fall actions. After an impact, a
     // supported Fall is complete too; StandUp would erase Bounce/Sprawl. Unwind
@@ -4453,6 +4628,11 @@ export class MascotEngine {
   private onBehaviorEnd(reason = "behavior-end") {
     if (!this.config) return;
     const animation = MascotEngine.animationConfig;
+    const scheduled = reason === "behavior-end" ? this.behaviorSwitchReason() : null;
+    if (scheduled) {
+      this.wantMovement = scheduled === "forced-switch";
+      this.observeScheduledSwitch(scheduled);
+    }
     const mascot = this.mascotName;
     const candidates: BehaviorReference[] = [];
     const next = this.currentBehavior?.nextBehaviors || [];
@@ -4460,7 +4640,7 @@ export class MascotEngine {
     // pool. The shipped packs chain related behaviours, and some of those chains are
     // closed: SitAndFaceMouse lists only itself and SitWhileDanglingLegs with
     // Add="false", so a mascot that sits down can never leave that pair by itself.
-    const forcePool = animation.exitsToPool(mascot, this.currentBehavior?.name);
+    const forcePool = scheduled !== null || animation.exitsToPool(mascot, this.currentBehavior?.name);
     for (const reference of forcePool ? [] : next) {
       if (!this.evaluateCondition(reference.condition)) continue;
       if (!animation.allows(mascot, reference.name)) continue;
@@ -4539,23 +4719,33 @@ export class MascotEngine {
       });
       if (runnable.length > 0) pool = runnable;
     }
+    const repeat = animation.optionsFor(mascot).repeatBehaviorWeight ?? 1;
+    // A real, reachable advertisement is a time-limited opportunity. Consume it
+    // only at a legal selection boundary, retaining XML weights within that subset.
+    const opportunities = pool.filter((candidate) => this.hasReachableInteractionOpportunity(candidate.name));
+    if (opportunities.length) pool = opportunities;
+    if (repeat < 1 && (forcePool || this.currentBehavior?.addNext !== false) &&
+        pool.some((candidate) => candidate.name !== this.currentBehavior?.name)) {
+      pool = pool.map((candidate) => candidate.name === this.currentBehavior?.name
+        ? { ...candidate, frequency: candidate.frequency * repeat } : candidate);
+    }
     const total = pool.reduce(
       (sum, candidate) => sum + Math.max(0, candidate.frequency),
       0,
     );
     if (total <= 0) {
-      this.setBehavior(pool[0].name, reason, pool[0].id);
+      this.setBehavior(pool[0].name, reason, pool[0].id, scheduled ?? undefined);
       return;
     }
     let random = Math.random() * total;
     for (const candidate of pool) {
       random -= candidate.frequency;
       if (random <= 0) {
-        this.setBehavior(candidate.name, reason, candidate.id);
+        this.setBehavior(candidate.name, reason, candidate.id, scheduled ?? undefined);
         return;
       }
     }
-    this.setBehavior(candidates[0].name, reason, candidates[0].id);
+    this.setBehavior(pool[0].name, reason, pool[0].id, scheduled ?? undefined);
   }
 
   private render(interpolate = true) {

@@ -33,7 +33,8 @@ export class ServerState {
   private metUp = false;
   private shared: { value: boolean } | null = null;
 
-  constructor(anchor: Anchor) {
+  constructor(anchor: Anchor, public readonly owner?: object, public readonly accepts?: (behavior: string) => boolean,
+    public readonly surface?: string) {
     this.anchor = { ...anchor };
   }
 
@@ -126,7 +127,7 @@ export class Interaction {
 export class ClientHandle {
   private server: ServerState | null;
 
-  constructor(server: ServerState | null = null) {
+  constructor(server: ServerState | null = null, public readonly reserved = false) {
     this.server = server;
   }
 
@@ -168,8 +169,9 @@ export class BroadcastManager {
     }
   }
 
-  public startBroadcast(affordance: string, anchor: Anchor): ServerState {
-    const server = new ServerState(anchor);
+  public startBroadcast(affordance: string, anchor: Anchor, owner?: object,
+    accepts?: (behavior: string) => boolean, surface?: string): ServerState {
+    const server = new ServerState(anchor, owner, accepts, surface);
     const list = this.servers.get(affordance);
     if (list) list.push(server);
     else this.servers.set(affordance, [server]);
@@ -182,7 +184,30 @@ export class BroadcastManager {
     clientBehavior: string,
     serverBehavior: string,
     maxDistance = BroadcastManager.MAX_SCAN_DISTANCE,
+    requester?: object,
   ): ClientHandle | null {
+    const nearest = this.findAvailable(affordance, anchor, maxDistance, requester, serverBehavior);
+    if (!nearest) return null;
+    nearest.clientBehavior = clientBehavior;
+    nearest.serverBehavior = serverBehavior;
+    nearest.setAvailable(false);
+    return new ClientHandle(nearest);
+  }
+
+  /** Reserve a same-surface advertisement so a ScanMove can approach it from afar. */
+  public tryReserve(affordance: string, anchor: Anchor, clientBehavior: string,
+    serverBehavior: string, surface?: string, requester?: object): ClientHandle | null {
+    const nearest = this.findReachable(affordance, anchor, surface, requester, serverBehavior);
+    if (!nearest) return null;
+    nearest.clientBehavior = clientBehavior;
+    nearest.serverBehavior = serverBehavior;
+    nearest.setAvailable(false);
+    return new ClientHandle(nearest, true);
+  }
+
+  /** Read-only counterpart of tryConnect: selection and claiming use identical gates. */
+  public findAvailable(affordance: string, anchor: Anchor, maxDistance = BroadcastManager.MAX_SCAN_DISTANCE,
+    requester?: object, serverBehavior?: string): ServerState | null {
     const list = this.servers.get(affordance);
     if (!list || list.length === 0) return null;
     const live = list.filter((server) => server.active);
@@ -192,6 +217,8 @@ export class BroadcastManager {
     let nearestDistance = maxDistance;
     for (const candidate of live) {
       if (!candidate.isAvailable) continue;
+      if (requester !== undefined && candidate.owner === requester) continue;
+      if (serverBehavior && candidate.accepts && !candidate.accepts(serverBehavior)) continue;
       if (Math.abs(anchor.y - candidate.anchor.y) > 1) continue;
       const distance = Math.abs(anchor.x - candidate.anchor.x);
       if (distance > maxDistance) continue;
@@ -200,12 +227,33 @@ export class BroadcastManager {
         nearestDistance = distance;
       }
     }
-    if (!nearest) return null;
+    return nearest;
+  }
 
-    nearest.clientBehavior = clientBehavior;
-    nearest.serverBehavior = serverBehavior;
-    nearest.setAvailable(false);
-    return new ClientHandle(nearest);
+  /** Read-only candidate lookup for a same-surface approach. */
+  public findReachable(affordance: string, anchor: Anchor, surface?: string,
+    requester?: object, serverBehavior?: string): ServerState | null {
+    const list = this.servers.get(affordance);
+    if (!list || list.length === 0) return null;
+    const live = list.filter((server) => server.active);
+    this.servers.set(affordance, live);
+    let nearest: ServerState | null = null;
+    let nearestDistance = Infinity;
+    for (const candidate of live) {
+      if (!candidate.isAvailable) continue;
+      if (requester !== undefined && candidate.owner === requester) continue;
+      if (serverBehavior && candidate.accepts && !candidate.accepts(serverBehavior)) continue;
+      // ScanMove currently travels horizontally. Matching BorderType alone does
+      // not establish a route (two Wall anchors can be on opposite walls).
+      if (surface !== "Floor" || candidate.surface !== "Floor") continue;
+      if (Math.abs(anchor.y - candidate.anchor.y) > 1) continue;
+      const distance = Math.abs(anchor.x - candidate.anchor.x);
+      if (nearest === null || distance < nearestDistance) {
+        nearest = candidate;
+        nearestDistance = distance;
+      }
+    }
+    return nearest;
   }
 
   /** Diagnostics for the observation log: what a scan would have seen. */
