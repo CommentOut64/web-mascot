@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>web-mascot 30min run</title>
+    <style>
+      html, body { margin: 0; padding: 0; background: #f4f5f7; font: 12px/1.45 Consolas, ui-monospace, monospace; }
+      #panel {
+        position: fixed; top: 0; right: 0; width: 300px; height: 100vh; overflow: auto;
+        background: #fff; border-left: 1px solid #d7dae0; padding: 10px; z-index: 10000;
+        box-shadow: -2px 0 8px rgb(0 0 0 / 6%);
+      }
+      #panel h3 { margin: 10px 0 6px; font-size: 12px; color: #444; letter-spacing: .04em; }
+      #panel button { width: 100%; margin: 3px 0; padding: 5px 6px; font: inherit; cursor: pointer; }
+      #panel select, #panel input { width: 100%; margin: 3px 0; padding: 4px; font: inherit; }
+      .row { display: flex; gap: 4px; }
+      .row > * { flex: 1; }
+      #status { white-space: pre; font-size: 11px; background: #0f1117; color: #c8e6c9; padding: 8px; border-radius: 4px; min-height: 96px; }
+      #feed { white-space: pre; font-size: 10px; color: #555; max-height: 160px; overflow: auto; border: 1px solid #e3e6ea; padding: 6px; }
+      #meta { font-size: 10px; color: #777; word-break: break-all; }
+      #stage { position: fixed; inset: 0 300px 0 0; pointer-events: none; }
+      #panel .hint { font-size: 10px; color: #888; margin: 2px 0 6px; }
+    </style>
+  </head>
+  <body>
+    <div id="stage"></div>
+    <div id="panel">
+      <div id="meta">booting…</div>
+
+      <h3>挂载</h3>
+      <div class="row">
+        <button id="spawn-neuron">Spawn Neuron</button>
+        <button id="spawn-eviling">Spawn Eviling</button>
+      </div>
+      <button id="clear">Clear Pets</button>
+
+      <h3>强制执行（覆盖用）</h3>
+      <select id="behavior"></select>
+      <div class="row">
+        <button id="force-neuron">→ Neuron</button>
+        <button id="force-eviling">→ Eviling</button>
+      </div>
+      <button id="sweep">巡检全部动作（选中宠物）</button>
+      <button id="sweep-stop">停止巡检</button>
+      <div class="hint">巡检等待动作退出；超时记录为失败。巡检窗口从自然行为统计中剔除。</div>
+
+      <h3>交互 / 异常场景</h3>
+      <button id="pair">贴靠（同 y，间距 180px）</button>
+      <button id="drag">模拟拖拽 1.5s</button>
+      <button id="poke">戳一下（热点/点击）</button>
+      <button id="mark">打标记</button>
+
+      <h3>状态</h3>
+      <div id="status">(no pets)</div>
+      <div id="feed"></div>
+    </div>
+    <script type="module" src="./harness.js"></script>
+  </body>
+</html>
