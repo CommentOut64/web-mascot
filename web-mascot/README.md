@@ -83,7 +83,7 @@ const mascot = await createMascot({ container: document.body, pack: name });
 >
 > 另外，`DEFAULT_PACK_BASE_URL`（`"/mascot_pack"`）只在推导**彻底失败**时才兜底；打包环境里推导是「成功但错误」，兜底不会生效——所以「把精灵放到 `/mascot_pack`」这件事本身还不够，必须显式 `configure()`。
 >
-> **动画行为与配置预设**：引擎提供标准化的预设注册系统（`PresetRegistry`），默认使用偏活跃的 `"lively"` 预设（普通静止约 8 秒即被推动，长静止动画允许完整播完）。想退回 Qt / Shimeji-ee 原生桌面行为（无 pacer、无权重覆盖、无长序列豁免），调用 `configure({ preset: "classic" })` 即可；如需注册自定义行为风格或微调，请参阅 [ANIMATION_CONFIG.md](ANIMATION_CONFIG.md)。
+> **动画行为与配置预设**：引擎提供标准化的预设注册系统（`PresetRegistry`），默认使用偏活跃的 `"lively"` 预设（温和缩短已知保持段，12 秒静止后在完整行为／循环结束处推动换位，长表演完整播放）。想退回 Qt / Shimeji-ee 原生桌面行为（无 pacer、无权重覆盖、无长序列豁免），调用 `configure({ preset: "classic" })` 即可；如需注册自定义行为风格或微调，请参阅 [ANIMATION_CONFIG.md](ANIMATION_CONFIG.md)。
 
 ---
 

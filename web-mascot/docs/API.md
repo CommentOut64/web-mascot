@@ -377,7 +377,7 @@ import { registerPreset, usePreset, getPreset, PresetRegistry } from "web-mascot
 
 // 1. 获取已有预设进行派生微调
 const custom = getPreset("lively")!;
-custom.forcedSwitchTicks = 300; // 调整为静止 12 秒推动
+custom.forcedSwitchTicks = 300; // 静止 12 秒后请求在完整结束点换位
 
 // 2. 注册自定义预设
 registerPreset("my-chill-pet", custom);
@@ -395,9 +395,11 @@ mascot.engine.setPreset("classic");
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `forcedSwitchTicks` | `number` | 静止超过这么多 tick 就换行为（pacer）。"静止"按**位置是否变化**判定，所以速度为零的长序列也算静止 |
-| `pacerExemptBehaviors` | `string[]` | 上面这条的**例外名单**。列出的行为不会被 pacer 打断，让长静止动画完整播完；普通 `Stay` 仍按时被推动 |
-| `maxBehaviorTicks` | `number` | 单个行为的**硬上限**，超时即换（掉落/拖拽除外）。pacer 的豁免不影响它，所以豁免的行为也不会无限持续 |
+| `forcedSwitchTicks` | `number` | 静止达到阈值后请求移动；有限行为完整结束，无限循环完成一整轮后退出。`0` 关闭 |
+| `pacerExemptBehaviors` | `string[]` | 不受静止换位请求影响的行为；所有有限表演均不会被计时器截断 |
+| `maxBehaviorTicks` | `number` | 行为年龄预算，到达后在完成点回全局池。不会截断有限序列、飞行、拖拽或有效互动 |
+| `actionHoldLimits` | 动作名 → `{ ticks: number 或 [min,max], waitPoses: number[] }` | 仅分配标注的静止等待帧时长；其余帧时长和完整顺序保持，短过渡沿用 XML；不作用于条件动画、互动或移动 |
+| `repeatBehaviorWeight` | `number` | 全局候选中立即重复当前行为的权重倍率，范围 0～1，默认 1；lively 为 0.65。无其他可用行为时不降权 |
 | `exitToPoolBehaviors` | `string[]` | 列出的行为结束时强制回到**全局抽签池**，而不是走 pack 的 `<NextBehaviorList>` |
 | `behaviorWeights` | `Record<string, number>` | 覆盖 pack 的 `Frequency`（0 = 禁用；给 `Frequency="0"` 的行为赋正值可打开它） |
 | `interactionCooldownTicks` | `number` | 互动结束后，需要伙伴的行为移出候选池这么多 tick |
@@ -410,7 +412,7 @@ mascot.engine.setPreset("classic");
 ```json
 {
   "defaults": {
-    "forcedSwitchTicks": 200,
+    "forcedSwitchTicks": 300,
     "pacerExemptBehaviors": ["SitWhileDanglingLegs"],
     "exitToPoolBehaviors": ["SitWhileDanglingLegs"],
     "maxBehaviorTicks": 1100
@@ -652,7 +654,7 @@ attach({
 ```
 
 - `mark` 表示**录制开始时该宠物已经存在**，它的 `spawn` 从未被看到；否则时间线会以一个来路不明的站立宠物开头。
-- `peer` 记录双宠互动（`offer` / `connect` / `arrive` / `scan-miss` / `abort` / `serve-timeout`），用 `affordance` 把两只宠物的日志配对。
+  - `peer` 记录双宠互动（`offer` / `reserve` / `connect` / `arrive` / `scan-miss` / `abort` / `serve-timeout`），用 `affordance` 把两只宠物的日志配对。`reserve` 是远端地面接近阶段，尚未抵达，不计作握手成功。
 - `lifecycle` 记录冻结与恢复（`hidden` / `viewport` / `background-page`），用于解释时间线上的空档。
 - `move` 只在**状态变化**时产生（累计位移 ≥32 px 或静默 ≥3 s），不是每帧一条。
 
