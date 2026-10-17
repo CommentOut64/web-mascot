@@ -20,8 +20,6 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
 } else {
   (window as unknown as Record<string, boolean>)[EXTENSION_KEY] = true;
 
-  const EXT_VERSION = "0.0.4";
-
   const host = new ViewportHost("web-mascot-extension-root");
   const group = new MascotGroup();
   let activeMascots: Mascot[] = [];
@@ -107,17 +105,19 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
     host.destroy();
   }
 
+  const LOG_BADGE =
+    "background: #4f46e5; color: #ffffff; padding: 1px 6px; border-radius: 3px; font-weight: bold; font-size: 11px;";
+  const LOG_TEXT = "color: #2563eb;";
+  const WARN_BADGE =
+    "background: #f59e0b; color: #ffffff; padding: 1px 6px; border-radius: 3px; font-weight: bold; font-size: 11px;";
+  const WARN_TEXT = "color: #b45309;";
+
   /**
    * Formatted console logger with distinct badge style
    */
   function log(msg: string, ...details: unknown[]): void {
     if (!isDebugLog || isOrphaned) return;
-    console.log(
-      `%c[Web Mascot v${EXT_VERSION}]%c ${msg}`,
-      "background: #4f46e5; color: #ffffff; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 11px;",
-      "color: #2563eb; font-weight: 500;",
-      ...details,
-    );
+    console.log(`%c[Web Mascot]%c ${msg}`, LOG_BADGE, LOG_TEXT, ...details);
   }
 
   function logWarn(msg: string, ...details: unknown[]): void {
@@ -130,18 +130,8 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
       handleExtensionInvalidated();
       return;
     }
-    console.warn(
-      `%c[Web Mascot v${EXT_VERSION}]%c ⚠️ ${msg}`,
-      "background: #f59e0b; color: #ffffff; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 11px;",
-      "color: #d97706; font-weight: 500;",
-      ...details,
-    );
+    console.warn(`%c[Web Mascot]%c ${msg}`, WARN_BADGE, WARN_TEXT, ...details);
   }
-
-  log("🚀 插件内容脚本已就绪", {
-    url: window.location.href,
-    time: new Date().toLocaleTimeString(),
-  });
 
   const getPacksForMode = packsForMode;
 
@@ -233,9 +223,9 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
     isClickThrough = clickThrough;
     group.setClickThrough(clickThrough);
     if (clickThrough) {
-      log("👻 鼠标穿透已开启 (点击将直接穿透到底层网页)");
+      log("鼠标穿透已开启 (点击将直接穿透到底层网页)");
     } else {
-      log("🎯 鼠标穿透已关闭 (可正常点击与拖拽桌宠)");
+      log("鼠标穿透已关闭");
     }
   }
 
@@ -383,11 +373,11 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
 
     const currentHost = window.location.hostname;
     if (currentHost && blacklistHosts.includes(currentHost)) {
-      log(`🚫 当前网站【${currentHost}】处于黑名单中，桌宠已跳过加载`);
+      log(`当前网站【${currentHost}】处于黑名单中，桌宠已跳过加载`);
       return;
     }
 
-    log(`📦 正在启动桌宠组: [${packs.join(", ")}] ...`);
+    log(`正在启动桌宠组: [${packs.join(", ")}] ...`);
 
     let assetBase = "";
     let animConfigUrl = "";
@@ -418,7 +408,7 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
           if (isRestored) {
             log(`桌宠【${pack}】已恢复接力状态`);
           } else {
-            log(`🌟 桌宠【${pack}】全新登场，自顶部落下！`);
+            log(`桌宠【${pack}】全新登场，自顶部落下`);
           }
         },
         onFailed: (pack, err) => {
@@ -460,12 +450,11 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
     group.despawn();
     syncActiveMascots();
     host.destroy();
-    log("🛑 当前标签页已清理桌宠 DOM 与运行循环");
   }
 
   function resetPositions(): void {
     group.resetToSpawn();
-    log("📍 全部桌宠已重置位置，自顶部落下！");
+    log("全部桌宠已重置位置，自顶部落下");
   }
 
   let acquireDebounceTimer: number | null = null;
@@ -553,33 +542,33 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
     if (!isDebugLog) return;
     const name = engine.mascotName || "Mascot";
     if (event.kind === "spawn") {
-      log(`🐣【${name}】诞生事件 (Spawn): ${event.detail}`);
+      log(`【${name}】诞生 (Spawn): ${event.detail}`);
     } else if (event.kind === "despawn") {
-      log(`💨【${name}】销毁事件 (Despawn): ${event.detail}`);
+      log(`【${name}】销毁 (Despawn): ${event.detail}`);
     } else if (event.kind === "behavior") {
       const pos = `(${Math.round(event.x)}, ${Math.round(event.y)})`;
       log(
-        `🏃【${name}】动作切换: ${event.from} -> ${event.to} [原因: ${event.reason}] @ ${pos}`,
+        `【${name}】动作切换: ${event.from} -> ${event.to} [原因: ${event.reason}] @ ${pos}`,
       );
     } else if (event.kind === "milestone") {
       if (event.name === "land") {
         log(
-          `🛬【${name}】平稳着陆 (Land) @ (${Math.round(event.x)}, ${Math.round(event.y)})`,
+          `【${name}】平稳着陆 (Land) @ (${Math.round(event.x)}, ${Math.round(event.y)})`,
         );
       } else if (event.name === "broadcast-start") {
-        log(`📡【${name}】发起同伴互动广播: ${event.detail}`);
+        log(`【${name}】发起同伴互动广播: ${event.detail}`);
       } else if (event.name === "broadcast-connect") {
-        log(`💕【${name}】同伴互动握手成功: ${event.detail}`);
+        log(`【${name}】同伴互动握手成功: ${event.detail}`);
       } else if (event.name === "interaction-arrived") {
-        log(`🤝【${name}】同伴互动到位: ${event.detail}`);
+        log(`【${name}】同伴互动到位: ${event.detail}`);
       } else if (event.name === "drag-resist") {
-        log(`💢【${name}】抗拒拖拽并准备挣脱！`);
+        log(`【${name}】抗拒拖拽并准备挣脱`);
       } else if (event.name === "resist-escape") {
-        log(`💨【${name}】成功挣脱鼠标！`);
+        log(`【${name}】成功挣脱鼠标`);
       } else if (event.name === "paused" && event.detail !== "hidden") {
-        log(`⏸️【${name}】暂停模拟: ${event.detail}`);
+        log(`【${name}】暂停模拟: ${event.detail}`);
       } else if (event.name === "resumed" && event.detail !== "hidden") {
-        log(`▶️【${name}】恢复模拟: ${event.detail}`);
+        log(`【${name}】恢复模拟: ${event.detail}`);
       }
     }
   });
@@ -619,26 +608,17 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
             : [];
           settingsReady = true;
 
-          log("⚙️ 读取已保存配置:", {
-            enabled: isEnabled,
-            mode: mascotMode,
-            clickThrough: isClickThrough,
-            scrollInteraction: isScrollInteraction,
-            scrollSquash: isScrollSquash,
-            autoHideScrollbar: isAutoHideScrollbar,
-          });
-
           checkAndApplyScrollbar(isAutoHideScrollbar, log);
 
           if (!isEnabled) {
-            log("💤 桌宠当前处于禁用状态 (可通过右上角扩展图标开启)");
+            log("桌宠当前处于禁用状态 (可通过右上角扩展图标开启)");
             return;
           }
 
           if (document.visibilityState === "visible") {
             acquireLease();
           } else {
-            log("💤 当前标签页处于后台，等待切至前台时自动接力桌宠...");
+            log("当前标签页处于后台，等待切至前台时自动接力桌宠");
           }
         },
       );
@@ -671,8 +651,8 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
       resetScrollInput();
       log(
         isScrollInteraction
-          ? "🌪️ 页面滚动互动已开启 (实验性)"
-          : "🛡️ 页面滚动互动已关闭",
+          ? "页面滚动互动已开启 (实验性)"
+          : "页面滚动互动已关闭",
       );
     }
 
@@ -680,8 +660,8 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
       applyScrollSquash(Boolean(changes.scrollSquash.newValue));
       log(
         isScrollSquash
-          ? "🌊 响应上滚弹性形变已开启"
-          : "🛡️ 响应上滚弹性形变已关闭",
+          ? "响应上滚弹性形变已开启"
+          : "响应上滚弹性形变已关闭",
       );
     }
 
@@ -690,8 +670,8 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
       checkAndApplyScrollbar(isAutoHideScrollbar, log);
       log(
         isAutoHideScrollbar
-          ? "🪟 自动隐藏滚动条已开启"
-          : "🪟 自动隐藏滚动条已关闭（恢复原生显示）",
+          ? "自动隐藏滚动条已开启"
+          : "自动隐藏滚动条已关闭 (恢复原生显示)",
       );
     }
 
@@ -706,7 +686,7 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
       if (isBlacklisted) {
         yieldLease();
         despawnAllMascots();
-        log(`🚫 当前网站【${currentHost}】已加入黑名单，桌宠已退出`);
+        log(`当前网站【${currentHost}】已加入黑名单，桌宠已退出`);
         return;
       } else if (
         !isBlacklisted &&

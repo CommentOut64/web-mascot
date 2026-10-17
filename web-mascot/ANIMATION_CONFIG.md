@@ -61,7 +61,7 @@
 | `durationScale` | `number` | 浮点数 | `0.05 ~ 20.0` | `1.0` (原速) | `1.0` | **全局时长缩放倍率**：按比例缩放 XML 自带的所有 Stay 动作持续时间。 |
 | `scale` | `number` | 浮点数 | `0.2 ~ 4.0` | `1.0` (原尺寸) | `1.0` | **宠物视口渲染尺寸缩放**：1.0 = 原生 128px 贴图大小。引擎内部保持 1:1 虚拟坐标计算。 |
 | `maxTravelPx` | `number` | px | `10 ~ 100,000` | `0` (不限制) | `0` (不限制) | **水平漫游最大距离**：限制随机游走步长，防止横穿全屏破坏排版。爬墙等边界目标不受此限。 |
-| `interactionCooldownTicks` | `number` | ticks (40ms) | `0 ~ 100,000` | `0` | `0` | **互动冷却时间**：完成一次互动（如拥抱）后的冷却期，防止两只宠物贴身无限连续拥抱。 |
+| `interactionCooldownTicks` | `number` | ticks (40ms) | `0 ~ 100,000` | `0` | `500` | **互动冷却时间**：完成一次互动（如拥抱）后的冷却期，防止两只宠物贴身无限连续拥抱。 |
 | `scanDistancePx` | `number` | px | `16 ~ 4,096` | `256` | `256` | **伙伴搜索半径**：扫描附近可互动伙伴的有效直线距离。 |
 | `partnerWeights` | `{alone, withPartner, reachable}` | 对象 | `0 ~ 100,000` | `{}` | `{}`（使用 XML 权重） | **伙伴互动场景权重**：根据“单只独处”、“同场有伴”、“同高度且在搜索半径内”三档动态调节互动欲望。 |
 | `allowBehaviors` | `string[]` | 数组 | 行为名 | `[]` (全允许) | `[]` (全允许) | **行为白名单**：只允许出现列表内的行为。 |
@@ -259,7 +259,7 @@
     "scanDistancePx": 256,
 
     // [interactionCooldownTicks] 完成一次互动后的冷却 ticks，防贴脸无限连击
-    "interactionCooldownTicks": 0,
+    "interactionCooldownTicks": 500,
 
     // [partnerWeights] 伙伴互动动作的场景权重 (alone / withPartner / reachable)
     "partnerWeights": {
