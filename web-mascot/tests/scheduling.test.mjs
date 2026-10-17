@@ -428,3 +428,38 @@ test("A landing clears the stillness clock, and a scroll landing also defers int
     "scroll landing must keep partner behaviours out of the pool for the grace window",
   );
 });
+
+test("The lively preset ships a real interaction cooldown, and it empties the partner pool", () => {
+  const f = realFixture();
+  f.Engine.setAnimationConfig({ preset: "lively" });
+  assert.equal(f.Engine.getAnimationConfig().interactionCooldown("Neuron"), 500, "20 s default");
+  const a = f.make();
+  f.make("Eviling");
+  a.y = 600;
+
+  a.interactionCooldownUntil = a.tickCount + 500;
+  assert.equal(a.effectiveWeight("AskForHugs", 1200), 0, "no new offer while cooling down");
+
+  a.interactionCooldownUntil = 0;
+  assert.ok(a.effectiveWeight("AskForHugs", 1200) > 0, "offers return once the cooldown lapses");
+});
+
+test("A fall that started as a scroll detach still gets the interaction grace when it lands", () => {
+  const f = realFixture();
+  f.Engine.setAnimationConfig({ preset: "lively" });
+  const engine = f.make();
+  const area = engine.area();
+  engine.x = 300;
+  engine.y = area.top + 40;
+  engine.forceBehavior("Fall", { snapToSurface: false });
+  engine.advanceActionTree();
+  // Mark this flight as scroll-originated, then let gravity finish it.
+  engine.scrollFallRoot = engine.actionStack[0];
+  const before = engine.interactionCooldownUntil;
+  for (let tick = 0; tick < 400 && engine.y < area.bottom; tick++) engine.tick();
+  assert.equal(engine.y, area.bottom, "the scroll-started fall must reach the floor");
+  assert.ok(
+    engine.interactionCooldownUntil > before && engine.interactionCooldownUntil >= engine.tickCount + 245,
+    "a scroll-started fall must still defer interactions on landing",
+  );
+});

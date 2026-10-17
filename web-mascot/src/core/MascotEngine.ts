@@ -4605,6 +4605,12 @@ export class MascotEngine {
     // Every landing path funnels through here (physics landing and the two scroll
     // crossings), so this is the one place that has to clear the stillness clock
     // before the sequence winds down into the next pick.
+    //
+    // A flight that began as a scroll detach is a scroll fall even when it reaches
+    // the floor after the page stopped moving (gravity landing instead of a
+    // scroll crossing). Same intent, same grace: the mascot was not scrolled into
+    // a hug.
+    if (this.scrollFallRoot === this.actionStack[0]) this.graceAfterScrollLanding();
     this.settleAfterLanding();
     const root = this.actionStack[0];
     // IAmHurled contains two consecutive Fall actions. After an impact, a

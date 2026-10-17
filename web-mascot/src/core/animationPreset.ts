@@ -75,6 +75,11 @@ export const LIVELY_ANIMATION_PRESET: Readonly<MascotAnimationOptions> = Object.
     GrabCeiling: { ticks: [200, 300], waitPoses: [0, 2, 4] },
   },
   repeatBehaviorWeight: 0.65,
+  // 20 s. The anti-chain guard in the engine only works if it has a value: with the
+  // old `0` the pair re-engaged on its very next pick (observed: hurl → hug → hug
+  // within one short walk, because the first selection after an interaction is
+  // another live advertisement). Both offering and scanning are gated by this.
+  interactionCooldownTicks: 500,
   behaviorWeights: {
     SitWhileDanglingLegs: 150,
     SitAndFaceMouse: 8,
@@ -208,8 +213,11 @@ export const STANDARD_CONFIG_SAMPLE = {
     // [scanDistancePx] Search radius (px) for partner advertisement detection (16 ~ 4096 px, default 256).
     scanDistancePx: 256,
 
-    // [interactionCooldownTicks] Cooldown ticks after interaction before another can start (default 0).
-    interactionCooldownTicks: 0,
+    // [interactionCooldownTicks] Cooldown ticks after interaction before another can start.
+    // 500 (20 s): the guard exists to stop the pair re-engaging on their very next pick,
+    // and with 0 it never engaged — the observed chain was hurl → hug → hug within one
+    // short walk, because the first selection after an interaction is another live offer.
+    interactionCooldownTicks: 500,
 
     // [partnerWeights] Dynamic weights for partner-seeking behaviors based on presence & reachability.
     partnerWeights: {
