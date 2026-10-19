@@ -114,7 +114,7 @@ const mascot = await createMascot({ container: document.body, pack: name });
 | `registerPreset` | `(name, preset) => void` | 便捷注册自定义动画配置预设 |
 | `usePreset` | `(name) => void` | 便捷切换全局当前生效的动画预设 |
 | `getPreset` | `(name) => MascotAnimationOptions \| undefined` | 获取已注册预设的深拷贝配置 |
-| `Mascot` | `class` | `.engine` / `.label` / `.destroy()`（可重复调用） |
+| `Mascot` | `class` | `.engine` / `.label` / `.setBouncy()` / `.getBouncy()` / `.destroy()`（可重复调用） |
 | `assetBaseUrl` | `() => string` | 当前**生效**的资源基址 |
 | `runtimeOptions` | `() => RuntimeSnapshot` | 当前运行参数（含默认值） |
 | `PACK_BASE_URL` | `string` | 推导出的资源基址（仅未打包环境有效；打包后需 `configure` 覆盖） |
@@ -122,7 +122,7 @@ const mascot = await createMascot({ container: document.body, pack: name });
 | `resolveAssetBase` | `(url?) => string \| undefined` | 从模块 URL 推导包根目录，纯函数 |
 | `isConfigured` | `() => boolean` | 是否显式调用过 `configure()`，仅诊断用 |
 
-**类型**：`MascotOptions`、`MascotConfig`、`Mascot`、`RuntimeOptions`、`RuntimeSnapshot`、`MascotAnimationOptions`、`AnimationPresetFile`、`Pose`、`ActionNode`、`Behavior`、`Hotspot`、`EngineEvent`、`EngineObserver`、`MascotPackInput`、`ImportMascotPackOptions`、`ImportedMascotPack`、`MascotPackData`、`ShimejiWarning` 等。
+**类型**：`MascotOptions`、`MascotConfig`、`Mascot`、`RuntimeOptions`、`RuntimeSnapshot`、`MascotAnimationOptions`、`AnimationPresetFile`、`Pose`、`ActionNode`、`Behavior`、`BouncyOptions`、`Hotspot`、`EngineEvent`、`EngineObserver`、`MascotPackInput`、`ImportMascotPackOptions`、`ImportedMascotPack`、`MascotPackData`、`ShimejiWarning` 等。
 
 **高级用法（不承诺语义化版本稳定性）**：`PackRegistry`、`ShimejiFinder`、`translateShimejiXml`、`normalizeSpriteKey`、`MascotEngine`、`AnimationConfig`、`BroadcastManager`、`CLASSIC_ANIMATION_PRESET`、`LIVELY_ANIMATION_PRESET`、`STANDARD_CONFIG_SAMPLE`。
 
@@ -233,7 +233,14 @@ const pet = await createMascot({ container: document.body, pack: "MyPet" });
 
 ## 状态
 
-`0.1.2` — 接口尚未承诺语义化版本稳定性（0.x 允许破坏性变更）。支持贴地上滚弹性形变物理反馈（Squash & Stretch）与配置 API；重做行为调度与互动机会选择（支持动作保持上限与重复衰减）；提供完整调度验证工具与浏览器巡检环境。全面升级交互层为标准 Pointer Events，提供触控屏/移动端触摸拖拽与抛掷基础兼容，完善多指触控隔离与指针捕获。
+`0.1.2-beta`（独立测试版；主线稳定版为 `0.1.2`）— 接口尚未承诺语义化版本稳定性（0.x 允许破坏性变更）。默认引入**底部 Q 弹果冻动效（垂直缩放形变）**：
+- **底部锚点对齐**：锚点（Anchor Point）锁定于宠物底部接触点（接触面绝对坐标锁定，无穿模或悬空）。
+- **高频果冻节奏**：高频垂直谐波缩放（Y 轴 Scale 变化），下压变矮且横向微扩、回弹拉长并宽度恢复；开启后无限循环。
+- **独立控制 API**：提供 `setBouncy()`、`getBouncy()`、`getBouncyOptions()`，支持动态调控开关、振动频率（`frequency`）、播放速率（`speed`）、下压量（`squashAmount`）、拉伸量（`stretchAmount`）与横向补偿比例（`expandRatio`）。
+- **离地平滑休眠**：仅当宠物稳立于底部地面（Floor）时生效；进入攀爬、掉落、天花板或被鼠标/触控拖拽时自动平滑阻尼休眠，重回地面平滑激活。
+- **浏览器扩展同步**：配套扩展面板加入 Q 弹动效一键控制与持久化开关。
+
+同时继承 `0.1.2` 核心特性：支持贴地上滚弹性形变物理反馈（Squash & Stretch）与配置 API；重做行为调度与互动机会选择（支持动作保持上限与重复衰减）；提供完整调度验证工具与浏览器巡检环境。全面升级交互层为标准 Pointer Events，提供触控屏/移动端触摸拖拽与抛掷基础兼容，完善多指触控隔离与指针捕获。
 
 **动画预设架构**：引擎内置标准化的预设注册体系（`PresetRegistry`），默认采用偏活跃的 `"lively"` 预设（`src/core/animationPreset.ts`）；要回到 Qt / Shimeji-ee 原生桌面行为的宿主，传入 `configure({ preset: "classic" })` 即可。用户亦可拿已有预设派生并调用 `registerPreset()` 注册专属风格。随包的 `dist/animation.config.json` 为标准化配置导出模版。
 

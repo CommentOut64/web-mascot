@@ -62,6 +62,9 @@ attach({ console: true });               // 观测日志：宠物移动史
 | `Mascot.setClickThrough` | `(enabled: boolean) => void` | 设置该宠物的鼠标穿透（忽略交互命中） | 3.3 |
 | `Mascot.setScrollSquash` | `(enabled: boolean) => void` | 设置是否开启贴地响应上滚的弹性形变物理反馈 | 3.3 |
 | `Mascot.getScrollSquash` | `() => boolean` | 查询是否开启贴地响应上滚的弹性形变物理反馈 | 3.3 |
+| `Mascot.setBouncy` | `(enabledOrOptions: boolean \| BouncyOptions, options?: BouncyOptions) => void` | 设置/调整站在底部的 Q 弹果冻形变动效（支持调频、速度、压缩量等） | 3.3 |
+| `Mascot.getBouncy` | `() => boolean` | 查询是否开启站在底部的 Q 弹果冻形变动效 | 3.3 |
+| `Mascot.getBouncyOptions` | `() => BouncyOptions` | 获取当前 Q 弹动效参数快照（频率、速度倍率、压缩量、拉伸量等） | 3.3 |
 | `Mascot.destroy` | `() => void` | 移除宠物，释放 DOM / 定时器 / 监听器；**可重复调用** | 3.3 |
 | `importMascotPack` | `(input: MascotPackInput, options?: ImportMascotPackOptions) => Promise<ImportedMascotPack>` | 导入 Shimeji ZIP / Blob / URL 资源包，注册为虚拟模型 | 3.8 |
 | `registerMascotPack` | `(pack: MascotPackData) => void` | 注册自定义虚拟模型数据（支持替换内置模型） | 3.8 |
@@ -86,7 +89,7 @@ attach({ console: true });               // 观测日志：宠物移动史
 | `LIVELY_ANIMATION_PRESET` | `MascotAnimationOptions` | 网页偏活跃默认预设（含防发呆与出池断环） | 3.6 |
 | `STANDARD_CONFIG_SAMPLE` | `AnimationPresetFile` | 标准化配置样例文档对象 | 3.6 |
 
-类型：`MascotOptions`、`MascotConfig`、`MascotGroupSpawnOptions`、`RuntimeOptions`、`RuntimeSnapshot`、`MascotAnimationOptions`、`AnimationPresetFile`、`Pose`、`ActionNode`、`Behavior`、`BehaviorInfo`、`ForceBehaviorOptions`、`Hotspot`、`EngineEvent`、`EngineObserver`、`MascotPackInput`、`ImportMascotPackOptions`、`ImportedMascotPack`、`MascotPackData`、`ShimejiFinderResult`、`ShimejiPackEntry`、`ShimejiWarning`。
+类型：`MascotOptions`、`MascotConfig`、`MascotGroupSpawnOptions`、`RuntimeOptions`、`RuntimeSnapshot`、`MascotAnimationOptions`、`AnimationPresetFile`、`Pose`、`ActionNode`、`Behavior`、`BehaviorInfo`、`ForceBehaviorOptions`、`BouncyOptions`、`Hotspot`、`EngineEvent`、`EngineObserver`、`MascotPackInput`、`ImportMascotPackOptions`、`ImportedMascotPack`、`MascotPackData`、`ShimejiFinderResult`、`ShimejiPackEntry`、`ShimejiWarning`。
 
 ### 开发工具入口 `web-mascot/devtools`（13 个值 + 8 个类型）
 
@@ -223,6 +226,7 @@ function createMascot(options: MascotOptions): Promise<Mascot>
 | `pack` | `string` | **mascot key**：不透明标识，同时是动画配置 `mascots` 的索引键。当前实现里它等于 pack 目录名，如 `"Neuron"`；未来支持运行时导入用户模型后，它可能不再是目录名，所以不要把它当路径解析 |
 | `clickThrough` | `boolean?` | 初始是否开启鼠标穿透（默认 `false`） |
 | `scrollSquash` | `boolean?` | 初始是否开启贴地响应上滚的弹性形变物理反馈（默认 `false`） |
+| `bouncy` | `boolean \| BouncyOptions?` | 初始是否开启站在底部的 Q 弹果冻形变动效（默认 `true`，可传调参对象自定义速度、压缩量等） |
 
 `container` 是**锚点语义**，不是裁剪框：宠物在**整个视口**内活动，`container` 只决定它属于文档的哪一处。当 `container` 被滚动出视口时，引擎会暂停这只宠物（`IntersectionObserver`）。这与 libshijima 的"桌宠属于桌面"不同，是网页场景下的等价物。
 
@@ -247,9 +251,12 @@ function createMascot(options: MascotOptions): Promise<Mascot>
 | `setClickThrough(enabled)` | `(enabled: boolean) => void` | 设置是否开启鼠标穿透模式（开启后宠物忽略所有指针事件） |
 | `setScrollSquash(enabled)` | `(enabled: boolean) => void` | 设置是否开启贴地响应上滚的弹性形变物理反馈 |
 | `getScrollSquash()` | `() => boolean` | 查询当前是否开启贴地响应上滚的弹性形变物理反馈 |
+| `setBouncy(enabledOrOptions, options?)` | `(enabledOrOptions: boolean \| BouncyOptions, options?: BouncyOptions) => void` | 设置/调整站在底部的 Q 弹果冻形变动效（支持调频、速度、压缩量等） |
+| `getBouncy()` | `() => boolean` | 查询当前是否开启站在底部的 Q 弹果冻形变动效 |
+| `getBouncyOptions()` | `() => BouncyOptions` | 获取当前 Q 弹动效参数快照（频率、速度倍率、压缩量、拉伸量等） |
 | `destroy()` | `() => void` | 移除宠物，销毁 DOM 节点、定时器及事件监听器。**安全且可重复调用** |
 
-#### 3.3.2 动作控制类型定义
+#### 3.3.2 动作控制与形变类型定义
 
 ```ts
 export interface BehaviorInfo {
@@ -281,9 +288,37 @@ export interface ForceBehaviorOptions {
    */
   reason?: string;
 }
+
+export interface BouncyOptions {
+  /** 是否开启 Q 弹动效 */
+  enabled?: boolean;
+  /** 动效循环频率（Hz，即每秒弹跳周期数），默认 2.5 (单次周期约 400ms) */
+  frequency?: number;
+  /** 动效速度倍率，基于基准频率进行倍增，默认 1.0 */
+  speed?: number;
+  /** 垂直向下最大压缩比例 (0 ~ 0.5)，最低点挤压至 1 - squashAmount，默认 0.20 (挤压至 0.80) */
+  squashAmount?: number;
+  /** 向上回弹最大拉伸比例 (0 ~ 0.5)，最高点拉伸至 1 + stretchAmount，默认 0.10 (拉伸至 1.10) */
+  stretchAmount?: number;
+  /** 水平反向体积守恒补偿系数 k，默认 0.65 */
+  expandRatio?: number;
+  /** 最高点离地间隙比例 (0 ~ 0.1)，相对于基准高度 H0，默认 0.04 (最大离地 4% 高度) */
+  jumpAmount?: number;
+  /** 幂次正弦波指数 p (0.4 ~ 1.5)，控制顶部滞空悬停与底部极速反弹，默认 0.75 */
+  power?: number;
+}
 ```
 
-#### 3.3.3 动作切换机制与边缘保护
+#### 3.3.3 Q 弹机制（底部果冻动效）与调参原理
+
+- **尖峰脉冲谐振模型**：运用基于幂次正弦波的谐振模型 $\eta(\tau) = [\sin(\pi \tau)]^p$（默认 $p = 0.75$），底部反弹干脆利落（零硬停顿极速回弹），顶部形成约 60ms ~ 100ms 的明显滞空悬停感（Apex Hang Time）。
+- **非对称形变与体积守恒**：下压（Squash）幅度约 20%（$S_y = 0.80$），明显大于回弹拉伸（Stretch）幅度（约 10%，$S_y = 1.10$）；水平缩放满足 $S_x = 1 + k \cdot (1 - S_y)$（$k = 0.65$），维持毛绒充实体积感。
+- **微幅离地耦合**：底部在行程前 70% 紧贴地面，仅在波峰最后 25% 区间产生最大 4% 基准高度的微小离地间隙（$\Delta y_{\max} \le 0.04 H_0$）。
+- **多宠绝对同步**：底层由引擎级全局共享时钟统一驱动，同一页面中的多只桌宠在任何时刻均保持完全同频同相位同步。
+- **智能离地休眠与触底自动激活**：只要宠物稳稳站在底部（Floor）便运用该动效；离开底部（被抓起拖拽、在空中自由下落、挂在墙壁或天花板）动效平滑归零休眠；一旦重新落回或站在地面，立即自动恢复 Q 弹。
+
+
+#### 3.3.4 动作切换机制与边缘保护
 
 1. **零延迟即刻响应**：调用 `setBehavior` 或 `forceBehavior` 后，引擎会在当前调用内重置动作展开深度，立即展开动作树并完成首帧绘制（`renderNow()`），开发者无需等待 40ms 的物理步长间隔。
 2. **指针与拖拽防护**：若在宠物正被用户鼠标/手指拖拽（`isDragging`）或长按时调用了主动切换 API，引擎会自动释放 Pointer Capture 并中止拖拽状态，恢复正常指针样式，确保不会因拖拽状态滞留导致逻辑死锁。
@@ -292,7 +327,7 @@ export interface ForceBehaviorOptions {
    - 切换至 `Wall` 动作：计算宠物当前坐标距左墙与右墙的水平距离，就近吸附至最近的一侧边缘，自动同步朝向（在右墙面向右，在左墙面向左），横纵向速度归零。
    - 切换至 `Ceiling` 动作：瞬移至工作区顶部边界（`area.top`），纵向速度归零，表面标记为 `ceiling`。
 
-#### 3.3.4 右键菜单与控制面板实战示例
+#### 3.3.5 右键菜单与控制面板实战示例
 
 ```ts
 import { createMascot } from "web-mascot";
@@ -516,6 +551,9 @@ import { registerMascotPack, unregisterMascotPack, hasMascotPack, PackRegistry }
 | `setBehavior(name, options?, pack?)` | `(name: string, options?: ForceBehaviorOptions, pack?: string) => boolean` | 在群组上设置动作。若指定 `pack` 则仅控制该特定模型，未指定则向所有宠物分发；至少有一只成功即返回 `true` |
 | `forceBehavior(name, options?, pack?)` | `(name: string, options?: Omit<ForceBehaviorOptions, "force">, pack?: string) => boolean` | 在群组上强制切换动作（绕过表面检查并默认自动吸附）；若指定 `pack` 则仅控制该模型 |
 | `setScrollSquash(enabled, pack?)` | `(enabled: boolean, pack?: string) => void` | 设置群组全部或指定模型的贴地上滚弹性形变开关 |
+| `setBouncy(enabledOrOptions, options?, pack?)` | `(enabledOrOptions: boolean \| BouncyOptions, options?: BouncyOptions, pack?: string) => void` | 设置群组全部或指定模型的 Q 弹果冻动效开关与速度/压缩量参数 |
+| `getBouncy(pack?)` | `(pack?: string) => boolean` | 查询群组整体或指定模型的 Q 弹动效开启状态 |
+| `getBouncyOptions(pack?)` | `(pack?: string) => BouncyOptions \| undefined` | 获取群组指定模型的 Q 弹动效参数快照 |
 
 ```ts
 import { MascotGroup } from "web-mascot";
@@ -707,7 +745,7 @@ const mascot = await createMascot({ container: document.querySelector("#pet-root
 
 ## 8. 发布状态与许可
 
-`version` 为 `0.1.2`。接口尚未承诺语义化版本稳定性：0.x 允许破坏性变更，其中 `MascotEngine` / `AnimationConfig` / `BroadcastManager` 属于**明确不稳定**的高级用法（见 3.4）。
+`version` 为 `0.1.2-beta`（独立测试版本；主线稳定版为 `0.1.2`）。接口尚未承诺语义化版本稳定性：0.x 允许破坏性变更，其中 `MascotEngine` / `AnimationConfig` / `BroadcastManager` 属于**明确不稳定**的高级用法（见 3.4）。
 
 许可拆成两部分，不要混：
 
