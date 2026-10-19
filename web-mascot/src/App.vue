@@ -5,6 +5,16 @@
       <button @click="spawnPet('Neuron')">Spawn Neuron</button>
       <button @click="spawnPet('Eviling')">Spawn Eviling</button>
       <button @click="clearPets()">Clear Pets</button>
+      <label class="toggle-label">
+        <input type="checkbox" v-model="bouncyEnabled" @change="updateBouncy" />
+        Q 弹动效 (Bouncy)
+      </label>
+      <div v-if="bouncyEnabled" class="slider-group">
+        <label>频率: {{ bouncyFreq }} Hz</label>
+        <input type="range" min="1" max="8" step="0.5" v-model.number="bouncyFreq" @input="updateBouncy" />
+        <label>压缩量: {{ Math.round(bouncySquash * 100) }}%</label>
+        <input type="range" min="0.05" max="0.3" step="0.01" v-model.number="bouncySquash" @input="updateBouncy" />
+      </div>
     </div>
   </div>
 
@@ -29,11 +39,24 @@ import { MascotEngine } from "./core/MascotEngine";
 
 const petContainer = ref<HTMLElement | null>(null);
 const activeEngines: MascotEngine[] = [];
+const bouncyEnabled = ref(true);
+const bouncyFreq = ref(1.8);
+const bouncySquash = ref(0.22);
+
 // Dev convenience: `__mascotEngines[0].snapshot()` in the browser console.
 // Note: an engine's own `x`/`y` are *virtual* units (1 unit = 1 sprite pixel; see
 // `scale` in the animation config). Use `position()`, `snapshot()` or the
 // observation log for viewport pixels.
 (window as unknown as { __mascotEngines: MascotEngine[] }).__mascotEngines = activeEngines;
+
+function updateBouncy() {
+  for (const engine of activeEngines) {
+    engine.setBouncy(bouncyEnabled.value, {
+      frequency: bouncyFreq.value,
+      squashAmount: bouncySquash.value,
+    });
+  }
+}
 
 async function spawnPet(name: string) {
   if (!petContainer.value) return;
@@ -41,7 +64,13 @@ async function spawnPet(name: string) {
   const engine = new MascotEngine(petContainer.value, name);
   activeEngines.push(engine);
   try {
-    await engine.init();
+    await engine.init({
+      bouncy: {
+        enabled: bouncyEnabled.value,
+        frequency: bouncyFreq.value,
+        squashAmount: bouncySquash.value,
+      },
+    });
   } catch (error) {
     const index = activeEngines.indexOf(engine);
     if (index >= 0) activeEngines.splice(index, 1);

@@ -1,5 +1,5 @@
 import { MascotEngine } from "./MascotEngine.js";
-import type { ForceBehaviorOptions, RelaySnapshot } from "./types.js";
+import type { BouncyOptions, ForceBehaviorOptions, RelaySnapshot } from "./types.js";
 import type { ViewportHost } from "./ViewportHost.js";
 
 export interface MascotGroupSpawnOptions {
@@ -10,6 +10,8 @@ export interface MascotGroupSpawnOptions {
   isClickThrough?: boolean;
   signal?: AbortSignal;
   scrollSquash?: boolean;
+  bouncy?: boolean | BouncyOptions;
+  bouncySquash?: boolean | BouncyOptions;
   onSpawned?: (pack: string, isRestored: boolean) => void;
   onFailed?: (pack: string, error: unknown) => void;
 }
@@ -144,6 +146,7 @@ export class MascotGroup {
             signal: abort.signal,
             enablePageCoordinator: false,
             scrollSquash: options.scrollSquash,
+            bouncy: options.bouncy ?? options.bouncySquash ?? true,
           });
         } finally {
           abort.signal.removeEventListener("abort", cancel);
@@ -212,6 +215,45 @@ export class MascotGroup {
     for (const engine of this.activeEngines) {
       engine.setScrollSquash(enabled);
     }
+  }
+
+  public setBouncy(
+    enabledOrOptions: boolean | BouncyOptions,
+    options?: BouncyOptions,
+    pack?: string,
+  ): void {
+    const targets = pack
+      ? this.activeEngines.filter((e) => e.mascotName === pack)
+      : this.activeEngines;
+    for (const engine of targets) {
+      engine.setBouncy(enabledOrOptions, options);
+    }
+  }
+
+  public getBouncy(pack?: string): boolean {
+    const target = pack
+      ? this.activeEngines.find((e) => e.mascotName === pack)
+      : this.activeEngines[0];
+    return target ? target.getBouncy() : false;
+  }
+
+  public getBouncyOptions(pack?: string): BouncyOptions | undefined {
+    const target = pack
+      ? this.activeEngines.find((e) => e.mascotName === pack)
+      : this.activeEngines[0];
+    return target?.getBouncyOptions();
+  }
+
+  public setBouncySquash(
+    enabledOrOptions: boolean | BouncyOptions,
+    options?: BouncyOptions,
+    pack?: string,
+  ): void {
+    this.setBouncy(enabledOrOptions, options, pack);
+  }
+
+  public getBouncySquash(pack?: string): boolean {
+    return this.getBouncy(pack);
   }
 
   /**

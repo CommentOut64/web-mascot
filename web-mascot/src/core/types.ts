@@ -154,3 +154,26 @@ export interface ForceBehaviorOptions {
    */
   reason?: string;
 }
+
+/**
+ * Q 弹果冻机制（垂直缩放形变）参数配置
+ */
+export interface BouncyOptions {
+  /** 是否开启 Q 弹动效 */
+  enabled?: boolean;
+  /** 动效循环频率（Hz，即每秒弹跳周期数），默认 2.5 (单次周期约 400ms) */
+  frequency?: number;
+  /** 动效速度倍率，基于基准频率进行倍增，默认 1.0 */
+  speed?: number;
+  /** 垂直向下最大压缩比例 (0 ~ 0.5)，最低点挤压至 1 - squashAmount，默认 0.20 (挤压至 0.80) */
+  squashAmount?: number;
+  /** 向上回弹最大拉伸比例 (0 ~ 0.5)，最高点拉伸至 1 + stretchAmount，默认 0.10 (拉伸至 1.10) */
+  stretchAmount?: number;
+  /** 水平反向体积守恒补偿系数 k，默认 0.65 */
+  expandRatio?: number;
+  /** 最高点离地间隙比例 (0 ~ 0.1)，相对于基准高度 H0，默认 0.04 (最大离地 4% 高度) */
+  jumpAmount?: number;
+  /** 幂次正弦波指数 p (0.4 ~ 1.5)，控制顶部滞空悬停与底部极速反弹，默认 0.75 */
+  power?: number;
+}
+

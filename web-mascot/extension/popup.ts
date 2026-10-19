@@ -6,6 +6,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const scrollToggle = document.getElementById("scroll-toggle") as HTMLInputElement | null;
   const scrollSquashRow = document.getElementById("scroll-squash-row") as HTMLElement | null;
   const scrollSquashToggle = document.getElementById("scroll-squash-toggle") as HTMLInputElement | null;
+  const bouncyToggle = document.getElementById("bouncy-toggle") as HTMLInputElement | null;
   const autohideScrollbarToggle = document.getElementById("autohide-scrollbar-toggle") as HTMLInputElement | null;
   const modeRadios = document.querySelectorAll<HTMLInputElement>('input[name="mode"]');
   const btnRestart = document.getElementById("btn-restart") as HTMLButtonElement | null;
@@ -24,7 +25,7 @@ document.addEventListener("DOMContentLoaded", () => {
   try {
     const manifest = chrome.runtime.getManifest();
     if (manifest && versionBadge) {
-      versionBadge.textContent = `v${manifest.version}`;
+      versionBadge.textContent = `v${manifest.version_name || manifest.version}`;
     }
   } catch {
     // Fallback
@@ -88,6 +89,7 @@ document.addEventListener("DOMContentLoaded", () => {
       debugLog: false,
       scrollInteraction: false,
       scrollSquash: false,
+      bouncy: true,
       autoHideScrollbar: false,
       blacklist: [],
     },
@@ -101,6 +103,8 @@ document.addEventListener("DOMContentLoaded", () => {
       if (scrollSquashToggle)
         scrollSquashToggle.checked = Boolean(items.scrollSquash);
       updateScrollSquashVisibility(isScrollActive);
+      if (bouncyToggle)
+        bouncyToggle.checked = items.bouncy !== undefined ? Boolean(items.bouncy) : true;
       if (autohideScrollbarToggle)
         autohideScrollbarToggle.checked = Boolean(items.autoHideScrollbar);
       blacklistHosts = Array.isArray(items.blacklist) ? items.blacklist : [];
@@ -152,6 +156,11 @@ document.addEventListener("DOMContentLoaded", () => {
   // Handle scroll squash toggle
   scrollSquashToggle?.addEventListener("change", () => {
     chrome.storage.local.set({ scrollSquash: scrollSquashToggle.checked });
+  });
+
+  // Handle bouncy toggle
+  bouncyToggle?.addEventListener("change", () => {
+    chrome.storage.local.set({ bouncy: bouncyToggle.checked });
   });
 
   // Handle auto hide scrollbar toggle

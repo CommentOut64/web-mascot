@@ -14,6 +14,7 @@ import type {
   Behavior,
   BehaviorInfo,
   BehaviorReference,
+  BouncyOptions,
   ForceBehaviorOptions,
   MascotConfig,
   Pose,
@@ -385,6 +386,21 @@ export class MascotEngine {
   private lastSurface: Surface | null = null;
   private scrollSquashEnabled = false;
   private squashAmount = 0;
+  private bouncyEnabled = false;
+  private static lastGlobalBouncyTimestamp = 0;
+  private static globalBouncyClock = 0;
+  private static lastEngineRendered: MascotEngine | null = null;
+
+  private bouncyOptions: Required<Omit<BouncyOptions, "enabled">> = {
+    frequency: 2.5,
+    speed: 1.0,
+    squashAmount: 0.20,
+    stretchAmount: 0.10,
+    expandRatio: 0.65,
+    jumpAmount: 0.04,
+    power: 0.75,
+  };
+  private bouncyFactor = 0;
   private cursorX = 0;
   private cursorY = 0;
   /** Cursor movement during the last logic tick, i.e. `environment.cursor.dx/dy`.
@@ -586,6 +602,152 @@ export class MascotEngine {
 
   public getScrollSquash(): boolean {
     return this.scrollSquashEnabled;
+  }
+
+  public setBouncy(
+    enabledOrOptions: boolean | BouncyOptions,
+    options?: BouncyOptions,
+  ): void {
+    if (typeof enabledOrOptions === "object" && enabledOrOptions !== null) {
+      if (enabledOrOptions.enabled !== undefined) {
+        this.bouncyEnabled = enabledOrOptions.enabled;
+      } else {
+        this.bouncyEnabled = true;
+      }
+      this.applyBouncyOptions(enabledOrOptions);
+    } else if (typeof enabledOrOptions === "boolean") {
+      this.bouncyEnabled = enabledOrOptions;
+      if (options) {
+        this.applyBouncyOptions(options);
+      }
+    }
+    if (!this.bouncyEnabled) {
+      this.bouncyFactor = 0;
+      this.renderNow();
+    }
+  }
+
+  public getBouncy(): boolean {
+    return this.bouncyEnabled;
+  }
+
+  public getBouncyOptions(): BouncyOptions {
+    return {
+      enabled: this.bouncyEnabled,
+      ...this.bouncyOptions,
+    };
+  }
+
+  public setBouncySquash(
+    enabledOrOptions: boolean | BouncyOptions,
+    options?: BouncyOptions,
+  ): void {
+    this.setBouncy(enabledOrOptions, options);
+  }
+
+  public getBouncySquash(): boolean {
+    return this.getBouncy();
+  }
+
+  private applyBouncyOptions(options: BouncyOptions): void {
+    if (
+      typeof options.frequency === "number" &&
+      Number.isFinite(options.frequency) &&
+      options.frequency > 0
+    ) {
+      this.bouncyOptions.frequency = options.frequency;
+    }
+    if (
+      typeof options.speed === "number" &&
+      Number.isFinite(options.speed) &&
+      options.speed > 0
+    ) {
+      this.bouncyOptions.speed = options.speed;
+    }
+    if (
+      typeof options.squashAmount === "number" &&
+      Number.isFinite(options.squashAmount) &&
+      options.squashAmount >= 0
+    ) {
+      this.bouncyOptions.squashAmount = Math.min(0.5, options.squashAmount);
+    }
+    if (
+      typeof options.stretchAmount === "number" &&
+      Number.isFinite(options.stretchAmount) &&
+      options.stretchAmount >= 0
+    ) {
+      this.bouncyOptions.stretchAmount = Math.min(0.5, options.stretchAmount);
+    }
+    if (
+      typeof options.expandRatio === "number" &&
+      Number.isFinite(options.expandRatio) &&
+      options.expandRatio >= 0
+    ) {
+      this.bouncyOptions.expandRatio = options.expandRatio;
+    }
+    if (
+      typeof options.jumpAmount === "number" &&
+      Number.isFinite(options.jumpAmount) &&
+      options.jumpAmount >= 0
+    ) {
+      this.bouncyOptions.jumpAmount = Math.min(0.2, options.jumpAmount);
+    }
+    if (
+      typeof options.power === "number" &&
+      Number.isFinite(options.power) &&
+      options.power > 0
+    ) {
+      this.bouncyOptions.power = Math.max(0.1, Math.min(2.0, options.power));
+    }
+  }
+
+  private static advanceGlobalBouncyClock(now: number, engine: MascotEngine): number {
+    if (MascotEngine.lastGlobalBouncyTimestamp === 0) {
+      MascotEngine.lastGlobalBouncyTimestamp = now;
+      MascotEngine.lastEngineRendered = engine;
+      return MascotEngine.globalBouncyClock;
+    }
+    const elapsed = (now - MascotEngine.lastGlobalBouncyTimestamp) / 1000;
+    if (elapsed > 0.002) {
+      MascotEngine.globalBouncyClock += Math.min(0.1, elapsed);
+      MascotEngine.lastGlobalBouncyTimestamp = now;
+    } else if (engine === MascotEngine.lastEngineRendered) {
+      MascotEngine.globalBouncyClock += 0.016;
+    }
+    MascotEngine.lastEngineRendered = engine;
+    return MascotEngine.globalBouncyClock;
+  }
+
+  /**
+   * 模型 B：带底部快速反弹的尖峰脉冲谐振模型
+   * 非对称 Squash & Stretch (下压 20%，回弹 10%) + 体积守恒水平补偿 + 极值微幅离地位移
+   */
+  private static calculatePlushieBounce(
+    elapsedMs: number,
+    periodMs: number,
+    baseHeight: number,
+    squashAmount = 0.20,
+    stretchAmount = 0.10,
+    expandRatio = 0.65,
+    jumpAmount = 0.04,
+    power = 0.75,
+  ): { scaleX: number; scaleY: number; offsetY: number } {
+    const safePeriod = Math.max(50, periodMs);
+    const tau = (elapsedMs % safePeriod) / safePeriod;
+    const sinVal = Math.sin(Math.PI * tau);
+    const wave = Math.pow(Math.max(0, sinVal), power);
+
+    const minScaleY = 1.0 - squashAmount;
+    const maxScaleY = 1.0 + stretchAmount;
+    const scaleY = minScaleY + (maxScaleY - minScaleY) * wave;
+
+    const scaleX = 1.0 + expandRatio * (1.0 - scaleY);
+
+    const jumpThreshold = 0.75;
+    const jumpRatio = wave > jumpThreshold ? (wave - jumpThreshold) / (1 - jumpThreshold) : 0;
+    const offsetY = -baseHeight * jumpAmount * jumpRatio;
+
+    return { scaleX, scaleY, offsetY };
   }
 
   public resetToSpawn(indexOverride?: number): void {
@@ -1360,9 +1522,22 @@ export class MascotEngine {
     signal?: AbortSignal;
     enablePageCoordinator?: boolean;
     scrollSquash?: boolean;
+    bouncy?: boolean | BouncyOptions;
+    bouncySquash?: boolean | BouncyOptions;
   }) {
     if (options?.scrollSquash !== undefined) {
       this.scrollSquashEnabled = options.scrollSquash;
+    }
+    const bouncyOpt = options?.bouncy ?? options?.bouncySquash;
+    if (bouncyOpt !== undefined) {
+      if (typeof bouncyOpt === "object" && bouncyOpt !== null) {
+        this.bouncyEnabled = bouncyOpt.enabled ?? true;
+        this.applyBouncyOptions(bouncyOpt);
+      } else {
+        this.bouncyEnabled = Boolean(bouncyOpt);
+      }
+    } else {
+      this.bouncyEnabled = true;
     }
     if (options?.startPaused) this.setPauseReason("relay-transfer", true);
     // Customisation is read first so the very first tick already obeys it.
@@ -3839,6 +4014,22 @@ export class MascotEngine {
     return null;
   }
 
+  /**
+   * 判断宠物是否正稳稳站在工作区底部（地面），处于地面动作中。
+   * 排除拖拽、滞空、自由下落、挂墙和天花板状态。
+   */
+  private isStandingOnFloor(): boolean {
+    if (this.isDragging) return false;
+    const leaf = this.currentLeaf();
+    if (!leaf || this.isFallLike(leaf) || this.isJumpLike(leaf) || this.isDraggedAction(leaf)) {
+      return false;
+    }
+    const surface = this.surfaceAt();
+    if (surface === "floor") return true;
+    const area = this.area();
+    return this.borderIsOn("bottom", { x: this.x, y: this.y }, area) && Math.abs(this.vy) < 0.001;
+  }
+
   /** Rebase the viewport frame without feeding camera motion into the integrator. */
   private applyScrollIntent() {
     const pending = this.scrollDetachPending;
@@ -4813,10 +5004,50 @@ export class MascotEngine {
       this.squashAmount *= 0.85;
       if (this.squashAmount < 0.005) this.squashAmount = 0;
     }
+
+    let bouncySquashX = 1;
+    let bouncySquashY = 1;
+    let bouncyOffsetY = 0;
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const globalClock = MascotEngine.advanceGlobalBouncyClock(now, this);
+
+    const standingOnFloor = this.isStandingOnFloor();
+    const targetBouncyFactor = this.bouncyEnabled && standingOnFloor ? 1.0 : 0.0;
+    this.bouncyFactor += (targetBouncyFactor - this.bouncyFactor) * 0.25;
+    if (Math.abs(this.bouncyFactor - targetBouncyFactor) < 0.002) {
+      this.bouncyFactor = targetBouncyFactor;
+    }
+
     const ax = pose.imageAnchor.x;
     const ay = pose.imageAnchor.y;
+    const baseHeight = (ay > 0 ? ay : SPRITE_WIDTH) * scale;
+
+    if (this.bouncyFactor > 0) {
+      const freq = Math.max(0.1, this.bouncyOptions.frequency * this.bouncyOptions.speed);
+      const periodMs = 1000 / freq;
+      const elapsedMs = globalClock * 1000;
+      const bounce = MascotEngine.calculatePlushieBounce(
+        elapsedMs,
+        periodMs,
+        baseHeight,
+        this.bouncyOptions.squashAmount,
+        this.bouncyOptions.stretchAmount,
+        this.bouncyOptions.expandRatio,
+        this.bouncyOptions.jumpAmount,
+        this.bouncyOptions.power,
+      );
+      bouncySquashY = 1.0 + (bounce.scaleY - 1.0) * this.bouncyFactor;
+      bouncySquashX = 1.0 + (bounce.scaleX - 1.0) * this.bouncyFactor;
+      bouncyOffsetY = bounce.offsetY * this.bouncyFactor;
+    }
+
+    squashX *= bouncySquashX;
+    squashY *= bouncySquashY;
+
     const flip = this.lookRight ? -1 : 1;
-    this.elImg.style.transform = `translate(${-flip * ax * scale * squashX}px, ${-ay * scale * squashY}px) scaleX(${flip * scale * squashX}) scaleY(${scale * squashY})`;
+    const tx = -flip * ax * scale * squashX;
+    const ty = -ay * scale * squashY + bouncyOffsetY;
+    this.elImg.style.transform = `translate(${tx}px, ${ty}px) scaleX(${flip * scale * squashX}) scaleY(${scale * squashY})`;
     this.elImg.style.transformOrigin = "0 0";
   }
 }

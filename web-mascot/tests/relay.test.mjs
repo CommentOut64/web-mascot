@@ -973,3 +973,116 @@ test("scrollSquash produces vertical compression on upward floor scroll and reco
   const transformRecovered = engine.elImg.style.transform;
   assert.equal(transformRecovered, initialTransform, "must recover to initial transform");
 });
+
+test("bouncy (Q弹果冻) API toggles and configures speed and squash parameters", () => {
+  const f = engineFixture();
+  const engine = f.make();
+
+  // 1. 默认状态查询与开关
+  assert.equal(engine.getBouncy(), false);
+  engine.setBouncy(true);
+  assert.equal(engine.getBouncy(), true);
+
+  const optsDefault = engine.getBouncyOptions();
+  assert.equal(optsDefault.enabled, true);
+  assert.equal(optsDefault.frequency, 2.5);
+  assert.equal(optsDefault.speed, 1.0);
+  assert.equal(optsDefault.squashAmount, 0.20);
+  assert.equal(optsDefault.stretchAmount, 0.10);
+  assert.equal(optsDefault.expandRatio, 0.65);
+  assert.equal(optsDefault.jumpAmount, 0.04);
+  assert.equal(optsDefault.power, 0.75);
+
+  // 2. 调参：通过对象形式或重载调整速度与压缩量
+  engine.setBouncy(true, { frequency: 4.5, speed: 1.5, squashAmount: 0.2, stretchAmount: 0.1, jumpAmount: 0.05, power: 0.8 });
+  const optsCustom = engine.getBouncyOptions();
+  assert.equal(optsCustom.frequency, 4.5);
+  assert.equal(optsCustom.speed, 1.5);
+  assert.equal(optsCustom.squashAmount, 0.2);
+  assert.equal(optsCustom.stretchAmount, 0.1);
+  assert.equal(optsCustom.jumpAmount, 0.05);
+  assert.equal(optsCustom.power, 0.8);
+
+  // 3. 关闭 Q 弹动效
+  engine.setBouncy(false);
+  assert.equal(engine.getBouncy(), false);
+  assert.equal(engine.getBouncyOptions().enabled, false);
+});
+
+test("bouncy (Q弹果冻) applies vertical squash-and-stretch anchored at bottom when on floor, and stays dormant off-floor", () => {
+  const f = engineFixture();
+  const engine = f.make();
+  f.config.actions.Stand.borderType = "Floor";
+  assert.equal(engine.y, 600); // 位于底部地面
+
+  // 开启 Q 弹动效
+  engine.setBouncy(true, { frequency: 5, squashAmount: 0.2, stretchAmount: 0.1 });
+
+  // 1. 在底部地面上运行多帧，验证形变产生
+  const transforms = [];
+  for (let i = 0; i < 20; i++) {
+    engine.render(false);
+    transforms.push(engine.elImg.style.transform);
+  }
+
+  // 验证在循环中产生了不同的 scale 变化
+  const distinct = new Set(transforms);
+  assert.ok(distinct.size > 3, "循环渲染必须产生动态形变");
+
+  // 2. 验证锚点位于宠物底部：检查每次 transform 中 scaleX / scaleY 与 translate 严格保持 anchor 坐标不变
+  // 按照公式：translate(${-flip * ax * scale * squashX}px, ${-ay * scale * squashY}px) scaleX(...) scaleY(...)
+  // 当 ay=128 时，Y 轴在底部 (0,0) 的相对投影恒为 0，永不发生位移穿帮
+  for (const tr of transforms) {
+    assert.match(tr, /translate\(-?\d+(\.\d+)?px,\s*-?\d+(\.\d+)?px\)/, "transform 必须包含严格基准 translate");
+    assert.match(tr, /scaleX\(.*\) scaleY\(.*\)/, "transform 必须包含双轴缩放形变");
+  }
+
+  // 3. 验证离地时（例如切换至空中下落动作）动效暂停恢复基准
+  engine.y = 300;
+  engine.prevY = 300;
+  engine.setBehavior("Fall", "airborne-test");
+  engine.advanceActionTree();
+
+  // 经过数帧缓释平滑归零
+  for (let i = 0; i < 30; i++) {
+    engine.render(false);
+  }
+
+  const airTransform = engine.elImg.style.transform;
+  // 空中应不再有额外果冻形变 (scaleX 接近 1, scaleY 接近 1)
+  assert.match(airTransform, /scaleX\(-?1(\.0+)?\) scaleY\(1(\.0+)?\)/, "非底部状态形变必须恢复至基准尺寸");
+
+  // 4. 重回地面时，动效再次自动运用
+  engine.y = 600;
+  engine.prevY = 600;
+  engine.setBehavior("StandUp", "land-test");
+  engine.advanceActionTree();
+
+  for (let i = 0; i < 15; i++) {
+    engine.render(false);
+  }
+  const landedTransform = engine.elImg.style.transform;
+  assert.notEqual(landedTransform, airTransform, "重回地面后必须再次自动运用 Q 弹动效");
+});
+
+test("bouncy (Q弹果冻) synchronizes completely across multiple mascots on floor", () => {
+  const f = engineFixture();
+  const engine1 = f.make();
+  const engine2 = f.make();
+  f.config.actions.Stand.borderType = "Floor";
+
+  engine1.setBouncy(true, { frequency: 2, squashAmount: 0.2, stretchAmount: 0.1 });
+  engine2.setBouncy(true, { frequency: 2, squashAmount: 0.2, stretchAmount: 0.1 });
+
+  // Both engines on floor: render multiple synchronized frames
+  for (let frame = 0; frame < 15; frame++) {
+    engine1.render(false);
+    engine2.render(false);
+
+    // Extract scaleY from transform
+    const match1 = engine1.elImg.style.transform.match(/scaleY\(([^)]+)\)/);
+    const match2 = engine2.elImg.style.transform.match(/scaleY\(([^)]+)\)/);
+    assert.ok(match1 && match2, "transforms must include scaleY");
+    assert.equal(match1[1], match2[1], `frame ${frame} scaleY must be identical across both mascots`);
+  }
+});

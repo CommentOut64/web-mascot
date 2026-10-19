@@ -442,3 +442,38 @@ test("Behavior API: MascotGroup setBehavior and forceBehavior support group and 
   assert.equal(res3, false);
 });
 
+test("Behavior API: Mascot and MascotGroup bouncy methods delegate correctly", () => {
+  const { pkg, createEngine } = fixture();
+  const engine = createEngine("Neuron");
+  const mascot = new pkg.Mascot(engine);
+
+  // Mascot delegation
+  assert.equal(mascot.getBouncy(), false);
+  mascot.setBouncy(true, { frequency: 4.0, squashAmount: 0.15 });
+  assert.equal(mascot.getBouncy(), true);
+  assert.equal(mascot.getBouncyOptions().frequency, 4.0);
+  assert.equal(mascot.getBouncyOptions().squashAmount, 0.15);
+
+  mascot.setBouncy(false);
+  assert.equal(mascot.getBouncy(), false);
+
+  // MascotGroup delegation
+  const eviling = createEngine("Eviling");
+  const group = new pkg.MascotGroup();
+  group.activeEngines.push(engine, eviling);
+
+  // 全局设置
+  group.setBouncy(true, { frequency: 5.0 });
+  assert.equal(engine.getBouncy(), true);
+  assert.equal(eviling.getBouncy(), true);
+  assert.equal(group.getBouncy(), true);
+  assert.equal(group.getBouncyOptions()?.frequency, 5.0);
+
+  // 指定 pack 单独调整
+  group.setBouncy(false, undefined, "Eviling");
+  assert.equal(engine.getBouncy(), true);
+  assert.equal(eviling.getBouncy(), false);
+  assert.equal(group.getBouncy("Neuron"), true);
+  assert.equal(group.getBouncy("Eviling"), false);
+});
+

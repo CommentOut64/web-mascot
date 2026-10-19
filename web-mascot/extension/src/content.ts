@@ -29,6 +29,7 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
     const effective = isScrollInteraction && isScrollSquash;
     for (const mascot of activeMascots) {
       mascot.engine.setScrollSquash(effective);
+      mascot.engine.setBouncy(isBouncy);
     }
   }
 
@@ -37,6 +38,13 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
     const effective = isScrollInteraction && isScrollSquash;
     for (const mascot of activeMascots) {
       mascot.engine.setScrollSquash(effective);
+    }
+  }
+
+  function applyBouncy(enabled: boolean): void {
+    isBouncy = enabled;
+    for (const mascot of activeMascots) {
+      mascot.engine.setBouncy(isBouncy);
     }
   }
 
@@ -52,6 +60,7 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
   let isDebugLog = false;
   let isScrollInteraction = false;
   let isScrollSquash = false;
+  let isBouncy = true;
   let isAutoHideScrollbar = false;
   let blacklistHosts: string[] = [];
   let isOrphaned = false;
@@ -404,6 +413,7 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
         host,
         isClickThrough,
         scrollSquash: isScrollInteraction && isScrollSquash,
+        bouncy: isBouncy,
         onSpawned: (pack, isRestored) => {
           if (isRestored) {
             log(`桌宠【${pack}】已恢复接力状态`);
@@ -586,6 +596,7 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
           debugLog: false,
           scrollInteraction: false,
           scrollSquash: false,
+          bouncy: true,
           autoHideScrollbar: false,
           blacklist: [],
         },
@@ -602,6 +613,8 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
           isScrollInteraction = Boolean(items.scrollInteraction);
           isScrollSquash = Boolean(items.scrollSquash);
           applyScrollSquash(isScrollSquash);
+          isBouncy = items.bouncy !== undefined ? Boolean(items.bouncy) : true;
+          applyBouncy(isBouncy);
           isAutoHideScrollbar = Boolean(items.autoHideScrollbar);
           blacklistHosts = Array.isArray(items.blacklist)
             ? items.blacklist
@@ -662,6 +675,15 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
         isScrollSquash
           ? "响应上滚弹性形变已开启"
           : "响应上滚弹性形变已关闭",
+      );
+    }
+
+    if (changes.bouncy !== undefined) {
+      applyBouncy(Boolean(changes.bouncy.newValue));
+      log(
+        isBouncy
+          ? "Q弹果冻动效已开启"
+          : "Q弹果冻动效已关闭",
       );
     }
 

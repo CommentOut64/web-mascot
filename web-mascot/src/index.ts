@@ -2,7 +2,11 @@ import { MascotEngine } from "./core/MascotEngine.js";
 import type { RuntimeOptions, RuntimeSnapshot } from "./core/MascotEngine.js";
 import { defaultPackBaseUrl } from "./core/Assets.js";
 import { PresetRegistry } from "./core/animationPreset.js";
-import type { BehaviorInfo, ForceBehaviorOptions } from "./core/types.js";
+import type {
+  BehaviorInfo,
+  BouncyOptions,
+  ForceBehaviorOptions,
+} from "./core/types.js";
 
 /**
  * Public entry point of the web-mascot library.
@@ -99,6 +103,14 @@ export interface MascotOptions {
   enablePageCoordinator?: boolean;
   /** Enable elastic squash-and-stretch physical response on upward page scroll (default false). */
   scrollSquash?: boolean;
+  /**
+   * Q 弹果冻机制（垂直缩放形变，默认 true）：
+   * 锚点位于宠物底部，在站在底部时高频无限循环果冻形变。
+   * 支持传 boolean 或详细调参对象 BouncyOptions（控制速度、压缩量等）。
+   */
+  bouncy?: boolean | BouncyOptions;
+  /** Alias for `bouncy`. */
+  bouncySquash?: boolean | BouncyOptions;
 }
 
 let hasConfigured = false;
@@ -180,6 +192,32 @@ export class Mascot {
     return this.engine.getScrollSquash();
   }
 
+  public setBouncy(
+    enabledOrOptions: boolean | BouncyOptions,
+    options?: BouncyOptions,
+  ): void {
+    this.engine.setBouncy(enabledOrOptions, options);
+  }
+
+  public getBouncy(): boolean {
+    return this.engine.getBouncy();
+  }
+
+  public getBouncyOptions(): BouncyOptions {
+    return this.engine.getBouncyOptions();
+  }
+
+  public setBouncySquash(
+    enabledOrOptions: boolean | BouncyOptions,
+    options?: BouncyOptions,
+  ): void {
+    this.engine.setBouncySquash(enabledOrOptions, options);
+  }
+
+  public getBouncySquash(): boolean {
+    return this.engine.getBouncySquash();
+  }
+
   /** Name of the behavior currently running, or null if none. */
   public get currentBehavior(): string | null {
     return this.engine.currentBehaviorName;
@@ -237,7 +275,17 @@ export class Mascot {
  * the page.
  */
 export async function createMascot(options: MascotOptions): Promise<Mascot> {
-  const { container, pack, initialSnapshot, startPaused, signal, enablePageCoordinator, scrollSquash } = options;
+  const {
+    container,
+    pack,
+    initialSnapshot,
+    startPaused,
+    signal,
+    enablePageCoordinator,
+    scrollSquash,
+    bouncy,
+    bouncySquash,
+  } = options;
   if (!container) throw new Error("[web-mascot] createMascot() needs a container element");
   if (!pack) throw new Error("[web-mascot] createMascot() needs a pack name");
 
@@ -246,7 +294,14 @@ export async function createMascot(options: MascotOptions): Promise<Mascot> {
   signal?.addEventListener("abort", cancel, { once: true });
   try {
     signal?.throwIfAborted();
-    await engine.init({ initialSnapshot, startPaused, signal, enablePageCoordinator, scrollSquash });
+    await engine.init({
+      initialSnapshot,
+      startPaused,
+      signal,
+      enablePageCoordinator,
+      scrollSquash,
+      bouncy: bouncy ?? bouncySquash ?? true,
+    });
     signal?.throwIfAborted();
   } catch (error) {
     engine.destroy();
@@ -381,6 +436,7 @@ export type {
   ActionNode,
   Behavior,
   BehaviorInfo,
+  BouncyOptions,
   ForceBehaviorOptions,
   RelaySnapshot,
   RelayVisualSnapshot,
