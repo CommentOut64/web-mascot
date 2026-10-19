@@ -157,6 +157,14 @@ body {
   border-bottom: 1px dashed var(--card-border);
 }
 
+.sub-switch-row {
+  padding-left: 14px;
+  background-color: rgba(99, 102, 241, 0.04);
+  border-left: 2px solid var(--accent, #6366f1);
+  border-radius: 0 4px 4px 0;
+  margin: 2px 0;
+}
+
 .label-with-tip {
   display: flex;
   flex-direction: column;

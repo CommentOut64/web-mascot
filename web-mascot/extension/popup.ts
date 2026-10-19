@@ -4,6 +4,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const clickthroughToggle = document.getElementById("clickthrough-toggle") as HTMLInputElement | null;
   const debuglogToggle = document.getElementById("debuglog-toggle") as HTMLInputElement | null;
   const scrollToggle = document.getElementById("scroll-toggle") as HTMLInputElement | null;
+  const scrollSquashRow = document.getElementById("scroll-squash-row") as HTMLElement | null;
+  const scrollSquashToggle = document.getElementById("scroll-squash-toggle") as HTMLInputElement | null;
   const autohideScrollbarToggle = document.getElementById("autohide-scrollbar-toggle") as HTMLInputElement | null;
   const modeRadios = document.querySelectorAll<HTMLInputElement>('input[name="mode"]');
   const btnRestart = document.getElementById("btn-restart") as HTMLButtonElement | null;
@@ -71,6 +73,12 @@ document.addEventListener("DOMContentLoaded", () => {
     btnBlacklist.disabled = false;
   }
 
+  function updateScrollSquashVisibility(visible: boolean): void {
+    if (scrollSquashRow) {
+      scrollSquashRow.style.display = visible ? "flex" : "none";
+    }
+  }
+
   // Read saved settings
   chrome.storage.local.get(
     {
@@ -79,6 +87,7 @@ document.addEventListener("DOMContentLoaded", () => {
       clickThrough: false,
       debugLog: false,
       scrollInteraction: false,
+      scrollSquash: false,
       autoHideScrollbar: false,
       blacklist: [],
     },
@@ -87,7 +96,11 @@ document.addEventListener("DOMContentLoaded", () => {
       if (clickthroughToggle)
         clickthroughToggle.checked = Boolean(items.clickThrough);
       if (debuglogToggle) debuglogToggle.checked = Boolean(items.debugLog);
-      if (scrollToggle) scrollToggle.checked = Boolean(items.scrollInteraction);
+      const isScrollActive = Boolean(items.scrollInteraction);
+      if (scrollToggle) scrollToggle.checked = isScrollActive;
+      if (scrollSquashToggle)
+        scrollSquashToggle.checked = Boolean(items.scrollSquash);
+      updateScrollSquashVisibility(isScrollActive);
       if (autohideScrollbarToggle)
         autohideScrollbarToggle.checked = Boolean(items.autoHideScrollbar);
       blacklistHosts = Array.isArray(items.blacklist) ? items.blacklist : [];
@@ -131,7 +144,14 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Handle scroll interaction toggle (experimental)
   scrollToggle?.addEventListener("change", () => {
-    chrome.storage.local.set({ scrollInteraction: scrollToggle.checked });
+    const isChecked = scrollToggle.checked;
+    updateScrollSquashVisibility(isChecked);
+    chrome.storage.local.set({ scrollInteraction: isChecked });
+  });
+
+  // Handle scroll squash toggle
+  scrollSquashToggle?.addEventListener("change", () => {
+    chrome.storage.local.set({ scrollSquash: scrollSquashToggle.checked });
   });
 
   // Handle auto hide scrollbar toggle

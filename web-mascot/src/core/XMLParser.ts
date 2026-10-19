@@ -7,36 +7,25 @@ import type {
   ActionType,
 } from "./types.js";
 import type { Hotspot } from "./Hotspot.js";
+import { translateShimejiXml } from "./Translator.js";
 
 export class XMLParser {
   /**
-   * @param packBaseUrl Already-resolved base URL of the pack directory, without a
-   *   trailing slash (e.g. `https://cdn.example.com/mascots/Neuron`). The caller
-   *   owns URL resolution, so an embedded or hosted build never depends on the
-   *   page's root path.
+   * Parse configuration directly from raw XML strings.
+   * Useful for in-memory packs, ZIP archives, or custom dynamic configurations.
    */
-  static async loadConfig(mascotName: string, packBaseUrl: string, signal?: AbortSignal): Promise<MascotConfig> {
-    const basePath = packBaseUrl.replace(/\/+$/, "");
-    const [actionsXmlRes, behaviorsXmlRes] = await Promise.all([
-      fetch(`${basePath}/actions.xml`, { signal }),
-      fetch(`${basePath}/behaviors.xml`, { signal }),
-    ]);
-
-    if (!actionsXmlRes.ok || !behaviorsXmlRes.ok) {
-      throw new Error(`加载配置失败: ${mascotName}.`);
-    }
-
-    const actionsRaw = await actionsXmlRes.text();
-    const behaviorsRaw = await behaviorsXmlRes.text();
-
+  static parseRawConfig(actionsRaw: string, behaviorsRaw: string, mascotName: string): MascotConfig {
     if (actionsRaw.trim().toLowerCase().startsWith("<!doctype html>") || behaviorsRaw.trim().toLowerCase().startsWith("<!doctype html>")) {
       throw new Error(
-        `[XMLParser] 加载 ${mascotName} 的 actions.xml 失败：Vite 返回了 HTML fallback。`,
+        `[XMLParser] 加载 ${mascotName} 的配置失败：收到了 HTML 响应而不是 XML。`,
       );
     }
 
-    const cleanActionsStr = actionsRaw.replace(/xmlns=".*?"/g, "");
-    const cleanBehaviorsStr = behaviorsRaw.replace(/xmlns=".*?"/g, "");
+    const translatedActions = translateShimejiXml(actionsRaw);
+    const translatedBehaviors = translateShimejiXml(behaviorsRaw);
+
+    const cleanActionsStr = translatedActions.replace(/xmlns=".*?"/g, "");
+    const cleanBehaviorsStr = translatedBehaviors.replace(/xmlns=".*?"/g, "");
 
     const parser = new DOMParser();
     const actionsDoc = parser.parseFromString(cleanActionsStr, "text/xml");
@@ -52,6 +41,50 @@ export class XMLParser {
       actions: this.parseActions(actionsDoc),
       behaviors: this.parseBehaviors(behaviorsDoc),
     };
+  }
+
+  /**
+   * @param packBaseUrl Already-resolved base URL of the pack directory, without a
+   *   trailing slash (e.g. `https://cdn.example.com/mascots/Neuron`). The caller
+   *   owns URL resolution, so an embedded or hosted build never depends on the
+   *   page's root path.
+   */
+  static async loadConfig(mascotName: string, packBaseUrl: string, signal?: AbortSignal): Promise<MascotConfig> {
+    const basePath = packBaseUrl.replace(/\/+$/, "");
+
+    // Path pairs to probe in order of preference
+    const candidatePairs = [
+      { actions: "actions.xml", behaviors: "behaviors.xml" },
+      { actions: "conf/actions.xml", behaviors: "conf/behaviors.xml" },
+      { actions: "conf/動作.xml", behaviors: "conf/行動.xml" },
+      { actions: "動作.xml", behaviors: "行動.xml" },
+    ];
+
+    let lastError: Error | null = null;
+    for (const pair of candidatePairs) {
+      try {
+        const [actionsRes, behaviorsRes] = await Promise.all([
+          fetch(`${basePath}/${pair.actions}`, { signal }),
+          fetch(`${basePath}/${pair.behaviors}`, { signal }),
+        ]);
+
+        if (actionsRes.ok && behaviorsRes.ok) {
+          const actionsRaw = await actionsRes.text();
+          const behaviorsRaw = await behaviorsRes.text();
+          if (
+            !actionsRaw.trim().toLowerCase().startsWith("<!doctype html>") &&
+            !behaviorsRaw.trim().toLowerCase().startsWith("<!doctype html>")
+          ) {
+            return this.parseRawConfig(actionsRaw, behaviorsRaw, mascotName);
+          }
+        }
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        lastError = err instanceof Error ? err : new Error(String(err));
+      }
+    }
+
+    throw new Error(`加载配置失败: ${mascotName}.${lastError ? " " + lastError.message : ""}`);
   }
 
   private static getTag(node: Document | Element, name: string): Element[] {
@@ -220,14 +253,22 @@ export class XMLParser {
       const frequency = Number.isFinite(frequencyValue) ? Math.max(0, frequencyValue) : 0;
       const hidden = node.getAttribute("Hidden") === "true";
 
-      let condition: string | undefined = undefined;
-      const parent = node.parentNode as Element;
-      if (
-        parent &&
-        (parent.localName === "Condition" || parent.tagName === "Condition")
-      ) {
-        condition = parent.getAttribute("Condition") || undefined;
+      const conditions: string[] = [];
+      const ownCondition = node.getAttribute("Condition");
+      if (ownCondition) conditions.push(ownCondition);
+      let parent = node.parentNode as Element | null;
+      while (parent) {
+        if (parent.localName === "Condition" || parent.tagName === "Condition") {
+          const inherited = parent.getAttribute("Condition");
+          if (inherited) conditions.unshift(inherited);
+        }
+        parent = parent.parentNode as Element | null;
       }
+      // Behavior conditions are evaluated at selection, so their conjunction is
+      // live. Keep a single expression intact for diagnostics.
+      const condition = conditions.length > 1
+        ? `#{${conditions.map((entry) => `(${entry.replace(/^[#$]\{|\}$/g, "")})`).join(" && ")}}`
+        : conditions[0];
 
       const nextBehaviors: BehaviorReference[] = [];
       let addNext = true;

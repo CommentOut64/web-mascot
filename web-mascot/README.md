@@ -60,11 +60,30 @@ const [neuron, eviling] = await Promise.all([
 // 它们底层共享 BroadcastManager，在发生如“打招呼”等行为时会自动产生双宠互动
 ```
 
+### 或者：直接导入第三方/自定义 Shimeji ZIP 资源包（无需静态目录部署）
+
+支持直接传入由用户上传的 `File`/`Blob`、`ArrayBuffer` 或远程 ZIP `URL`，纯前端解压并在内存中构建虚拟模型，所有 API 与控制方法完全通用：
+
+```js
+import { importMascotPack, createMascot } from "web-mascot";
+
+// 导入 Shimeji-ee 或日版 Shimeji ZIP 资源包（支持 URL、Blob、File）
+const { name, warnings, unregister } = await importMascotPack(
+  "https://example.com/assets/shimeji-pack.zip"
+);
+
+// 像内置模型一样直接创建
+const mascot = await createMascot({ container: document.body, pack: name });
+
+// 当不再需要时释放内存
+// unregister();
+```
+
 > **注**：模块通过 `import.meta.url` 推导出的资源基址（`PACK_BASE_URL`）只在**未打包、且包目录被原样服务**的环境下有效（裸 ESM，或原样镜像 `dist/` 的 CDN）。经打包器预构建后，推导值会指向构建产物路径（如 `node_modules/.vite/deps/mascot_pack`、`/_astro/mascot_pack`），所有 pack 请求都会 404，因此必须如上文显式配置。
 >
 > 另外，`DEFAULT_PACK_BASE_URL`（`"/mascot_pack"`）只在推导**彻底失败**时才兜底；打包环境里推导是「成功但错误」，兜底不会生效——所以「把精灵放到 `/mascot_pack`」这件事本身还不够，必须显式 `configure()`。
 >
-> **动画行为不需要配置**：引擎自带一套偏活跃的默认预设（普通静止约 8 秒即被推动，长静止动画允许完整播完）。想退回 pack 原生行为（无 pacer、无权重覆盖、无长序列豁免），加一句 `configure({ ignoreBuiltin: true })`；想微调就在静态根放一份 `animation.config.json`，字段说明见 [ANIMATION_CONFIG.md](ANIMATION_CONFIG.md)。
+> **动画行为与配置预设**：引擎提供标准化的预设注册系统（`PresetRegistry`），默认使用偏活跃的 `"lively"` 预设（温和缩短已知保持段，12 秒静止后在完整行为／循环结束处推动换位，长表演完整播放）。想退回 Qt / Shimeji-ee 原生桌面行为（无 pacer、无权重覆盖、无长序列豁免），调用 `configure({ preset: "classic" })` 即可；如需注册自定义行为风格或微调，请参阅 [ANIMATION_CONFIG.md](ANIMATION_CONFIG.md)。
 
 ---
 
@@ -72,9 +91,9 @@ const [neuron, eviling] = await Promise.all([
 
 | 导入 | 用途 |
 | --- | --- |
-| `web-mascot` | 主入口：创建、挂载、销毁宠物 |
+| `web-mascot` | 主入口：创建、挂载、销毁宠物，预设注册与切换 |
 | `web-mascot/devtools` | 开发工具：观测日志（记录宠物去了哪里）与库自身诊断日志 |
-| `web-mascot/animation.config.json` | 内置默认档的可拷贝副本（引擎已内建同样的值，通常不需要；要改就在静态根放一份） |
+| `web-mascot/animation.config.json` | 预设配置文件的标准导出模版（通常不需要；需要自定义微调时在静态根放一份） |
 | `web-mascot/mascot_pack/*` | 按真实路径取包内精灵（自定义 loader、上传 CDN、`new URL()`） |
 
 > `web-mascot/mascot_pack/*` 是**打包器/Node 的模块解析**能力；浏览器运行时不会解析裸说明符。页面里请用绝对 URL，例如 `/mascot_pack/Neuron/img/shime1.png`。
@@ -86,7 +105,15 @@ const [neuron, eviling] = await Promise.all([
 | 导出 | 签名 | 说明 |
 | --- | --- | --- |
 | `createMascot` | `(options) => Promise<Mascot>` | 创建并挂载一只，解析完 pack 且画出首帧后 resolve |
-| `configure` | `(options) => void` | **打包环境必须**（须在 `createMascot()` 之前）：`assets`、`animationConfigUrl`、`runtime`；裸 ESM 下可省略 |
+| `importMascotPack` | `(input, options?) => Promise<ImportedMascotPack>` | 纯前端导入 Shimeji ZIP / Blob / URL 资源包，注册为虚拟模型 |
+| `registerMascotPack` | `(pack) => void` | 手动注册自定义模型资源包（支持同名替换内置模型） |
+| `unregisterMascotPack` | `(name) => void` | 注销虚拟模型并自动释放 Blob URL 内存 |
+| `hasMascotPack` | `(name) => boolean` | 查询指定名称的虚拟模型是否已注册 |
+| `configure` | `(options) => void` | **打包环境必须**（须在 `createMascot()` 之前）：`assets`、`preset`、`animationConfigUrl`、`runtime` |
+| `PresetRegistry` | `class` | 动画行为预设注册中心（内置 `"lively"`、`"classic"`，支持动态扩展与校验） |
+| `registerPreset` | `(name, preset) => void` | 便捷注册自定义动画配置预设 |
+| `usePreset` | `(name) => void` | 便捷切换全局当前生效的动画预设 |
+| `getPreset` | `(name) => MascotAnimationOptions \| undefined` | 获取已注册预设的深拷贝配置 |
 | `Mascot` | `class` | `.engine` / `.label` / `.destroy()`（可重复调用） |
 | `assetBaseUrl` | `() => string` | 当前**生效**的资源基址 |
 | `runtimeOptions` | `() => RuntimeSnapshot` | 当前运行参数（含默认值） |
@@ -95,9 +122,9 @@ const [neuron, eviling] = await Promise.all([
 | `resolveAssetBase` | `(url?) => string \| undefined` | 从模块 URL 推导包根目录，纯函数 |
 | `isConfigured` | `() => boolean` | 是否显式调用过 `configure()`，仅诊断用 |
 
-**类型**：`MascotOptions`、`MascotConfig`、`Mascot`、`RuntimeOptions`、`RuntimeSnapshot`、`Pose`、`ActionNode`、`Behavior`、`Hotspot`、`EngineEvent`、`EngineObserver`。
+**类型**：`MascotOptions`、`MascotConfig`、`Mascot`、`RuntimeOptions`、`RuntimeSnapshot`、`MascotAnimationOptions`、`AnimationPresetFile`、`Pose`、`ActionNode`、`Behavior`、`Hotspot`、`EngineEvent`、`EngineObserver`、`MascotPackInput`、`ImportMascotPackOptions`、`ImportedMascotPack`、`MascotPackData`、`ShimejiWarning` 等。
 
-**高级用法（不承诺语义化版本稳定性）**：`MascotEngine`、`AnimationConfig`、`BroadcastManager`。
+**高级用法（不承诺语义化版本稳定性）**：`PackRegistry`、`ShimejiFinder`、`translateShimejiXml`、`normalizeSpriteKey`、`MascotEngine`、`AnimationConfig`、`BroadcastManager`、`CLASSIC_ANIMATION_PRESET`、`LIVELY_ANIMATION_PRESET`、`STANDARD_CONFIG_SAMPLE`。
 
 ### 开发工具入口 `web-mascot/devtools`
 
@@ -135,29 +162,48 @@ const mascot = await createMascot({
 
 ## 加自己的宠物
 
-引擎是**格式驱动**的：宠物的身份就是你传给 `createMascot({ pack })` 的那个字符串，库代码里没有任何写死的宠物名。一个 pack 目录最少需要：
+引擎是**格式驱动**的：宠物的身份就是你传给 `createMascot({ pack })` 的那个字符串，库代码里没有任何写死的宠物名。你有两种方式添加自己的宠物：
+
+### 方式 A：纯前端动态导入 ZIP 资源包（推荐）
+
+直接通过 `importMascotPack()` 导入用户上传的 ZIP 文件或远程 URL，完全无需在静态目录部署任何文件：
+
+```js
+import { importMascotPack, createMascot } from "web-mascot";
+
+// 支持传入 File、Blob、ArrayBuffer 或远程 zip URL
+const { name, warnings, unregister } = await importMascotPack(fileOrUrl);
+
+// 直接创建，所有现有控制 API 保持完全一致
+const mascot = await createMascot({ container: document.body, pack: name });
+```
+
+- **全面兼容**：支持标准 Shimeji-ee（含 `conf/`）与扁平结构、原版日文 XML 自动翻译、46 帧无 XML 皮肤包自动装配模版。
+- **虚拟注册中心**：内存虚拟包（`PackRegistry`）优先级高于静态 HTTP 目录。若导入同名包（如 `"Neuron"`），将自动替换内置模型。
+- **优雅降级**：Shimeji-ee 中的桌面专属动作（如 `ThrowIE`、`Breed`）在网页端自动平滑降级，绝不抛出未捕获异常中断渲染。
+
+### 方式 B：作为静态资源部署
+
+也可以像内置模型一样，将解压后的 Shimeji pack 目录放置到静态服务器中：
 
 ```
 mascot_pack/MyPet/
-├── actions.xml      # 必需：动作与逐帧图像
-├── behaviors.xml    # 必需：行为与权重
+├── actions.xml      # 必需：动作与逐帧图像（或在 conf/actions.xml）
+├── behaviors.xml    # 必需：行为与权重（或在 conf/behaviors.xml）
 └── img/             # 必需：<Pose Image="..."> 引用的图片
     └── shime1.png
 ```
 
-然后：
+然后通过 `configure({ assets })` 指定全局静态根：
 
 ```js
-configure({ assets: "/mascot_pack" });                  // 当前为全局资源根
+configure({ assets: "/mascot_pack" });
 const pet = await createMascot({ container: document.body, pack: "MyPet" });
 ```
 
-**当前限制（重要）**：`assets` 是**全局**设置，页面内所有宠物共用一个资源根。所以"内置 Neuron + 你自己的 MyPet（放在别处）"目前需要在同一个目录下提供两者。按宠物单独指定资源根在路线图上。
-
 资源服务的两个要求：
-
-- 精灵文件名必须与 XML 里的 `Image` 属性**完全一致**（例如 `Image="/shime1.png"` 就要求文件叫 `shime1.png`）；静态服务器要给出正确的 `Content-Type: image/png`。
-- 资源与页面不同源时需要允许 CORS（XML 用 `fetch` 读取，必须放行）。
+- 精灵文件名必须与 XML 里的 `Image` 属性匹配（忽略大小写，不带扩展名时自动尝试 `.png`）；静态服务器需给出正确的 `Content-Type: image/png`。
+- 资源与页面不同源时需要允许 CORS（XML 与精灵需可跨域访问）。
 
 ---
 
@@ -187,11 +233,11 @@ const pet = await createMascot({ container: document.body, pack: "MyPet" });
 
 ## 状态
 
-`0.0.4` — 接口尚未承诺语义化版本稳定性（0.x 允许破坏性变更）。
+`0.1.2` — 接口尚未承诺语义化版本稳定性（0.x 允许破坏性变更）。支持贴地上滚弹性形变物理反馈（Squash & Stretch）与配置 API；重做行为调度与互动机会选择（支持动作保持上限与重复衰减）；提供完整调度验证工具与浏览器巡检环境。全面升级交互层为标准 Pointer Events，提供触控屏/移动端触摸拖拽与抛掷基础兼容，完善多指触控隔离与指针捕获。
 
-**0.0.3 的行为变更**：引擎开始自带默认动画预设（`src/core/animationPreset.ts`），因此**什么都不配置的宿主现在也是这套偏活跃的节奏**，不再是 pack 原生；要回到原生的宿主加 `configure({ ignoreBuiltin: true })`。随包的 `dist/animation.config.json` 改为构建期由同一份数据生成，不再单独维护。
+**动画预设架构**：引擎内置标准化的预设注册体系（`PresetRegistry`），默认采用偏活跃的 `"lively"` 预设（`src/core/animationPreset.ts`）；要回到 Qt / Shimeji-ee 原生桌面行为的宿主，传入 `configure({ preset: "classic" })` 即可。用户亦可拿已有预设派生并调用 `registerPreset()` 注册专属风格。随包的 `dist/animation.config.json` 为标准化配置导出模版。
 
-当前只内置 Neuron / Eviling 两只宠物。计划中的方向：通用 Shimeji 规范兼容、按宠物指定资源根、运行时导入用户自己的模型。反馈与问题请提到 [issues](https://github.com/CommentOut64/web-mascot/issues)。
+内置 Neuron 与 Eviling 两只官方宠物，现已支持通用 Shimeji-ee 与日版 Shimeji 资源包动态导入与虚拟注册（支持替换内置模型，桌面不支持动作自动优雅降级）。反馈与问题请提到 [issues](https://github.com/CommentOut64/web-mascot/issues)。
 
 ---
 

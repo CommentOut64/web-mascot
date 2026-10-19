@@ -1,6 +1,8 @@
 import { MascotEngine } from "./core/MascotEngine.js";
 import type { RuntimeOptions, RuntimeSnapshot } from "./core/MascotEngine.js";
 import { defaultPackBaseUrl } from "./core/Assets.js";
+import { PresetRegistry } from "./core/animationPreset.js";
+import type { BehaviorInfo, ForceBehaviorOptions } from "./core/types.js";
 
 /**
  * Public entry point of the web-mascot library.
@@ -66,11 +68,15 @@ export interface MascotConfig {
    *  `/animation.config.json` once per page; if that file is absent nothing breaks
    *  and the built-in preset stays in effect. */
   animationConfigUrl?: string;
-  /** Set true to drop the built-in animation preset and run the packs exactly as
-   *  they ship: no pacer, no behaviour-weight overrides, no long-sequence
-   *  exemption. Default false — the built-in preset is what a host gets when it
-   *  configures nothing. Orthogonal to `animationConfigUrl`: this removes the
-   *  layer underneath, it does not disable the file. */
+  /**
+   * Base animation preset to inherit from: "lively" (default, web-tuned) or "classic" (Qt desktop parity).
+   */
+  preset?: string;
+  /**
+   * @deprecated Use `preset: "classic"` instead.
+   * Set true to drop the lively animation preset and run the packs exactly as
+   * they ship: no pacer, no behaviour-weight overrides, no long-sequence exemption.
+   */
   ignoreBuiltin?: boolean;
   /** Simulation tuning. See `RuntimeOptions`; omitted fields keep their defaults. */
   runtime?: RuntimeOptions;
@@ -91,6 +97,8 @@ export interface MascotOptions {
   signal?: AbortSignal;
   /** Set false to disable default single-origin page coordinator. */
   enablePageCoordinator?: boolean;
+  /** Enable elastic squash-and-stretch physical response on upward page scroll (default false). */
+  scrollSquash?: boolean;
 }
 
 let hasConfigured = false;
@@ -106,10 +114,19 @@ let hasConfigured = false;
  */
 export function configure(options: MascotConfig): void {
   hasConfigured = true;
-  if (options.assets || options.animationConfigUrl || options.ignoreBuiltin !== undefined) {
+  if (options.preset) {
+    usePreset(options.preset);
+  }
+  if (
+    options.assets ||
+    options.animationConfigUrl ||
+    options.ignoreBuiltin !== undefined ||
+    options.preset
+  ) {
     MascotEngine.configure({
       packBaseUrl: options.assets,
       animationConfigUrl: options.animationConfigUrl,
+      preset: options.preset,
       ignoreBuiltin: options.ignoreBuiltin,
     });
   }
@@ -155,6 +172,57 @@ export class Mascot {
     this.engine.setClickThrough(enabled);
   }
 
+  public setScrollSquash(enabled: boolean): void {
+    this.engine.setScrollSquash(enabled);
+  }
+
+  public getScrollSquash(): boolean {
+    return this.engine.getScrollSquash();
+  }
+
+  /** Name of the behavior currently running, or null if none. */
+  public get currentBehavior(): string | null {
+    return this.engine.currentBehaviorName;
+  }
+
+  /** Name of the behavior currently running, or null if none. */
+  public getCurrentBehavior(): string | null {
+    return this.engine.currentBehaviorName;
+  }
+
+  /**
+   * Get list of all distinct behaviors with surface requirements and immediate availability.
+   */
+  public getBehaviors(): BehaviorInfo[] {
+    return this.engine.getBehaviors();
+  }
+
+  /**
+   * Check whether a behavior or action can immediately execute on the mascot's current surface.
+   */
+  public canExecuteBehavior(name: string): boolean {
+    return this.engine.canExecuteBehavior(name);
+  }
+
+  /**
+   * Switch the mascot to a target behavior or action.
+   * If surface constraints are not met, returns false unless `options.force` is true.
+   */
+  public setBehavior(name: string, options?: ForceBehaviorOptions): boolean {
+    return this.engine.setBehavior(name, options);
+  }
+
+  /**
+   * Force the mascot to switch to a target behavior, bypassing surface constraints
+   * and automatically snapping to the required surface by default.
+   */
+  public forceBehavior(
+    name: string,
+    options?: Omit<ForceBehaviorOptions, "force">,
+  ): boolean {
+    return this.engine.forceBehavior(name, options);
+  }
+
   /** Remove the mascot from the page. Safe to call more than once. */
   public destroy(): void {
     if (this.destroyed) return;
@@ -169,7 +237,7 @@ export class Mascot {
  * the page.
  */
 export async function createMascot(options: MascotOptions): Promise<Mascot> {
-  const { container, pack, initialSnapshot, startPaused, signal, enablePageCoordinator } = options;
+  const { container, pack, initialSnapshot, startPaused, signal, enablePageCoordinator, scrollSquash } = options;
   if (!container) throw new Error("[web-mascot] createMascot() needs a container element");
   if (!pack) throw new Error("[web-mascot] createMascot() needs a pack name");
 
@@ -178,7 +246,7 @@ export async function createMascot(options: MascotOptions): Promise<Mascot> {
   signal?.addEventListener("abort", cancel, { once: true });
   try {
     signal?.throwIfAborted();
-    await engine.init({ initialSnapshot, startPaused, signal, enablePageCoordinator });
+    await engine.init({ initialSnapshot, startPaused, signal, enablePageCoordinator, scrollSquash });
     signal?.throwIfAborted();
   } catch (error) {
     engine.destroy();
@@ -189,14 +257,135 @@ export async function createMascot(options: MascotOptions): Promise<Mascot> {
   return new Mascot(engine);
 }
 
+import { ShimejiFinder } from "./core/ShimejiFinder.js";
+import type { ImportOptions, ShimejiWarning, ShimejiFinderResult } from "./core/ShimejiFinder.js";
+import { PackRegistry } from "./core/PackRegistry.js";
+import type { MascotPack, MascotPackMeta } from "./core/PackRegistry.js";
+
+export type MascotPackInput = File | Blob | ArrayBuffer | Uint8Array | string;
+export type ImportMascotPackOptions = ImportOptions;
+export type MascotPackData = MascotPack;
+
+export interface ImportedMascotPack {
+  name: string;
+  warnings: ShimejiWarning[];
+  data: MascotPack;
+  unregister: () => boolean;
+  toString(): string;
+  valueOf(): string;
+}
+
+/**
+ * Quickly import and register a custom mascot pack from a ZIP/mascot archive (File, Blob, ArrayBuffer, or URL).
+ * Automatically decompress, normalize XML and sprites in memory, and register it for use with createMascot().
+ *
+ * @param source ZIP/mascot archive file, blob, buffer, or fetchable URL.
+ * @param options Optional pack name override, replaceBuiltin, onWarning, or encoding options.
+ * @returns An ImportedMascotPack object containing { name, warnings, data, unregister }.
+ */
+export async function importMascotPack(
+  source: MascotPackInput,
+  options?: ImportOptions,
+): Promise<ImportedMascotPack> {
+  const result = await ShimejiFinder.analyze(source, options);
+  PackRegistry.register(result);
+
+  const packName = result.name;
+  return {
+    name: packName,
+    warnings: result.warnings,
+    data: result,
+    unregister: () => PackRegistry.unregister(packName),
+    toString() {
+      return packName;
+    },
+    valueOf() {
+      return packName;
+    },
+  };
+}
+
+/**
+ * Manually register a custom in-memory mascot pack.
+ */
+export function registerMascotPack(pack: MascotPack): void {
+  PackRegistry.register(pack);
+}
+
+/**
+ * Unregister a custom mascot pack and revoke all its in-memory Blob URLs.
+ */
+export function unregisterMascotPack(name: string): boolean {
+  return PackRegistry.unregister(name);
+}
+
+/**
+ * Check if a custom in-memory mascot pack is registered.
+ */
+export function hasMascotPack(name: string): boolean {
+  return PackRegistry.has(name);
+}
+
 export { MascotEngine } from "./core/MascotEngine.js";
 export { MascotGroup } from "./core/MascotGroup.js";
 export type { MascotGroupSpawnOptions } from "./core/MascotGroup.js";
 export { ViewportHost } from "./core/ViewportHost.js";
 export type { RuntimeOptions, RuntimeSnapshot } from "./core/MascotEngine.js";
 export { AnimationConfig } from "./core/AnimationConfig.js";
+export type { MascotAnimationOptions, AnimationConfigFile, IdleHoldSetting } from "./core/AnimationConfig.js";
+export {
+  PresetRegistry,
+  CLASSIC_ANIMATION_PRESET,
+  LIVELY_ANIMATION_PRESET,
+  STANDARD_CONFIG_SAMPLE,
+} from "./core/animationPreset.js";
+
+/**
+ * Get an independent, mutable clone of a registered animation preset.
+ * Modifying the returned object will not affect the preset in the registry.
+ */
+export function getPreset(name: string): import("./core/AnimationConfig.js").MascotAnimationOptions | undefined {
+  return PresetRegistry.get(name);
+}
+
+/**
+ * Register a custom animation preset in the PresetRegistry.
+ */
+export function registerPreset(name: string, config: import("./core/AnimationConfig.js").MascotAnimationOptions): void {
+  PresetRegistry.register(name, config);
+}
+
+/**
+ * Switch the active base animation preset (e.g. "classic", "lively", or a custom one).
+ */
+export function usePreset(name: string): void {
+  PresetRegistry.setDefaultPresetName(name);
+  MascotEngine.setPreset(name);
+}
+
 export { BroadcastManager } from "./core/Broadcast.js";
 export { DEFAULT_PACK_BASE_URL, resolveAssetBase } from "./core/Assets.js";
+export { PackRegistry } from "./core/PackRegistry.js";
+export { ShimejiFinder, normalizeSpriteKey } from "./core/ShimejiFinder.js";
+export { translateShimejiXml } from "./core/Translator.js";
+export type {
+  MascotPack,
+  MascotPackMeta,
+  ImportOptions,
+  ShimejiWarning,
+  ShimejiFinderResult,
+};
 export type { EngineEvent, EngineObserver } from "./core/MascotEngine.js";
-export type { Pose, ActionNode, Behavior, RelaySnapshot, RelayVisualSnapshot, RelayFrameSnapshot } from "./core/types.js";
+export type {
+  Pose,
+  ActionNode,
+  Behavior,
+  BehaviorInfo,
+  ForceBehaviorOptions,
+  RelaySnapshot,
+  RelayVisualSnapshot,
+  RelayFrameSnapshot,
+} from "./core/types.js";
 export type { Hotspot } from "./core/Hotspot.js";
+
+

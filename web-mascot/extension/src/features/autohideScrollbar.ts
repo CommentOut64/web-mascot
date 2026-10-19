@@ -127,9 +127,9 @@ export function checkAndApplyScrollbar(enabled: boolean, logger?: ScrollbarLogge
   const hasScroll = hasPageScrollbars();
   if (hasScroll) {
     applyScrollbarHiding(true);
-    currentLogger?.("🪟 探测到页面存在滚动条，已自动应用持久隐藏");
+    currentLogger?.("探测到页面存在滚动条，已自动应用持久隐藏");
   } else {
-    currentLogger?.("🪟 页面当前无可见滚动条，跳过隐藏");
+    currentLogger?.("页面当前无可见滚动条，跳过隐藏");
   }
 
   // 为应对 SPA 动态异步加载内容，挂载轻量 ResizeObserver 监听内容高度变化
@@ -139,7 +139,7 @@ export function checkAndApplyScrollbar(enabled: boolean, logger?: ScrollbarLogge
       if (!document.documentElement.classList.contains(SCROLLBAR_HIDE_CLASS)) {
         if (hasPageScrollbars()) {
           applyScrollbarHiding(true);
-          currentLogger?.("🪟 动态探测到页面出现滚动条，已自动应用持久隐藏");
+          currentLogger?.("动态探测到页面出现滚动条，已自动应用持久隐藏");
         }
       }
     });

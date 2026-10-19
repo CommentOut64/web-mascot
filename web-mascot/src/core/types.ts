@@ -32,6 +32,10 @@ export interface RelayFrameSnapshot {
   progressX: number;
   progressY: number;
   durationLimit: number | null;
+  /** Shortened holds wait for their active animation cycle, including after relay. */
+  finishCycle?: boolean;
+  conditions?: Record<string, boolean>;
+  poseDurations?: number[];
 }
 
 export interface RelayVisualSnapshot {
@@ -123,4 +127,30 @@ export interface MascotConfig {
    *  NoticeFallingTutel); Shimeji treats each entry as its own candidate, so
    *  they must not be collapsed into a map keyed by Name. */
   behaviors: Behavior[];
+}
+
+export interface BehaviorInfo {
+  name: string;
+  requiredSurface: "Floor" | "Wall" | "Ceiling" | null;
+  /** Whether this behavior can immediately execute on the mascot's current surface. */
+  available: boolean;
+  hidden: boolean;
+}
+
+export interface ForceBehaviorOptions {
+  /**
+   * Whether to bypass surface constraint checking.
+   * - `false` (default): if the target behavior cannot execute on the current surface, the call returns false.
+   * - `true`: force switch to target behavior.
+   */
+  force?: boolean;
+  /**
+   * Whether to automatically snap/teleport the mascot to the target behavior's required surface.
+   * Defaults to `true` when `force` is `true`; otherwise defaults to `false`.
+   */
+  snapToSurface?: boolean;
+  /**
+   * Optional reason identifier for logging and event observers. Defaults to `"manual-api"`.
+   */
+  reason?: string;
 }

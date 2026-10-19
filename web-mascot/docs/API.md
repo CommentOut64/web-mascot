@@ -46,11 +46,31 @@ attach({ console: true });               // 观测日志：宠物移动史
 | 导出 | 签名 | 一句话 | 详见 |
 | --- | --- | --- | --- |
 | `createMascot` | `(options: MascotOptions) => Promise<Mascot>` | 创建并挂载一只宠物，解析完 pack 且画出首帧后 resolve | 3.2 |
-| `configure` | `(options: MascotConfig) => void` | **打包环境必须**（在 `createMascot()` 之前）：资源根 / 动画配置 / 物理参数 | 3.1 |
+| `configure` | `(options: MascotConfig) => void` | **打包环境必须**（在 `createMascot()` 之前）：资源根 / 预设名 / 动画配置 / 物理参数 | 3.1 |
+| `PresetRegistry` | `class` | 动画行为预设注册中心（注册、获取、切换预设） | 3.6 |
+| `registerPreset` | `(name: string, preset: MascotAnimationOptions) => void` | 便捷注册动画配置预设 | 3.6 |
+| `usePreset` | `(name: string) => void` | 便捷切换全局当前激活预设 | 3.6 |
+| `getPreset` | `(name: string) => MascotAnimationOptions \| undefined` | 获取已注册预设的配置深拷贝 | 3.6 |
 | `Mascot` | `class` | 一只已挂载的宠物 | 3.3 |
 | `Mascot.engine` | `MascotEngine` | 引擎实例，取仿真状态（`snapshot()` / `position()`）用 | 3.3 |
 | `Mascot.label` | `string` | 稳定标识，形如 `1-Neuron` | 3.3 |
+| `Mascot.currentBehavior` | `string \| null` | 当前正在运行的行为名称（只读属性 / `getCurrentBehavior()`） | 3.3 |
+| `Mascot.getBehaviors` | `() => BehaviorInfo[]` | 获取所有支持的顶层动作列表及其表面约束与可用性 | 3.3 |
+| `Mascot.canExecuteBehavior` | `(name: string) => boolean` | 查询指定动作在当前表面是否可立即执行 | 3.3 |
+| `Mascot.setBehavior` | `(name: string, options?: ForceBehaviorOptions) => boolean` | 安全切换至指定动作（受当前表面约束，不满足返回 `false`） | 3.3 |
+| `Mascot.forceBehavior` | `(name: string, options?: ForceBehaviorOptions) => boolean` | 强制切换动作（绕过表面检查，默认自动吸附/瞬移至目标表面） | 3.3 |
+| `Mascot.setClickThrough` | `(enabled: boolean) => void` | 设置该宠物的鼠标穿透（忽略交互命中） | 3.3 |
+| `Mascot.setScrollSquash` | `(enabled: boolean) => void` | 设置是否开启贴地响应上滚的弹性形变物理反馈 | 3.3 |
+| `Mascot.getScrollSquash` | `() => boolean` | 查询是否开启贴地响应上滚的弹性形变物理反馈 | 3.3 |
 | `Mascot.destroy` | `() => void` | 移除宠物，释放 DOM / 定时器 / 监听器；**可重复调用** | 3.3 |
+| `importMascotPack` | `(input: MascotPackInput, options?: ImportMascotPackOptions) => Promise<ImportedMascotPack>` | 导入 Shimeji ZIP / Blob / URL 资源包，注册为虚拟模型 | 3.8 |
+| `registerMascotPack` | `(pack: MascotPackData) => void` | 注册自定义虚拟模型数据（支持替换内置模型） | 3.8 |
+| `unregisterMascotPack` | `(name: string) => void` | 注销虚拟模型并释放 Blob URL 内存 | 3.8 |
+| `hasMascotPack` | `(name: string) => boolean` | 查询是否已注册虚拟模型 | 3.8 |
+| `PackRegistry` | `class` | 虚拟模型包内存注册中心 | 3.8 |
+| `ShimejiFinder` | `class` | 纯前端 Shimeji 资源包解压与解析器 | 3.8 |
+| `translateShimejiXml` | `(xmlString: string) => string` | 日文 Shimeji XML 标签/属性/值翻译器 | 3.8 |
+| `normalizeSpriteKey` | `(raw: string) => string` | 精灵图片路径规范化工具函数 | 3.8 |
 | `assetBaseUrl` | `() => string` | 当前**生效**的资源基址（推导值或被覆盖值） | 3.4 |
 | `runtimeOptions` | `() => RuntimeSnapshot` | 当前生效的运行参数（含默认值） | 3.4 / 3.5 |
 | `isConfigured` | `() => boolean` | 是否显式调用过 `configure()`，仅诊断 | 3.4 |
@@ -58,12 +78,15 @@ attach({ console: true });               // 观测日志：宠物移动史
 | `DEFAULT_PACK_BASE_URL` | `string` | 兜底常量 `"/mascot_pack"` | 3.4 |
 | `resolveAssetBase` | `(url?: string) => string \| undefined` | 从模块 URL 推导包根目录，纯函数 | 3.4 |
 | `MascotEngine` | `class` | 高级用法，**不承诺稳定** | 3.4 |
-| `MascotGroup` | `class` | 多宠群组生命周期与编排管理 | 3.6 |
+| `MascotGroup` | `class` | 多宠群组生命周期与编排管理（含群组级 `setBehavior` / `forceBehavior`） | 3.9 |
 | `ViewportHost` | `class` | 全屏 Shadow DOM 隔离视口与占位图管理 | 3.6 |
 | `AnimationConfig` | `class` | 高级用法，**不承诺稳定** | 3.4 |
 | `BroadcastManager` | `class` | 高级用法，**不承诺稳定** | 3.4 |
+| `CLASSIC_ANIMATION_PRESET` | `MascotAnimationOptions` | 纯净 Qt 移植行为基线预设（`{}`） | 3.6 |
+| `LIVELY_ANIMATION_PRESET` | `MascotAnimationOptions` | 网页偏活跃默认预设（含防发呆与出池断环） | 3.6 |
+| `STANDARD_CONFIG_SAMPLE` | `AnimationPresetFile` | 标准化配置样例文档对象 | 3.6 |
 
-类型：`MascotOptions`、`MascotConfig`、`MascotGroupSpawnOptions`、`RuntimeOptions`、`RuntimeSnapshot`、`Pose`、`ActionNode`、`Behavior`、`Hotspot`、`EngineEvent`、`EngineObserver`。
+类型：`MascotOptions`、`MascotConfig`、`MascotGroupSpawnOptions`、`RuntimeOptions`、`RuntimeSnapshot`、`MascotAnimationOptions`、`AnimationPresetFile`、`Pose`、`ActionNode`、`Behavior`、`BehaviorInfo`、`ForceBehaviorOptions`、`Hotspot`、`EngineEvent`、`EngineObserver`、`MascotPackInput`、`ImportMascotPackOptions`、`ImportedMascotPack`、`MascotPackData`、`ShimejiFinderResult`、`ShimejiPackEntry`、`ShimejiWarning`。
 
 ### 开发工具入口 `web-mascot/devtools`（13 个值 + 8 个类型）
 
@@ -172,8 +195,9 @@ function configure(options: MascotConfig): void
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `assets` | `string?` | 含每个 pack 目录的基址，**不带结尾斜杠**。**打包环境必须给出**；只在未打包环境下可省略（那时才用推导值 `PACK_BASE_URL`）。**当前是全局设置**：页面内所有宠物共用一个资源根 |
-| `animationConfigUrl` | `string?` | 动画配置文件 URL。省略则每页探测一次默认路径 `/animation.config.json`；文件不存在不报错，内置预设继续生效 |
-| `ignoreBuiltin` | `boolean?` | 设为 `true` 丢弃内置预设，回到 pack 原生行为（无 pacer、无权重覆盖、无长序列豁免）。默认 `false`。与 `animationConfigUrl` 正交：它拿掉的是**最底层**，不会禁用文件 |
+| `preset` | `string?` | 指定生效的动画预设名称。内置 `"lively"`（网页活跃默认预设）与 `"classic"`（纯净 Qt 移植无覆盖预设），支持传注册中心中的自定义预设名 |
+| `animationConfigUrl` | `string?` | 动画配置文件 URL。省略则每页探测一次默认路径 `/animation.config.json`；文件不存在不报错，所选预设继续生效 |
+| `ignoreBuiltin` | `boolean?` | *(已废弃，建议用 `preset: "classic"`)*。若为 `true`，等价于切换至经典基线预设 |
 | `runtime` | `RuntimeOptions?` | 仿真调参，见 3.5 |
 
 日志**不在这里**配置：观测日志走 `web-mascot/devtools` 的 `attach()`，库诊断走 `configureLogging()`（见第 4 节）。
@@ -181,11 +205,11 @@ function configure(options: MascotConfig): void
 行为与约束：
 
 - `assets` 在**创建每只宠物时被快照**：之后再调用 `configure()` 不会影响已存在的宠物，也不会让同一页面里的宠物读到不同 pack。
+- `preset` 可以在全局通过 `configure({ preset })` 或 `usePreset(name)` 设置，也可以在单个 `MascotEngine` 上通过 `engine.setPreset(name)` 独立切换。
 - `animationConfigUrl` 遵循同一规则（快照于首次生效）。这不影响 `runtime`——运行参数是**每 tick 读取**的，改了立刻对已有宠物生效。
 - 全部字段可选，且多次调用会合并；只传 `runtime` 不会清掉之前的 `assets`。
-- `ignoreBuiltin` 是**页面级**偏好：设过之后，后续加载的配置文件也不会把它顶掉；文件里的 `ignoreBuiltin` 只在页面没有显式设置时生效。
 
-> **当前限制与路线图**：`assets` 是**全局**的（`MascotEngine.packBaseUrl` 是静态字段），所以"内置的 Neuron + 你自己放在别处的 MyPet"目前要求两者的 pack 目录位于同一个资源根下（把内置 pack 拷到你的静态目录即可）。**按宠物单独指定资源根在路线图上**，届时 `MascotOptions` 会新增可选的 `assets`，优先级为 per-mascot > 全局 > 推导默认值——纯追加，不会影响现在写好的代码。
+> **虚拟包优先机制**：`configure({ assets })` 指定的是 HTTP 静态服务下的全局资源根路径。若要加载任意第三方或用户上传的宠物模型，推荐使用 `importMascotPack()` 或 `registerMascotPack()`。注册到内存注册中心（`PackRegistry`）的虚拟模型**优先于静态 HTTP 目录**被引擎读取，不同宠物无需存放在同一资源目录下，亦支持通过同名覆盖内置的 `"Neuron"` 或 `"Eviling"`。
 
 ### 3.2 `createMascot(options)`
 
@@ -197,6 +221,8 @@ function createMascot(options: MascotOptions): Promise<Mascot>
 | --- | --- | --- |
 | `container` | `HTMLElement` | **锚点**：宠物属于文档的哪个位置 |
 | `pack` | `string` | **mascot key**：不透明标识，同时是动画配置 `mascots` 的索引键。当前实现里它等于 pack 目录名，如 `"Neuron"`；未来支持运行时导入用户模型后，它可能不再是目录名，所以不要把它当路径解析 |
+| `clickThrough` | `boolean?` | 初始是否开启鼠标穿透（默认 `false`） |
+| `scrollSquash` | `boolean?` | 初始是否开启贴地响应上滚的弹性形变物理反馈（默认 `false`） |
 
 `container` 是**锚点语义**，不是裁剪框：宠物在**整个视口**内活动，`container` 只决定它属于文档的哪一处。当 `container` 被滚动出视口时，引擎会暂停这只宠物（`IntersectionObserver`）。这与 libshijima 的"桌宠属于桌面"不同，是网页场景下的等价物。
 
@@ -204,11 +230,103 @@ function createMascot(options: MascotOptions): Promise<Mascot>
 
 ### 3.3 `class Mascot`
 
-| 成员 | 说明 |
-| --- | --- |
-| `engine: MascotEngine` | 引擎实例，供控制台调试或需要仿真状态时使用 |
-| `label: string` | 稳定标识，形如 `1-Neuron`；dev 构建下用于命名日志文件 |
-| `destroy(): void` | 移除宠物，释放 DOM、定时器与监听器。**可重复调用** |
+一只已挂载到页面的宠物主控制对象，由 `createMascot()` 返回。
+
+#### 3.3.1 属性与方法
+
+| 成员 | 签名 / 类型 | 说明 |
+| --- | --- | --- |
+| `engine` | `MascotEngine` | 底层仿真引擎实例，供调试或高级底层调度使用 |
+| `label` | `string` | 宠物的稳定会话标识，形如 `1-Neuron` |
+| `currentBehavior` | `string \| null` | 当前正在运行的行为名称（只读属性），等价于 `getCurrentBehavior()` |
+| `getCurrentBehavior()` | `() => string \| null` | 获取当前正在运行的行为名称，未就绪时返回 `null` |
+| `getBehaviors()` | `() => BehaviorInfo[]` | 查询该宠物支持的全部顶层动作列表及其表面约束与即时可用性 |
+| `canExecuteBehavior(name)` | `(name: string) => boolean` | 查询指定动作在宠物**当前所处表面**是否可立即执行 |
+| `setBehavior(name, options?)` | `(name: string, options?: ForceBehaviorOptions) => boolean` | 安全切换动作。默认受当前物理表面约束；若不匹配则返回 `false` 且不中断当前行为 |
+| `forceBehavior(name, options?)` | `(name: string, options?: Omit<ForceBehaviorOptions, "force">) => boolean` | 强制切换动作。绕过表面检查，**默认自动吸附/瞬移至目标所需表面** |
+| `setClickThrough(enabled)` | `(enabled: boolean) => void` | 设置是否开启鼠标穿透模式（开启后宠物忽略所有指针事件） |
+| `setScrollSquash(enabled)` | `(enabled: boolean) => void` | 设置是否开启贴地响应上滚的弹性形变物理反馈 |
+| `getScrollSquash()` | `() => boolean` | 查询当前是否开启贴地响应上滚的弹性形变物理反馈 |
+| `destroy()` | `() => void` | 移除宠物，销毁 DOM 节点、定时器及事件监听器。**安全且可重复调用** |
+
+#### 3.3.2 动作控制类型定义
+
+```ts
+export interface BehaviorInfo {
+  /** 行为名称，如 "StandUp"、"SitDown"、"ClimbAlongWall" */
+  name: string;
+  /** 该动作所要求的起始接触表面；若为 null 则表示空中动作或无表面约束 */
+  requiredSurface: "Floor" | "Wall" | "Ceiling" | null;
+  /** 当前表面是否可立即执行该动作（true 表示无需强切瞬移即可运行） */
+  available: boolean;
+  /** 该动作在模型配置中是否被标记为隐藏（如爬墙、天花板动作通常为 true） */
+  hidden: boolean;
+}
+
+export interface ForceBehaviorOptions {
+  /**
+   * 是否绕过表面约束检查。
+   * - false（默认）：若当前表面与动作要求的表面不符，切换失败并返回 false。
+   * - true：强制切换至该动作。
+   */
+  force?: boolean;
+  /**
+   * 是否在强制切换时自动将宠物吸附/瞬移至目标表面。
+   * - force 为 true 时默认为 true：地面动作吸附至底部、墙壁动作就近吸附至左/右墙并同步朝向、天花板动作吸附至顶部，重置速度为 0。
+   * - 若显式设为 false，宠物将在原地强行切入该动作（若无表面支撑可能在后续物理帧触发掉落）。
+   */
+  snapToSurface?: boolean;
+  /**
+   * 触发原因标识，用于 EngineEvent 与开发日志追踪。默认为 "manual-api"。
+   */
+  reason?: string;
+}
+```
+
+#### 3.3.3 动作切换机制与边缘保护
+
+1. **零延迟即刻响应**：调用 `setBehavior` 或 `forceBehavior` 后，引擎会在当前调用内重置动作展开深度，立即展开动作树并完成首帧绘制（`renderNow()`），开发者无需等待 40ms 的物理步长间隔。
+2. **指针与拖拽防护**：若在宠物正被用户鼠标/手指拖拽（`isDragging`）或长按时调用了主动切换 API，引擎会自动释放 Pointer Capture 并中止拖拽状态，恢复正常指针样式，确保不会因拖拽状态滞留导致逻辑死锁。
+3. **智能表面就近吸附 (`snapToSurface`)**：
+   - 切换至 `Floor` 动作：瞬移至工作区底部边界（`area.bottom`），纵向速度归零，表面标记为 `floor`。
+   - 切换至 `Wall` 动作：计算宠物当前坐标距左墙与右墙的水平距离，就近吸附至最近的一侧边缘，自动同步朝向（在右墙面向右，在左墙面向左），横纵向速度归零。
+   - 切换至 `Ceiling` 动作：瞬移至工作区顶部边界（`area.top`），纵向速度归零，表面标记为 `ceiling`。
+
+#### 3.3.4 右键菜单与控制面板实战示例
+
+```ts
+import { createMascot } from "web-mascot";
+
+const mascot = await createMascot({
+  container: document.body,
+  pack: "Neuron",
+});
+
+// 1. 获取所有支持的行为构建自定义右键菜单
+const menuItems = mascot.getBehaviors().map((b) => ({
+  label: b.name,
+  // 可以在 UI 上标记当前是否可直接点击
+  enabled: b.available,
+  onClick: () => {
+    // 强制切换并就近吸附到对应表面（推荐）
+    mascot.forceBehavior(b.name);
+  },
+}));
+
+// 2. 快捷键直接让宠物坐下（只有在地面时才生效）
+window.addEventListener("keydown", (e) => {
+  if (e.key === "s") {
+    const success = mascot.setBehavior("SitDown");
+    if (!success) {
+      console.log("当前宠物不在地面，无法就地坐下！");
+    }
+  }
+  // 3. 快捷键强制让宠物爬墙（无论身在何处，自动就近吸附到最近的墙壁爬墙）
+  if (e.key === "w") {
+    mascot.forceBehavior("ClimbAlongWall");
+  }
+});
+```
 
 ### 3.4 其余导出
 
@@ -244,36 +362,65 @@ function createMascot(options: MascotOptions): Promise<Mascot>
 
 **故意不暴露**的常量：`MAX_FRAME_DELTA_MS`、`MAX_BEHAVIOR_INITS_PER_TICK`、`STALL_LIMIT_TICKS`。它们是防止 bug 锁死页面的安全阀，调低会把"表现问题"变成"宠物坏掉"。
 
-### 3.6 动画配置里的节奏字段
+### 3.6 动画配置与预设系统（PresetRegistry）
 
-这些不在 `configure()` 里，而是写在**动画配置文件**（`animationConfigUrl` 指向的 JSON，或引擎默认请求的 `/animation.config.json`）的 `defaults` / `mascots` 中。列在这里是因为它们与 3.5 的运行参数容易混淆：**3.5 改的是引擎物理，这里改的是行为选择**。
+引擎采用分层解耦的配置体系。**3.5 改的是底层物理，这里改的是行为编排与节奏**。
 
-生效优先级：`内置预设 → defaults → reducedMotion → mascots.<名字>`（逐字段合并，对象型字段按 key 叠加）。引擎**自带一套默认预设**（`src/core/animationPreset.ts`，同一份数据生成随包的 `dist/animation.config.json`）；`ignoreBuiltin: true` 把最底层整层拿掉，等价于 0.0.3 之前"什么都不配"的行为。
+#### 3.6.1 预设注册与切换
 
-| 字段 | 说明 |
-| --- | --- |
-| `forcedSwitchTicks` | 静止超过这么多 tick 就换行为（pacer）。"静止"按**位置是否变化**判定，所以速度为零的长序列也算静止 |
-| `pacerExemptBehaviors` | 上面这条的**例外名单**。列出的行为不会被 pacer 打断，让长静止动画播完；普通 `Stay` 仍按时被推动 |
-| `maxBehaviorTicks` | 单个行为的**硬上限**，超时即换（掉落/拖拽除外）。pacer 的豁免不影响它，所以豁免的行为也不会无限持续 |
-| `exitToPoolBehaviors` | 列出的行为结束时回到**全局抽签池**，而不是走 pack 的 `<NextBehaviorList>` |
-| `behaviorWeights` | 覆盖 pack 的 `Frequency`（0 = 禁用；给 `Frequency="0"` 的行为赋正值可打开它） |
-| `interactionCooldownTicks` | 互动结束后，需要伙伴的行为移出候选池这么多 tick |
-| `maxTravelPx` | 水平游走目标的最大距离（px）。0/缺省 = 不限 |
-| `durationScale` | 全局时长倍率（0.05–20），只作用于 XML 自带的 `Duration` |
-| `actionDurations` | 按动作名覆盖持续 tick 数，可写单值或 `[min,max]` |
+引擎内置了预设注册中心 `PresetRegistry`，内置两个平等预设：
+- `"lively"`（默认）：针对网页端优化的活跃预设，包含防发呆推动机制与闭环打破。
+- `"classic"`：纯净对齐 Qt / Shimeji-ee 桌面原版的基线预设（`{}`），不注入任何覆盖。
 
-**为什么需要后两个字段**：pack 用 `<NextBehaviorList Add="false">` 串接相关行为，而部分链是**闭链**。内置 pack 的 `SitAndFaceMouse` 只能重新选自己或 `SitWhileDanglingLegs`，宠物一旦坐下就再也出不来。所以"让长静止动画播完"必须和"播完回主池"一起用：
+```ts
+import { registerPreset, usePreset, getPreset, PresetRegistry } from "web-mascot";
+
+// 1. 获取已有预设进行派生微调
+const custom = getPreset("lively")!;
+custom.forcedSwitchTicks = 300; // 静止 12 秒后请求在完整结束点换位
+
+// 2. 注册自定义预设
+registerPreset("my-chill-pet", custom);
+
+// 3. 激活预设（全局切换）
+usePreset("my-chill-pet");
+
+// 也可在单个宠物实例引擎上独立切换
+mascot.engine.setPreset("classic");
+```
+
+生效优先级：`PresetRegistry 预设（如 lively / classic） → 静态 JSON defaults → reducedMotion → mascots.<名字>`（逐字段合并，对象型字段按 key 叠加）。
+
+#### 3.6.2 核心行为控制字段
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `forcedSwitchTicks` | `number` | 静止达到阈值后请求移动；有限行为完整结束，无限循环完成一整轮后退出。`0` 关闭 |
+| `pacerExemptBehaviors` | `string[]` | 不受静止换位请求影响的行为；所有有限表演均不会被计时器截断 |
+| `maxBehaviorTicks` | `number` | 行为年龄预算，到达后在完成点回全局池。不会截断有限序列、飞行、拖拽或有效互动 |
+| `actionHoldLimits` | 动作名 → `{ ticks: number 或 [min,max], waitPoses: number[] }` | 仅分配标注的静止等待帧时长；其余帧时长和完整顺序保持，短过渡沿用 XML；不作用于条件动画、互动或移动 |
+| `repeatBehaviorWeight` | `number` | 全局候选中立即重复当前行为的权重倍率，范围 0～1，默认 1；lively 为 0.65。无其他可用行为时不降权 |
+| `exitToPoolBehaviors` | `string[]` | 列出的行为结束时强制回到**全局抽签池**，而不是走 pack 的 `<NextBehaviorList>` |
+| `behaviorWeights` | `Record<string, number>` | 覆盖 pack 的 `Frequency`（0 = 禁用；给 `Frequency="0"` 的行为赋正值可打开它） |
+| `interactionCooldownTicks` | `number` | 互动结束后，需要伙伴的行为移出候选池这么多 tick |
+| `maxTravelPx` | `number` | 水平游走目标的最大距离（px）。0/缺省 = 不限 |
+| `durationScale` | `number` | 全局时长倍率（0.05–20），只作用于 XML 自带的 `Duration` |
+| `actionDurations` | `Record<string, number | [number, number]>` | 按动作名覆盖持续 tick 数，可写单值或 `[min,max]` |
+
+**为什么需要 pacer 与出池破环**：pack 用 `<NextBehaviorList Add="false">` 串接相关行为，部分链条是**自闭环**（如 `SitAndFaceMouse` $\leftrightarrow$ `SitWhileDanglingLegs`）。如果不配置出池破环，网页宠物坐下后可能永远无法站起走动。预设系统将这一逻辑标准化解耦：
 
 ```json
 {
   "defaults": {
-    "forcedSwitchTicks": 200,
+    "forcedSwitchTicks": 300,
     "pacerExemptBehaviors": ["SitWhileDanglingLegs"],
     "exitToPoolBehaviors": ["SitWhileDanglingLegs"],
     "maxBehaviorTicks": 1100
   }
 }
 ```
+
+更多参数细节、取值约束及完整标准配置样例，请参阅专门文档 [ANIMATION_CONFIG.md](ANIMATION_CONFIG.md)。
 
 ### 3.7 输入与手势（与 NeurolingsCE 对齐）
 
@@ -291,6 +438,97 @@ function createMascot(options: MascotOptions): Promise<Mascot>
 hotspot 来自 pack 的 `actions.xml`（`<Hotspot Shape/Origin/Size Behavior>`），随当前动画变化；动画配置的 `denyBehaviors` 依旧过滤它们。
 
 被抓起时：锚点 = **局部光标** + `OffsetX/OffsetY`（缺省 `dragOffsetX/dragOffsetY`），局部光标在按下时播种，因此**抓在哪里就从哪里跟手**，不会跳到 pack 的固定握点。指针事件里即时重钉锚点、且拖拽期间不做绘制插值（Qt 每 10 ms 重钉一次，且 `dragged::requests_interpolation() == false`），所以高速拖动不会落后于指针。`Resisting` 期间锚点不跟随（`resist::tick` 只比较），光标离开 `dragResistAbortPx` 即中止挣扎。
+
+### 3.8 自定义资源包导入与虚拟注册中心（Shimeji-ee / 日版 Shimeji 兼容）
+
+`web-mascot` 提供了纯 TypeScript 移植的 Shimeji 资源包解析与虚拟注册方案（基于 `fflate/browser`），能够在纯前端环境解压与加载任何通用 Shimeji 资源包。
+
+#### 3.8.1 `importMascotPack(input, options?)`
+
+```ts
+function importMascotPack(
+  input: File | Blob | ArrayBuffer | Uint8Array | string,
+  options?: ImportMascotPackOptions
+): Promise<ImportedMascotPack>
+```
+
+- **参数 `input`**：
+  - 可以是用户通过 `<input type="file">` 选取的 `File` 或 `Blob`。
+  - 可以是二进制 `ArrayBuffer` 或 `Uint8Array`。
+  - 可以是远程 ZIP 包的 URL 字符串（自动通过 `fetch` 下载）。
+- **参数 `options`**（可选）：
+  - `name?: string`：指定模型名称。若不指定，将自动从 ZIP 内的主目录名（或文件名前缀）推导。
+  - `replaceBuiltin?: boolean`：若名称与内置模型（如 `"Neuron"`、`"Eviling"`）冲突，是否允许替换。默认为 `true`。
+  - `onWarning?: (warning: ShimejiWarning) => void`：自定义警告监听器。若未提供，不兼容动作等警告将直接通过 `console.warn` 输出。
+- **返回值 `Promise<ImportedMascotPack>`**：
+  - `name: string`：注册后的模型名，可直接传给 `createMascot({ pack: name })` 或 `MascotGroup.spawn()`。
+  - `warnings: ShimejiWarning[]`：解析与降级过程产生的所有警告列表。
+  - `data: MascotPackData`：已注册的虚拟模型元数据（含 Blob URL 映射表）。
+  - `unregister: () => void`：一键注销函数（等价于 `unregisterMascotPack(name)`）。
+
+**使用示例**：
+
+```ts
+import { importMascotPack, createMascot } from "web-mascot";
+
+// 用户上传 zip 文件或传入 URL
+const { name, warnings, unregister } = await importMascotPack(fileOrUrl);
+
+// 挂载自定义模型（所有现有 API 完全无缝支持）
+const mascot = await createMascot({ container: document.body, pack: name });
+
+// 页面离开或不再需要时注销并释放 Blob URL 内存
+// unregister();
+```
+
+#### 3.8.2 `PackRegistry` 与内存模型生命周期
+
+```ts
+import { registerMascotPack, unregisterMascotPack, hasMascotPack, PackRegistry } from "web-mascot";
+```
+
+- `PackRegistry.register(pack: MascotPackData)`：底层注册 API。
+- `PackRegistry.unregister(name: string)`：注销指定名称的模型包，**并自动调用 `URL.revokeObjectURL()` 释放所有精灵图片占用的内存**，防止长时间运行导致内存泄漏。
+- `PackRegistry.has(name: string)`：检查指定名称的虚拟模型是否存在。
+- **替换内置模型**：只需导入或注册同名包（例如 `name: "Neuron"`），引擎在后续调用 `createMascot({ pack: "Neuron" })` 时便会自动优先读取新模型资源，而原有测试用例和控制逻辑保持原样。
+
+#### 3.8.3 格式兼容性与动作优雅降级
+
+1. **目录结构兼容**：
+   - 支持 Shimeji-ee 经典规范（`conf/actions.xml`、`conf/behaviors.xml`、`img/shime*.png`）。
+   - 支持扁平化结构（XML 位于根目录，`img/` 存放精灵）。
+   - 支持忽略大小写的精灵文件名、去除或补充 `.png` 扩展名。
+2. **日文 XML 自动翻译**：
+   - 自动翻译原版日文 XML 标签与属性（如 `<マスコット>`, `<動作>`, `<ポーズ>`, `画像`, `基準座標`, `枠`, `地面` 等），支持 Shift-JIS / UTF-8 编码自动探测。
+3. **46 帧无 XML 皮肤包合成**：
+   - 对于只有 46 张连续帧图片（`shime1.png` ~ `shime46.png`）的古早 Shimeji 资源包，自动为其注入官方通用的 `default_actions.xml` 和 `default_behaviors.xml` 模版，确保正常渲染与移动。
+4. **桌面动作优雅降级**：
+   - 网页环境无法操控系统窗口，对于 `ThrowIE`、`ThrowWindow`、`WalkWithIE`、`PullWindow`、`FallWithIE`、`Breed`、`Divide` 等桌面/克隆动作，引擎会自动降级为等价的常规动作（如 `Fall`、`Walk`、`Stand`）并输出诊断 warning，绝不抛出异常中断渲染。
+
+### 3.9 `class MascotGroup` 多宠群组编排与批量动作控制
+
+管理多只桌宠（如 Neuron 与 Eviling 伴侣双宠）的并发创建、快照接力以及群组动作同步调度。
+
+#### 3.9.1 动作控制方法
+
+| 成员 | 签名 | 说明 |
+| --- | --- | --- |
+| `setBehavior(name, options?, pack?)` | `(name: string, options?: ForceBehaviorOptions, pack?: string) => boolean` | 在群组上设置动作。若指定 `pack` 则仅控制该特定模型，未指定则向所有宠物分发；至少有一只成功即返回 `true` |
+| `forceBehavior(name, options?, pack?)` | `(name: string, options?: Omit<ForceBehaviorOptions, "force">, pack?: string) => boolean` | 在群组上强制切换动作（绕过表面检查并默认自动吸附）；若指定 `pack` 则仅控制该模型 |
+| `setScrollSquash(enabled, pack?)` | `(enabled: boolean, pack?: string) => void` | 设置群组全部或指定模型的贴地上滚弹性形变开关 |
+
+```ts
+import { MascotGroup } from "web-mascot";
+
+const group = new MascotGroup();
+await group.spawn({ packs: ["Neuron", "Eviling"], container: document.body });
+
+// 1. 全员坐下（地面动作受表面检查约束）
+group.setBehavior("SitDown");
+
+// 2. 仅让 Neuron 强制去爬墙（自动就近吸附至墙壁）
+group.forceBehavior("ClimbAlongWall", {}, "Neuron");
+```
 
 ## 4. 开发工具入口 `web-mascot/devtools`
 
@@ -416,7 +654,7 @@ attach({
 ```
 
 - `mark` 表示**录制开始时该宠物已经存在**，它的 `spawn` 从未被看到；否则时间线会以一个来路不明的站立宠物开头。
-- `peer` 记录双宠互动（`offer` / `connect` / `arrive` / `scan-miss` / `abort` / `serve-timeout`），用 `affordance` 把两只宠物的日志配对。
+  - `peer` 记录双宠互动（`offer` / `reserve` / `connect` / `arrive` / `scan-miss` / `abort` / `serve-timeout`），用 `affordance` 把两只宠物的日志配对。`reserve` 是远端地面接近阶段，尚未抵达，不计作握手成功。
 - `lifecycle` 记录冻结与恢复（`hidden` / `viewport` / `background-page`），用于解释时间线上的空档。
 - `move` 只在**状态变化**时产生（累计位移 ≥32 px 或静默 ≥3 s），不是每帧一条。
 
@@ -469,7 +707,7 @@ const mascot = await createMascot({ container: document.querySelector("#pet-root
 
 ## 8. 发布状态与许可
 
-`version` 为 `0.0.4`。接口尚未承诺语义化版本稳定性：0.x 允许破坏性变更，其中 `MascotEngine` / `AnimationConfig` / `BroadcastManager` 属于**明确不稳定**的高级用法（见 3.4）。
+`version` 为 `0.1.2`。接口尚未承诺语义化版本稳定性：0.x 允许破坏性变更，其中 `MascotEngine` / `AnimationConfig` / `BroadcastManager` 属于**明确不稳定**的高级用法（见 3.4）。
 
 许可拆成两部分，不要混：
 
