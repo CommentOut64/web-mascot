@@ -49,8 +49,10 @@ if (newer.length) {
 }
 
 /* 2. tarball parity: the shipped archive must carry the same bytes. */
+const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf-8"));
+const expectedTarball = `web-mascot-${pkg.version}.tgz`;
 const tgzs = readdirSync(root).filter((file) => file.endsWith(".tgz")).sort();
-const tarball = tgzs.at(-1);
+const tarball = existsSync(join(root, expectedTarball)) ? expectedTarball : tgzs.at(-1);
 const distHashes = new Map(walk(dist).map((file) => [relative(dist, file), sha(readFileSync(file))]));
 if (tarball) {
   const work = mkdtempSync(join(tmpdir(), "mascot-tgz-"));

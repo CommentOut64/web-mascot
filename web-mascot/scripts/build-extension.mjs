@@ -108,7 +108,13 @@ console.log(`>> 同步版本号 v${version} 到 manifest.json ...`);
 const manifestSource = JSON.parse(
   fs.readFileSync(path.resolve(projectRoot, "extension/manifest.json"), "utf-8")
 );
-manifestSource.version = version;
+const cleanVersion = version.split("-")[0];
+manifestSource.version = cleanVersion;
+if (version !== cleanVersion) {
+  manifestSource.version_name = version;
+} else {
+  delete manifestSource.version_name;
+}
 fs.writeFileSync(
   path.resolve(distExtDir, "manifest.json"),
   JSON.stringify(manifestSource, null, 2),
