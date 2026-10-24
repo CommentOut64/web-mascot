@@ -83,10 +83,10 @@ export default defineConfig({
     // it, and `server.watch.ignored` keeps it out of the watcher — writing a log
     // must never trigger HMR. `logs/` is gitignored, so recordings never ship.
     mascotLog({ logRoot: resolve(projectRoot, "logs"), text: true }),
-    // The copy of the built-in preset that ships as `dist/animation.config.json`
+    // The neutral configuration file that ships as `dist/animation.config.json`
     // (exported as `web-mascot/animation.config.json` for hosts that want a file to
-    // edit). It is generated from the very data the engine applies by default, so
-    // the template and the default behaviour cannot drift apart.
+    // edit). It names the default preset and leaves `defaults` empty: the defaults
+    // layer merges over the base preset, so copying a preset here would pin it.
     {
       name: "web-mascot:emit-animation-preset",
       generateBundle() {

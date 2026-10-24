@@ -11,12 +11,14 @@
  *   4. PresetRegistry: Allows getting, modifying, registering, and switching presets without coupling.
  */
 
-import type { MascotAnimationOptions } from "./AnimationConfig.js";
+import type { MascotAnimationOptions, ActivityLevel } from "./AnimationConfig.js";
 
 /** Deep-clone a MascotAnimationOptions object to prevent mutation leakage. */
 export function cloneOptions(options: MascotAnimationOptions): MascotAnimationOptions {
   return {
     ...options,
+    activityLevel: options.activityLevel,
+    travelDwellTicks: Array.isArray(options.travelDwellTicks) ? [...options.travelDwellTicks] : options.travelDwellTicks,
     allowBehaviors: options.allowBehaviors ? [...options.allowBehaviors] : undefined,
     denyBehaviors: options.denyBehaviors ? [...options.denyBehaviors] : undefined,
     pacerExemptBehaviors: options.pacerExemptBehaviors ? [...options.pacerExemptBehaviors] : undefined,
@@ -52,16 +54,103 @@ export function cloneOptions(options: MascotAnimationOptions): MascotAnimationOp
 export const CLASSIC_ANIMATION_PRESET: Readonly<MascotAnimationOptions> = Object.freeze({});
 
 /**
- * Lively (Web Default) animation preset.
- *
- * Tuned specifically for web pages:
- * - Moderate hold budgets for known idle leaves; short transitions stay short.
- * - Pacer and age budgets request a pick at completion, never erase a finite sequence.
- * - Long performances retain their XML timing; repeated global picks are gently reduced.
- * - Loop breaker (exitToPoolBehaviors): breaks closed nextBehavior loops so pets don't get stuck sitting.
- * - Boosts selection weight for expressive actions.
+ * Calm (偏安静) animation preset — Qt desktop parity with composed standing dwell:
+ * - forcedSwitchTicks: 0 (no forced movement pacing, full native idle durations).
+ * - No hold limits: Stand, Sit, Sprawl etc. retain native XML timings (20~60s).
+ * - travelDwellTicks: [50, 75] (2.0~3.0s of calm standing after movement).
+ * - repeatBehaviorWeight: 0.6 (moderate repeat dampening to prevent behavioral loops while preserving calm dwell).
+ * - interactionCooldownTicks: 1500 (60s cooldown to prevent interaction storm in dual-mascot mode).
+ * - Suppressed partner weights: HugEvil, AskForHugs, NoticeFallingTutel, HurlEvil scaled down so idle dominates.
+ */
+export const CALM_ANIMATION_PRESET: Readonly<MascotAnimationOptions> = Object.freeze<MascotAnimationOptions>({
+  activityLevel: "calm",
+  spawn: { topOffset: 100, staggerPx: 180 },
+  forcedSwitchTicks: 0,
+  maxBehaviorTicks: 0,
+  travelDwellTicks: [50, 75],
+  repeatBehaviorWeight: 0.6,
+  interactionCooldownTicks: 1500,
+  pacerExemptBehaviors: ["SitWhileDanglingLegs"],
+  exitToPoolBehaviors: ["SitWhileDanglingLegs", "LieDown"],
+  behaviorWeights: {
+    SitAndFaceMouse: 8,
+    HugEvil: 50,
+    AskForHugs: 50,
+    NoticeFallingTutel: 100,
+    HurlEvil: 20,
+  },
+});
+
+/**
+ * Normal (正常, Default) animation preset — web-tuned balanced timing:
+ * - forcedSwitchTicks: 750 (30s: generous sitting/lying down time, keeps page natural without freezing).
+ * - actionHoldLimits: Stand (12~20s), Sit & Sprawl (14~24s), Wall/Ceiling grabs (10~16s).
+ * - travelDwellTicks: [30, 50] (1.2~2.0s of natural standing dwell after reaching target-x, before the next action).
+ * - repeatBehaviorWeight: 0.4.
+ * - interactionCooldownTicks: 750 (30s cooldown between dual-mascot interactions).
+ */
+export const NORMAL_ANIMATION_PRESET: Readonly<MascotAnimationOptions> = Object.freeze<MascotAnimationOptions>({
+  activityLevel: "normal",
+  spawn: { topOffset: 100, staggerPx: 180 },
+  forcedSwitchTicks: 750,
+  maxBehaviorTicks: 1500,
+  pacerExemptBehaviors: ["SitWhileDanglingLegs"],
+  exitToPoolBehaviors: ["SitWhileDanglingLegs", "LieDown"],
+  interactionCooldownTicks: 750,
+  behaviorWeights: {
+    SitAndFaceMouse: 8,
+    HugEvil: 120,
+    AskForHugs: 120,
+    NoticeFallingTutel: 200,
+    HurlEvil: 50,
+  },
+  actionHoldLimits: {
+    Stand: { ticks: [300, 500], waitPoses: [0, 2, 4] },
+    Sit: { ticks: [350, 600], waitPoses: [0, 2, 4] },
+    Sprawl: { ticks: [350, 600], waitPoses: [0, 2, 4] },
+    GrabWall: { ticks: [250, 400], waitPoses: [0, 2, 4] },
+    GrabCeiling: { ticks: [250, 400], waitPoses: [0, 2, 4] },
+  },
+  travelDwellTicks: [30, 50],
+  repeatBehaviorWeight: 0.4,
+});
+
+/**
+ * Active (偏活跃) animation preset — high mobility, compressed pauses:
+ * - forcedSwitchTicks: 250 (10s: prompt travel quickly).
+ * - actionHoldLimits: Stand (3.2~6s), Sit & Sprawl (4~7.2s).
+ * - travelDwellTicks: [0, 10] (0~0.4s: fast transitions, near-zero dwell).
+ * - repeatBehaviorWeight: 0.35.
+ * - interactionCooldownTicks: 150 (6s cooldown for frequent partner interplay).
+ */
+export const ACTIVE_ANIMATION_PRESET: Readonly<MascotAnimationOptions> = Object.freeze<MascotAnimationOptions>({
+  activityLevel: "active",
+  spawn: { topOffset: 100, staggerPx: 180 },
+  forcedSwitchTicks: 250,
+  maxBehaviorTicks: 800,
+  pacerExemptBehaviors: ["SitWhileDanglingLegs"],
+  exitToPoolBehaviors: ["SitWhileDanglingLegs", "LieDown"],
+  interactionCooldownTicks: 150,
+  actionHoldLimits: {
+    Stand: { ticks: [80, 150], waitPoses: [0, 2, 4] },
+    Sit: { ticks: [100, 180], waitPoses: [0, 2, 4] },
+    Sprawl: { ticks: [100, 180], waitPoses: [0, 2, 4] },
+    GrabWall: { ticks: [80, 150], waitPoses: [0, 2, 4] },
+    GrabCeiling: { ticks: [80, 150], waitPoses: [0, 2, 4] },
+  },
+  travelDwellTicks: [0, 10],
+  repeatBehaviorWeight: 0.35,
+  behaviorWeights: {
+    SitAndFaceMouse: 8,
+  },
+});
+
+/**
+ * Lively (Legacy Web Default) animation preset.
+ * Retained for backward compatibility.
  */
 export const LIVELY_ANIMATION_PRESET: Readonly<MascotAnimationOptions> = Object.freeze<MascotAnimationOptions>({
+  activityLevel: "active",
   spawn: { topOffset: 100, staggerPx: 180 },
   forcedSwitchTicks: 300,
   pacerExemptBehaviors: ["SitWhileDanglingLegs"],
@@ -74,11 +163,8 @@ export const LIVELY_ANIMATION_PRESET: Readonly<MascotAnimationOptions> = Object.
     GrabWall: { ticks: [200, 300], waitPoses: [0, 2, 4] },
     GrabCeiling: { ticks: [200, 300], waitPoses: [0, 2, 4] },
   },
+  travelDwellTicks: [10, 25],
   repeatBehaviorWeight: 0.65,
-  // 20 s. The anti-chain guard in the engine only works if it has a value: with the
-  // old `0` the pair re-engaged on its very next pick (observed: hurl → hug → hug
-  // within one short walk, because the first selection after an interaction is
-  // another live advertisement). Both offering and scanning are gated by this.
   interactionCooldownTicks: 500,
   behaviorWeights: {
     SitWhileDanglingLegs: 150,
@@ -87,20 +173,22 @@ export const LIVELY_ANIMATION_PRESET: Readonly<MascotAnimationOptions> = Object.
 });
 
 /**
- * Backward-compatible alias for the default preset.
- * @deprecated Use `LIVELY_ANIMATION_PRESET` or `PresetRegistry.get("lively")` instead.
+ * Default preset instance applied by the engine.
  */
-export const ANIMATION_PRESET_DEFAULTS: MascotAnimationOptions = LIVELY_ANIMATION_PRESET;
+export const ANIMATION_PRESET_DEFAULTS: MascotAnimationOptions = NORMAL_ANIMATION_PRESET;
 
 /**
  * PresetRegistry — Decoupled repository of named animation presets.
  */
 export class PresetRegistry {
   private static presets = new Map<string, MascotAnimationOptions>([
+    ["normal", cloneOptions(NORMAL_ANIMATION_PRESET)],
+    ["calm", cloneOptions(CALM_ANIMATION_PRESET)],
+    ["active", cloneOptions(ACTIVE_ANIMATION_PRESET)],
     ["lively", cloneOptions(LIVELY_ANIMATION_PRESET)],
     ["classic", cloneOptions(CLASSIC_ANIMATION_PRESET)],
   ]);
-  private static defaultPresetName = "lively";
+  private static defaultPresetName = "normal";
 
   /** Register a custom preset. */
   public static register(name: string, preset: MascotAnimationOptions): void {
@@ -151,21 +239,25 @@ export class PresetRegistry {
 export const STANDARD_CONFIG_SAMPLE = {
   $schema: "https://github.com/CommentOut64/web-mascot/blob/main/web-mascot/ANIMATION_CONFIG.md",
   version: 1,
-  preset: "lively", // Base preset: "lively" (default web-tuned) or "classic" (Qt desktop parity)
+  preset: "normal", // Base preset: "normal" (default web-tuned), "calm" (Qt desktop parity), "active" (high mobility)
+  activityLevel: "normal" as ActivityLevel,
   respectReducedMotion: true, // Follow system prefers-reduced-motion (boolean, default true)
   defaults: {
     // --- 1. Pacing & Travel Limits ---
-    // Request travel after 12s of stillness; finish finite behaviors and whole loops first.
-    forcedSwitchTicks: 300,
+    // Request travel after 30s of stillness; finish finite behaviors and whole loops first.
+    forcedSwitchTicks: 750,
 
-    // Request a global-pool pick after 44s; never discard a finite sequence.
-    maxBehaviorTicks: 1100,
+    // Request a global-pool pick after 60s; never discard a finite sequence.
+    maxBehaviorTicks: 1500,
+
+    // [travelDwellTicks] Dwell duration in ticks after reaching target-x before the next action.
+    travelDwellTicks: [25, 40],
 
     // Behaviors exempt from the travel request.
     pacerExemptBehaviors: ["SitWhileDanglingLegs"],
 
     // [exitToPoolBehaviors] Behaviors that return to global pool on end, breaking closed XML loops.
-    exitToPoolBehaviors: ["SitWhileDanglingLegs"],
+    exitToPoolBehaviors: ["SitWhileDanglingLegs", "LieDown"],
 
     // [maxTravelPx] Maximum horizontal wander travel distance in pixels. 0 = unlimited.
     maxTravelPx: 240,
@@ -173,7 +265,6 @@ export const STANDARD_CONFIG_SAMPLE = {
     // --- 2. Behavior Selection & Duration Overrides ---
     // [behaviorWeights] Overrides XML <Behavior Frequency="...">. 0 = disable; >0 = enable/boost.
     behaviorWeights: {
-      SitWhileDanglingLegs: 150,
       SitAndFaceMouse: 8,
     },
 
@@ -182,8 +273,8 @@ export const STANDARD_CONFIG_SAMPLE = {
       // Sit: [80, 150]
     },
     // Explicit idle wait poses share a budget; other poses retain native timing.
-    actionHoldLimits: cloneOptions(LIVELY_ANIMATION_PRESET).actionHoldLimits,
-    repeatBehaviorWeight: 0.65,
+    actionHoldLimits: cloneOptions(NORMAL_ANIMATION_PRESET).actionHoldLimits,
+    repeatBehaviorWeight: 0.4,
 
     // [durationScale] Multiplier applied to all XML Duration attributes (0.05 ~ 20.0, 1 = unscaled).
     durationScale: 1.0,
@@ -214,9 +305,6 @@ export const STANDARD_CONFIG_SAMPLE = {
     scanDistancePx: 256,
 
     // [interactionCooldownTicks] Cooldown ticks after interaction before another can start.
-    // 500 (20 s): the guard exists to stop the pair re-engaging on their very next pick,
-    // and with 0 it never engaged — the observed chain was hurl → hug → hug within one
-    // short walk, because the first selection after an interaction is another live offer.
     interactionCooldownTicks: 500,
 
     // [partnerWeights] Dynamic weights for partner-seeking behaviors based on presence & reachability.
@@ -238,20 +326,28 @@ export const STANDARD_CONFIG_SAMPLE = {
 
 /**
  * File shape emitted as `dist/animation.config.json` by the build.
+ *
+ * `defaults` is deliberately empty. The file's `defaults` layer is merged *on
+ * top of* the base preset, so shipping a full copy of the normal preset here
+ * would pin every timing value to "normal": switching to calm/active could no
+ * longer change forcedSwitchTicks, actionHoldLimits or travelDwellTicks. Put
+ * only genuine host overrides in this object; `STANDARD_CONFIG_SAMPLE` is the
+ * annotated template that shows every field.
  */
 export const ANIMATION_PRESET_FILE = {
   _readme: [
     "web-mascot 动画配置规范文件 (Standard Animation Configuration File)。",
-    "引擎支持双预设体系：",
-    "  - preset: 'lively' (默认)：温和缩短已知保持段，完整播放表演；12秒静止后请求在完成点换位；",
-    "  - preset: 'classic'：沿用素材原生时长与合法候选权重，不启用 pacer 或保持预算。",
-    "你可以在本文件中基于 preset 微调 defaults，或在 mascots 中按宠物定制。",
+    "引擎支持三档活跃度预设体系：",
+    "  - preset: 'normal' (默认)：适度站立与静止，30秒静止后温和换位，位移到站驻留缓冲；",
+    "  - preset: 'calm' (偏安静)：Qt 原版桌面从容发呆节奏，长时保持，不设换位催促；",
+    "  - preset: 'active' (偏活跃)：高频游走，停顿极短，充满活力。",
+    "defaults 只写你自己的覆盖项；不要整份拷贝某个预设，否则会锁死活跃度切换。",
     "字段详细说明与约束区间见 ANIMATION_CONFIG.md 与 src/core/animationPreset.ts。",
   ],
   version: 1,
-  preset: "lively",
+  preset: "normal",
   respectReducedMotion: true,
-  defaults: LIVELY_ANIMATION_PRESET,
+  defaults: {},
   mascots: {},
   reducedMotion: {},
 };

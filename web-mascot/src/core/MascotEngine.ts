@@ -1,5 +1,5 @@
 import { XMLParser } from "./XMLParser.js";
-import { AnimationConfig } from "./AnimationConfig.js";
+import { AnimationConfig, type ActivityLevel } from "./AnimationConfig.js";
 import { BroadcastManager, ClientHandle, Interaction, ServerState } from "./Broadcast.js";
 import { hotspotAt } from "./Hotspot.js";
 import { registerMascotPage } from "./MascotPageCoordinator.js";
@@ -316,6 +316,13 @@ export class MascotEngine {
   private static animationConfigLoad: Promise<void> | null = null;
   private static animationConfigSetExplicitly = false;
   /**
+   * The activity level the host last asked for, kept outside the config object
+   * because `loadAnimationConfig()` replaces that object wholesale. The shipped
+   * file names "normal"; without this, a saved "calm" would revert on the first
+   * spawn, which happens *after* the host restored its setting.
+   */
+  private static activityOverride: ActivityLevel | null = null;
+  /**
    * Host-level answer to "should the built-in preset apply?", set through
    * `configure({ ignoreBuiltin })`. `null` means "whatever the file says", which
    * `AnimationConfig` tracks on its own.
@@ -472,6 +479,19 @@ export class MascotEngine {
   private anchorStillTicks = 0;
   /** Set once the mascot has been in the same spot too long: the next pick must travel. */
   private wantMovement = false;
+  /** True when the current behavior finished by reaching TargetX/TargetY milestone. */
+  private targetArrival = false;
+  /** The Move frame that reached its target in this behavior, if any. Frame
+   *  identity is used instead of the node: the same action node is reused by every
+   *  execution, so a second walk that never reached its target must not count. */
+  private targetArrivalFrame: ActionFrame | null = null;
+  /** Last concrete action frame popped (containers excluded); a behavior that
+   *  ended right after its target move still has this equal to targetArrivalFrame. */
+  private lastPoppedFrame: ActionFrame | null = null;
+  /** Pending travel behavior waiting for adaptive Stand dwell to finish. */
+  private pendingTravelAfterDwell: { name: string; id?: number } | null = null;
+  /** Sliding history of recently executed behaviors (newest at end) for anti-repeat and category diversity. */
+  private recentBehaviors: string[] = [];
   /** Tick until which partner behaviours stay out of the pool (see the config's
    *  `interactionCooldownTicks`); refreshed while an interaction is running. */
   private interactionCooldownUntil = 0;
@@ -586,6 +606,16 @@ export class MascotEngine {
 
   public getScrollSquash(): boolean {
     return this.scrollSquashEnabled;
+  }
+
+  /** Set activity level for this mascot instance ("calm" | "normal" | "active"). */
+  public setActivityLevel(level: ActivityLevel): void {
+    MascotEngine.animationConfig.setMascotActivityLevel(this.mascotName, level);
+  }
+
+  /** Get effective activity level for this mascot instance. */
+  public getActivityLevel(): ActivityLevel {
+    return MascotEngine.animationConfig.getActivityLevel(this.mascotName);
   }
 
   public resetToSpawn(indexOverride?: number): void {
@@ -1130,7 +1160,7 @@ export class MascotEngine {
       MascotEngine.animationConfigUrl = options.animationConfigUrl;
     }
     if (options.preset !== undefined) {
-      MascotEngine.animationConfig.setPreset(options.preset);
+      MascotEngine.setPreset(options.preset);
     }
     if (options.ignoreBuiltin !== undefined) {
       MascotEngine.builtinPreference = options.ignoreBuiltin;
@@ -1169,12 +1199,27 @@ export class MascotEngine {
 
   /** Switch the active base animation preset (e.g. "classic", "lively", or custom). */
   public static setPreset(preset: string): void {
+    // An activity-level preset is a runtime choice and has to survive the config
+    // file load; any other preset means the host is done with that choice.
+    MascotEngine.activityOverride =
+      preset === "calm" || preset === "normal" || preset === "active" ? preset : null;
     MascotEngine.animationConfig.setPreset(preset);
   }
 
   /** Get the currently active base animation preset name. */
   public static getPreset(): string {
     return MascotEngine.animationConfig.getPreset();
+  }
+
+  /** Set the active global activity level ("calm" | "normal" | "active"). */
+  public static setActivityLevel(level: ActivityLevel): void {
+    MascotEngine.activityOverride = level;
+    MascotEngine.animationConfig.setActivityLevel(level);
+  }
+
+  /** Get the active global activity level ("calm" | "normal" | "active"). */
+  public static getActivityLevel(): ActivityLevel {
+    return MascotEngine.animationConfig.getActivityLevel();
   }
 
   /**
@@ -1247,6 +1292,12 @@ export class MascotEngine {
           const file: unknown = await response.json();
           if (!MascotEngine.animationConfigSetExplicitly) {
             MascotEngine.animationConfig = new AnimationConfig(file, target);
+          }
+          // The file's `preset` is a default, not a command: an explicit activity
+          // choice outranks it, otherwise the first spawn silently reverts a
+          // saved level (storage/configure runs before this fetch resolves).
+          if (MascotEngine.activityOverride) {
+            MascotEngine.animationConfig.setActivityLevel(MascotEngine.activityOverride);
           }
           MascotEngine.applyBuiltinPreference();
         } finally {
@@ -1672,6 +1723,7 @@ export class MascotEngine {
 
     for (const timer of this.pendingTimers) window.clearTimeout(timer);
     this.pendingTimers.clear();
+    this.pendingTravelAfterDwell = null;
     this.releaseStack();
     this.actionStack = [];
     this.interaction.finalize();
@@ -2835,6 +2887,10 @@ export class MascotEngine {
     const from = this.currentBehavior?.name ?? "";
     const previousTicks = this.behaviorTicks;
     this.behaviorTicks = 0;
+    // A new behavior owns a new arrival window; an unconsumed target from the
+    // previous behavior must never leak into this one.
+    this.targetArrivalFrame = null;
+    this.lastPoppedFrame = null;
     // The pacer measures how long *this* behaviour has been standing still. Without
     // this reset an exhausted counter would switch behaviours on every tick, which
     // both looked broken and stopped sequences (Stand -> scan) from ever advancing.
@@ -2842,6 +2898,12 @@ export class MascotEngine {
     if (!action) {
       this.interactionVisualActive = false;
       this.currentBehavior = selected;
+    if (reason !== "travel-dwell" && selected.name) {
+      this.recentBehaviors.push(selected.name);
+      if (this.recentBehaviors.length > 6) {
+        this.recentBehaviors.shift();
+      }
+    }
       this.onBehaviorEnd(reason);
       return true;
     }
@@ -2862,9 +2924,18 @@ export class MascotEngine {
       this.interaction.finalize();
     }
     // Frames that are being replaced stop advertising and let go of scan targets.
+    if (reason !== "travel-dwell" && reason !== "travel-dwell-end") {
+      this.pendingTravelAfterDwell = null;
+    }
     this.releaseStack();
     this.pendingScan = isInternalStringCall ? this.reserveInteraction(selected.name) ?? null : null;
     this.currentBehavior = selected;
+    if (reason !== "travel-dwell" && selected.name) {
+      this.recentBehaviors.push(selected.name);
+      if (this.recentBehaviors.length > 6) {
+        this.recentBehaviors.shift();
+      }
+    }
     this.interactionVisualActive =
       !!action &&
       this.actionTreeMatches(action, (node) => this.isInteract(node));
@@ -3613,6 +3684,16 @@ export class MascotEngine {
 
   private popActionStack() {
     const frame = this.actionStack.pop();
+    // Remember the last real action, not the Sequence/Select wrapper that is
+    // popped in a later tick when the behavior ends.
+    if (
+      frame &&
+      frame.node.type !== "Sequence" &&
+      frame.node.type !== "Select" &&
+      frame.node.type !== "ActionReference"
+    ) {
+      this.lastPoppedFrame = frame;
+    }
     this.releaseFrame(frame);
     if (!this.actionStack.length) {
       // libshijima manager::_tick(): the action tree ended, so any interaction ends
@@ -3659,7 +3740,39 @@ export class MascotEngine {
   /** Actions that end when they reach their target. */
   private isJumpLike(node: ActionNode | undefined) {
     if (!node) return false;
-    return !!node.className?.endsWith(".Jump") || node.name === "Jumping";
+    return (
+      !!node.className?.endsWith(".Jump") ||
+      node.name === "Jumping" ||
+      node.referenceName === "Jumping"
+    );
+  }
+
+  /**
+   * Identifies behaviors whose primary visual or physiological effect is
+   * prolonged resting, sitting, sprawling or standing still (including Walk-then-Sit).
+   */
+  private isRestingBehavior(name: string | undefined): boolean {
+    if (!name) return false;
+    if (
+      name === "SitDown" ||
+      name === "SitWhileDanglingLegs" ||
+      name === "LieDown" ||
+      name === "SitAndFaceMouse" ||
+      name === "SitDownBlush" ||
+      name === "SprawlBlush" ||
+      name === "AskForHugs"
+    ) {
+      return true;
+    }
+    if (
+      name.endsWith("AndSit") ||
+      name.includes("AlongFloorAndSit") ||
+      name.includes("AlongIEAndSit") ||
+      name.includes("SitOnThe")
+    ) {
+      return true;
+    }
+    return /^Sit[A-Z]/.test(name) || /^LieDown/.test(name);
   }
 
   /** An action with a usable TargetX/TargetY runs until it arrives there, so its
@@ -3691,7 +3804,9 @@ export class MascotEngine {
   private isOffsetAction(node: ActionNode | undefined) {
     return (
       !!node &&
-      (node.className?.endsWith(".Offset") === true || node.name === "Offset")
+      (node.className?.endsWith(".Offset") === true ||
+        node.name === "Offset" ||
+        node.referenceName === "Offset")
     );
   }
 
@@ -3755,11 +3870,10 @@ export class MascotEngine {
     visited.add(node);
     const own = node.attributes?.BorderType;
     if (typeof own === "string" && own.trim() !== "") return own.trim();
-    // An Offset moves the anchor before demanding anything, so a border needed after
-    // it does not have to be the one the mascot is on now. This is exactly how the
-    // packs leave a surface: FallFromWall / FallFromCeiling are `Offset` (1 px off)
-    // followed by `Stand`, whose Floor border then fails and drops the mascot.
-    if (this.isOffsetAction(node)) return FLEXIBLE_BORDER;
+    // An Offset or Jump moves the anchor before demanding anything, so a border needed after
+    // it does not have to be the one the mascot is on now. Offset steps off a surface (e.g.
+    // FallFromWall); Jump leaps towards a target surface (e.g. JumpFromLeftWall leaps from floor to wall).
+    if (this.isOffsetAction(node) || this.isJumpLike(node)) return FLEXIBLE_BORDER;
     if (node.type === "ActionReference" && node.referenceName) {
       const referenced = this.config?.actions[node.referenceName];
       if (referenced) {
@@ -3967,7 +4081,10 @@ export class MascotEngine {
     const action = this.config?.actions[behaviorName];
     const structure = {
       moves: action
-        ? this.actionTreeMatches(action, (node) => node.type === "Move")
+        ? this.actionTreeMatches(
+            action,
+            (node) => node.type === "Move" || this.isJumpLike(node),
+          )
         : false,
       scans: action
         ? this.actionTreeMatches(action, (node) => this.isScanMove(node))
@@ -4410,7 +4527,11 @@ export class MascotEngine {
           y: this.y,
           leaf: this.leafLabel(),
         });
+        this.targetArrival = true;
+        this.targetArrivalFrame =
+          this.actionStack[this.actionStack.length - 1] ?? null;
         this.popActionStack();
+        this.targetArrival = false;
         return;
       }
       if (
@@ -4427,7 +4548,11 @@ export class MascotEngine {
           y: this.y,
           leaf: this.leafLabel(),
         });
+        this.targetArrival = true;
+        this.targetArrivalFrame =
+          this.actionStack[this.actionStack.length - 1] ?? null;
         this.popActionStack();
+        this.targetArrival = false;
         return;
       }
       // A pack's explicit walk-to-wall sequence already advances to ClimbWall
@@ -4633,8 +4758,14 @@ export class MascotEngine {
 
   private onBehaviorEnd(reason = "behavior-end") {
     if (!this.config) return;
+    if (this.pendingTravelAfterDwell) {
+      const next = this.pendingTravelAfterDwell;
+      this.pendingTravelAfterDwell = null;
+      this.setBehavior(next.name, "travel-dwell-end", next.id);
+      return;
+    }
     const animation = MascotEngine.animationConfig;
-    const scheduled = reason === "behavior-end" ? this.behaviorSwitchReason() : null;
+    const scheduled = (reason === "behavior-end" || reason === "target-arrival") ? this.behaviorSwitchReason() : null;
     if (scheduled) {
       this.wantMovement = scheduled === "forced-switch";
       this.observeScheduledSwitch(scheduled);
@@ -4663,6 +4794,7 @@ export class MascotEngine {
       if (frequency <= 0) continue;
       candidates.push({ ...reference, frequency });
     }
+    const standingOn = this.currentBorderAt(undefined);
     if (!candidates.length || this.currentBehavior?.addNext !== false) {
       for (const behavior of this.config.behaviors) {
         // Hidden is not the same as unavailable: the packs mark the wall, ceiling
@@ -4674,10 +4806,21 @@ export class MascotEngine {
         if (override !== undefined ? override <= 0 : behavior.frequency <= 0)
           continue;
         if (!animation.allows(mascot, behavior.name)) continue;
-        if (
-          !this.evaluateCondition(behavior.condition) ||
-          !this.behaviorUsable(behavior)
-        )
+        let eligible = this.evaluateCondition(behavior.condition);
+        if (!eligible && standingOn === "Wall") {
+          // Wall-to-Wall Leap: Allow leaping across the screen to the opposite wall when clinging to a wall.
+          // Shimeji packs hard-code JumpFromLeftWall / JumpFromRightWall conditions to floor-corner bounds,
+          // blocking the opposite-wall jump from mid-climb.
+          const area = this.area();
+          const onLeft = this.borderIsOn("left", { x: this.x, y: this.y }, area);
+          const onRight = this.borderIsOn("right", { x: this.x, y: this.y }, area);
+          if (onLeft && behavior.name === "JumpFromRightWall") {
+            eligible = true;
+          } else if (onRight && behavior.name === "JumpFromLeftWall") {
+            eligible = true;
+          }
+        }
+        if (!eligible || !this.behaviorUsable(behavior))
           continue;
         const frequency = this.effectiveWeight(
           behavior.name,
@@ -4715,7 +4858,6 @@ export class MascotEngine {
     // behaviour that brings it down, `FallFromCeiling` (weight 50 against a ceiling
     // pool of ~250), became a ~1% draw. Behaviours with no border requirement, and
     // those that move the mascot first (`Offset`), stay available.
-    const standingOn = this.currentBorderAt(undefined);
     if (standingOn) {
       const runnable = pool.filter((candidate) => {
         const start = this.firstBorderOf(candidate.name);
@@ -4726,32 +4868,119 @@ export class MascotEngine {
       if (runnable.length > 0) pool = runnable;
     }
     const repeat = animation.optionsFor(mascot).repeatBehaviorWeight ?? 1;
-    // A real, reachable advertisement is a time-limited opportunity. Consume it
-    // only at a legal selection boundary, retaining XML weights within that subset.
+    // A real, reachable advertisement is a time-limited opportunity. Instead of
+    // completely discarding non-interaction behaviors (monopolizing the pool),
+    // boost interaction opportunities significantly so they maintain high priority
+    // while fairly co-existing with standard movements and actions in the selection pool.
     const opportunities = pool.filter((candidate) => this.hasReachableInteractionOpportunity(candidate.name));
-    if (opportunities.length) pool = opportunities;
+    if (opportunities.length > 0) {
+      const opportunityNames = new Set(opportunities.map((c) => c.name));
+      const boostFactor = 3.5;
+      pool = pool.map((candidate) =>
+        opportunityNames.has(candidate.name)
+          ? { ...candidate, frequency: Math.max(candidate.frequency * boostFactor, 1500) }
+          : candidate,
+      );
+    }
     if (repeat < 1 && (forcePool || this.currentBehavior?.addNext !== false) &&
         pool.some((candidate) => candidate.name !== this.currentBehavior?.name)) {
-      pool = pool.map((candidate) => candidate.name === this.currentBehavior?.name
-        ? { ...candidate, frequency: candidate.frequency * repeat } : candidate);
+      // Build reverse history: newest first
+      const history = this.recentBehaviors.slice().reverse();
+      const currentName = this.currentBehavior?.name;
+      if (currentName && (!history.length || history[0] !== currentName)) {
+        history.unshift(currentName);
+      }
+
+      // Check whether recently executed behaviors were idle/resting behaviors
+      const lastWasResting = this.isRestingBehavior(currentName) ||
+        (history.length > 0 && this.isRestingBehavior(history[0]));
+      const hasNonResting = pool.some((candidate) => !this.isRestingBehavior(candidate.name));
+
+      pool = pool.map((candidate) => {
+        let factor = 1.0;
+        const pos = history.indexOf(candidate.name);
+        if (pos === 0) {
+          // Immediately finished behavior: full repeat dampening
+          factor = repeat;
+        } else if (pos === 1) {
+          // Finished 1 behavior ago (e.g. A -> B -> A 2-cycle oscillation)
+          factor = Math.min(1.0, (1.0 + repeat) / 2);
+        } else if (pos === 2) {
+          // Finished 2 behaviors ago (3-cycle oscillation)
+          factor = Math.min(1.0, (3.0 + repeat) / 4);
+        }
+
+        // Family / Category dampening: If mascot just rested, dampen other resting behaviors
+        // so that movement/wall/climb behaviors have a fair opportunity to be chosen.
+        if (lastWasResting && hasNonResting && this.isRestingBehavior(candidate.name)) {
+          const categoryDecay = Math.max(0.2, repeat);
+          factor = Math.min(factor, categoryDecay);
+        }
+
+        return factor < 1.0 ? { ...candidate, frequency: candidate.frequency * factor } : candidate;
+      });
     }
     const total = pool.reduce(
       (sum, candidate) => sum + Math.max(0, candidate.frequency),
       0,
     );
-    if (total <= 0) {
-      this.setBehavior(pool[0].name, reason, pool[0].id, scheduled ?? undefined);
-      return;
-    }
-    let random = Math.random() * total;
-    for (const candidate of pool) {
-      random -= candidate.frequency;
-      if (random <= 0) {
-        this.setBehavior(candidate.name, reason, candidate.id, scheduled ?? undefined);
-        return;
+    let chosen = pool[0];
+    if (total > 0) {
+      let random = Math.random() * total;
+      for (const candidate of pool) {
+        random -= candidate.frequency;
+        if (random <= 0) {
+          chosen = candidate;
+          break;
+        }
       }
     }
-    this.setBehavior(pool[0].name, reason, pool[0].id, scheduled ?? undefined);
+
+    const lastLeafNode = this.lastPoppedFrame?.node;
+    const lastLeafIsMove =
+      lastLeafNode?.type === "Move" ||
+      (lastLeafNode !== undefined && this.isScanMove(lastLeafNode));
+    const wasTargetArrival = reason === "target-arrival" || this.targetArrival ||
+      // Real packs wrap their walk in a Sequence and end the behavior one tick
+      // later, when the Sequence frame is popped. The transient flag is already
+      // false by then; the frame identity says "the last real action was the move
+      // that reached its target", which is exactly the dwell boundary.
+      ((reason === "behavior-end" || reason === "target-arrival") &&
+        this.targetArrivalFrame !== null &&
+        this.lastPoppedFrame === this.targetArrivalFrame);
+    const endedFromMovement = !this.isDragging && (wasTargetArrival || Boolean(lastLeafIsMove));
+    this.targetArrivalFrame = null;
+    this.lastPoppedFrame = null;
+    // Any movement completion (target arrival, wall climb finish, or scan move)
+    // deserves an adaptive resting dwell on its current surface. Restricting
+    // this to simple target arrivals left ~90% of movement transitions unbuffered.
+    if (endedFromMovement) {
+      const dwellTicks = MascotEngine.animationConfig.sampleTravelDwellTicks(this.mascotName);
+      if (dwellTicks > 0) {
+        const border = this.currentBorderAt(undefined) ?? "Floor";
+        const stayAction = border === "Wall" ? "GrabWall" : border === "Ceiling" ? "GrabCeiling" : "Stand";
+        if (this.config.actions[stayAction]) {
+          this.pendingTravelAfterDwell = { name: chosen.name, id: chosen.id };
+          this.setBehavior(stayAction, "travel-dwell");
+          const dwellFrame = this.actionStack[this.actionStack.length - 1];
+          if (dwellFrame) {
+            dwellFrame.durationLimit = dwellTicks;
+            dwellFrame.poseDurations = [dwellTicks];
+          }
+          this.emit({
+            kind: "milestone",
+            name: "travel-dwell",
+            detail: `action=${stayAction} ticks=${dwellTicks} next=${chosen.name}`,
+            x: this.x,
+            y: this.y,
+            leaf: this.leafLabel(),
+          });
+          return;
+        }
+      }
+    }
+
+    this.setBehavior(chosen.name, reason, chosen.id, scheduled ?? undefined);
   }
 
   private render(interpolate = true) {

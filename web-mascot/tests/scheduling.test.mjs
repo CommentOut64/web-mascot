@@ -463,3 +463,26 @@ test("A fall that started as a scroll detach still gets the interaction grace wh
     "a scroll-started fall must still defer interactions on landing",
   );
 });
+
+test("Live interaction opportunities boost priority but do not monopolize candidate pool", () => {
+  const f = realFixture();
+  f.Engine.setAnimationConfig({ preset: "lively" });
+  const server = f.make("Eviling");
+  const client = f.make("Neuron");
+  server.x = 650;
+  server.forceBehavior("AskForHugs");
+  server.advanceActionTree();
+  assert.ok(client.hasReachableInteractionOpportunity("HugEvil"));
+
+  const chosen = new Set();
+  for (let i = 0; i < 40; i++) {
+    client.forceBehavior("StandUp");
+    client.advanceActionTree();
+    client.onBehaviorEnd("behavior-end");
+    chosen.add(client.currentBehaviorName);
+  }
+
+  assert.ok(chosen.has("HugEvil"), "hug opportunity must be chosen");
+  assert.ok([...chosen].some((name) => name !== "HugEvil"), "pool must not be exclusively HugEvil");
+});
+

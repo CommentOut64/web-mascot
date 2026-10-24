@@ -111,6 +111,7 @@ export function fixture(options = {}) {
       addEventListener() {},
     },
     AbortController,
+    fetch: options.fetch,
     requestAnimationFrame: () => 1,
     cancelAnimationFrame() {},
   });

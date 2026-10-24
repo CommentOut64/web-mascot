@@ -22,8 +22,9 @@
  *
  * The engine ships a built-in preset (see `animationPreset.ts`) — the layer every
  * host starts from. Each field above overrides it, and `ignoreBuiltin` removes it.
- * The same data is emitted as `dist/animation.config.json`, so the template a host
- * copies and the behaviour it gets by default cannot drift apart.
+ * `dist/animation.config.json` names the preset and leaves `defaults` empty on
+ * purpose: a full copy of one preset there would override every other preset.
+ * `STANDARD_CONFIG_SAMPLE` is the annotated template showing every field.
  *
  * Everything is optional and validated: a malformed value is ignored rather than
  * breaking the mascot, and unknown names are kept (they simply never match) so a
@@ -70,7 +71,25 @@ export interface PartnerWeights {
   reachable?: number;
 }
 
+/** Three-tier activity level for web mascot behaviour:
+ *  - "calm": Qt desktop parity, long idle holds, natural composure
+ *  - "normal": web-tuned balanced timing (default)
+ *  - "active": high mobility, compressed pauses
+ */
+export type ActivityLevel = "calm" | "normal" | "active";
+
 export interface MascotAnimationOptions {
+  /**
+   * [activityLevel] Three-tier activity level ("calm" | "normal" | "active").
+   */
+  activityLevel?: ActivityLevel;
+
+  /**
+   * [travelDwellTicks] Standing dwell ticks after arriving at target-x/y before starting the next action.
+   * Single number or `[min, max]` range.
+   */
+  travelDwellTicks?: DurationSetting;
+
   /**
    * [allowBehaviors] Whitelist: only these behaviours may appear. Empty/absent means "all allowed".
    * Names correspond to <Behavior Name="..."> in behaviors.xml.
@@ -192,10 +211,14 @@ export interface IdleHoldSetting {
 export interface AnimationConfigFile {
   version?: number;
   /**
-   * Base preset to inherit from: "lively" (default web-tuned) or "classic" (Qt desktop parity).
+   * Base preset to inherit from: "normal" (default web-tuned), "calm" (Qt desktop parity), or "active" (high mobility).
    * Overridden by fields in `defaults` and `mascots`.
    */
   preset?: string;
+  /**
+   * Global activity level override ("calm" | "normal" | "active").
+   */
+  activityLevel?: ActivityLevel;
   /**
    * @deprecated Use `preset: "classic"` instead.
    * Set true to drop the lively preset and run in pure Qt / pack parity mode.
@@ -277,21 +300,21 @@ function weights(value: unknown): Record<string, number> | undefined {
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
-function durations(value: unknown): Record<string, DurationSetting> | undefined {
+function durations(value: unknown, min = 1): Record<string, DurationSetting> | undefined {
   if (!isRecord(value)) return undefined;
   const result: Record<string, DurationSetting> = {};
   for (const [key, raw] of Object.entries(value)) {
     const name = key.trim();
     if (!name) continue;
     if (Array.isArray(raw)) {
-      let low = tickCount(raw[0], 1);
-      let high = tickCount(raw[1], 1);
+      let low = tickCount(raw[0], min);
+      let high = tickCount(raw[1], min);
       if (low === undefined) continue;
       if (high === undefined) high = low;
       if (high < low) [low, high] = [high, low];
       result[name] = low === high ? low : [low, high];
     } else {
-      const fixed = tickCount(raw, 1);
+      const fixed = tickCount(raw, min);
       if (fixed === undefined) continue;
       result[name] = fixed;
     }
@@ -382,6 +405,13 @@ function normalizeOptions(value: unknown): MascotAnimationOptions {
   if (cooldown !== undefined) options.interactionCooldownTicks = Math.min(MAX_COOLDOWN_TICKS, cooldown);
   const maxBehavior = tickCount(value.maxBehaviorTicks, 0);
   if (maxBehavior !== undefined) options.maxBehaviorTicks = maxBehavior;
+  if (value.travelDwellTicks !== undefined) {
+    const dwellMap = durations({ dwell: value.travelDwellTicks }, 0);
+    if (dwellMap?.dwell !== undefined) options.travelDwellTicks = dwellMap.dwell;
+  }
+  if (value.activityLevel === "calm" || value.activityLevel === "normal" || value.activityLevel === "active") {
+    options.activityLevel = value.activityLevel;
+  }
   const travel = pixelCount(value.maxTravelPx, 0);
   if (travel !== undefined) options.maxTravelPx = travel;
   const partner = partnerWeights(value.partnerWeights);
@@ -397,11 +427,20 @@ function normalizeOptions(value: unknown): MascotAnimationOptions {
 
 function mergeOptions(base: MascotAnimationOptions, override: MascotAnimationOptions): MascotAnimationOptions {
   return {
+    activityLevel: override.activityLevel ?? base.activityLevel,
+    travelDwellTicks: override.travelDwellTicks ?? base.travelDwellTicks,
     allowBehaviors: override.allowBehaviors ?? base.allowBehaviors,
     denyBehaviors: override.denyBehaviors ?? base.denyBehaviors,
     behaviorWeights: { ...base.behaviorWeights, ...override.behaviorWeights },
     actionDurations: { ...base.actionDurations, ...override.actionDurations },
-    actionHoldLimits: { ...base.actionHoldLimits, ...override.actionHoldLimits },
+    // An explicitly empty map means "no hold cap". Calm has no
+    // actionHoldLimits of its own; without this sentinel the previous preset's
+    // limits would shine through even after switching back to calm.
+    actionHoldLimits:
+      override.actionHoldLimits !== undefined &&
+      Object.keys(override.actionHoldLimits).length === 0
+        ? {}
+        : { ...base.actionHoldLimits, ...override.actionHoldLimits },
     repeatBehaviorWeight: override.repeatBehaviorWeight ?? base.repeatBehaviorWeight,
     durationScale: override.durationScale ?? base.durationScale,
     scale: override.scale ?? base.scale,
@@ -420,6 +459,8 @@ function mergeOptions(base: MascotAnimationOptions, override: MascotAnimationOpt
 
 function hasContent(options: MascotAnimationOptions): boolean {
   return (
+    options.activityLevel !== undefined ||
+    options.travelDwellTicks !== undefined ||
     options.allowBehaviors !== undefined ||
     options.denyBehaviors !== undefined ||
     (options.behaviorWeights !== undefined && Object.keys(options.behaviorWeights).length > 0) ||
@@ -442,7 +483,7 @@ function hasContent(options: MascotAnimationOptions): boolean {
 }
 
 export class AnimationConfig {
-  private presetName: string = "lively";
+  private presetName: string = "normal";
   private defaults: MascotAnimationOptions = {};
   private perMascot = new Map<string, MascotAnimationOptions>();
   private reduced: MascotAnimationOptions = {};
@@ -471,6 +512,8 @@ export class AnimationConfig {
 
     if (typeof file.preset === "string" && file.preset.trim()) {
       this.presetName = file.preset.trim();
+    } else if (file.activityLevel === "calm" || file.activityLevel === "normal" || file.activityLevel === "active") {
+      this.presetName = file.activityLevel;
     }
     // Backward compatibility: ignoreBuiltin = true maps to "classic" preset
     if (file.ignoreBuiltin === true) {
@@ -504,6 +547,69 @@ export class AnimationConfig {
     this.presetName = name.trim();
     this.respectBuiltin = this.presetName !== "classic";
     this.resolved.clear();
+  }
+
+  /** Set global activity level ("calm" | "normal" | "active"). */
+  public setActivityLevel(level: ActivityLevel): void {
+    if (level !== "calm" && level !== "normal" && level !== "active") {
+      throw new Error(`[AnimationConfig] Invalid activityLevel "${level}", must be "calm", "normal", or "active"`);
+    }
+    this.setPreset(level);
+    PresetRegistry.setDefaultPresetName(level);
+  }
+
+  /** Get current activity level ("calm" | "normal" | "active"). */
+  public getActivityLevel(mascot?: string): ActivityLevel {
+    if (mascot) {
+      const opt = this.optionsFor(mascot);
+      if (opt.activityLevel) return opt.activityLevel;
+    }
+    const preset = this.getPreset();
+    if (preset === "calm" || preset === "classic") return "calm";
+    if (preset === "active" || preset === "lively") return "active";
+    return "normal";
+  }
+
+  /** Set per-mascot activity level override. */
+  public setMascotActivityLevel(mascot: string, level: ActivityLevel): void {
+    if (level !== "calm" && level !== "normal" && level !== "active") {
+      throw new Error(`[AnimationConfig] Invalid activityLevel "${level}", must be "calm", "normal", or "active"`);
+    }
+    const presetOptions = PresetRegistry.get(level);
+    if (!presetOptions) return;
+    const next: MascotAnimationOptions = { ...(this.perMascot.get(mascot) ?? {}) };
+
+    // Replace every activity-owned field. A plain merge would keep the previous
+    // level's values for anything the target preset does not define — calm has no
+    // actionHoldLimits, so "active -> calm" used to stay capped at 80-150 ticks.
+    if (presetOptions.travelDwellTicks !== undefined) {
+      next.travelDwellTicks = Array.isArray(presetOptions.travelDwellTicks)
+        ? [presetOptions.travelDwellTicks[0], presetOptions.travelDwellTicks[1]]
+        : presetOptions.travelDwellTicks;
+    }
+    if (presetOptions.forcedSwitchTicks !== undefined) next.forcedSwitchTicks = presetOptions.forcedSwitchTicks;
+    if (presetOptions.maxBehaviorTicks !== undefined) next.maxBehaviorTicks = presetOptions.maxBehaviorTicks;
+    if (presetOptions.repeatBehaviorWeight !== undefined) next.repeatBehaviorWeight = presetOptions.repeatBehaviorWeight;
+    if (presetOptions.interactionCooldownTicks !== undefined) next.interactionCooldownTicks = presetOptions.interactionCooldownTicks;
+    if (presetOptions.pacerExemptBehaviors !== undefined) next.pacerExemptBehaviors = [...presetOptions.pacerExemptBehaviors];
+    if (presetOptions.exitToPoolBehaviors !== undefined) next.exitToPoolBehaviors = [...presetOptions.exitToPoolBehaviors];
+    if (presetOptions.behaviorWeights !== undefined) next.behaviorWeights = { ...presetOptions.behaviorWeights };
+
+    // Empty object = explicitly no hold cap. This is what lets calm restore the
+    // pack's native idle durations instead of inheriting normal/active limits.
+    const holds: Record<string, IdleHoldSetting> = {};
+    for (const [name, setting] of Object.entries(presetOptions.actionHoldLimits ?? {})) {
+      holds[name] = {
+        ticks: Array.isArray(setting.ticks)
+          ? [setting.ticks[0], setting.ticks[1]]
+          : setting.ticks,
+        waitPoses: [...setting.waitPoses],
+      };
+    }
+    next.actionHoldLimits = holds;
+    next.activityLevel = level;
+    this.perMascot.set(mascot, next);
+    this.resolved.delete(mascot);
   }
 
   /** Called by the engine when the OS preference changes. */
@@ -545,7 +651,7 @@ export class AnimationConfig {
   public optionsFor(mascot: string): MascotAnimationOptions {
     const cached = this.resolved.get(mascot);
     if (cached) return cloneOptions(cached);
-    const basePreset = PresetRegistry.get(this.presetName) ?? PresetRegistry.get("lively") ?? {};
+    const basePreset = PresetRegistry.get(this.presetName) ?? PresetRegistry.get("normal") ?? PresetRegistry.get("lively") ?? {};
     let base = normalizeOptions(basePreset);
     let merged = mergeOptions(base, this.defaults);
     merged = mergeOptions(merged, this.reducedActive ? this.reduced : {});
@@ -653,6 +759,16 @@ export class AnimationConfig {
     return this.sampleDuration(action ? this.optionsFor(mascot).actionHoldLimits?.[action]?.ticks : undefined);
   }
 
+  public travelDwellTicks(mascot: string): DurationSetting | undefined {
+    return this.optionsFor(mascot).travelDwellTicks;
+  }
+
+  public sampleTravelDwellTicks(mascot: string): number {
+    const setting = this.optionsFor(mascot).travelDwellTicks;
+    if (setting === undefined) return 0;
+    return this.sampleDuration(setting) ?? 0;
+  }
+
   private sampleDuration(setting: DurationSetting | undefined): number | null {
     if (setting === undefined) return null;
     if (typeof setting === "number") return setting;
@@ -679,6 +795,9 @@ export class AnimationConfig {
       reducedMotion: cloneOptions(this.reduced),
       respectReducedMotion: this.respectReduced,
     };
+    if (this.defaults.activityLevel || this.presetName === "calm" || this.presetName === "normal" || this.presetName === "active") {
+      result.activityLevel = this.getActivityLevel();
+    }
     if (!this.respectBuiltin || this.presetName === "classic") {
       result.ignoreBuiltin = true;
     }

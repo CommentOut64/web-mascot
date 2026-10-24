@@ -1,6 +1,7 @@
 import { MascotEngine } from "./MascotEngine.js";
 import type { ForceBehaviorOptions, RelaySnapshot } from "./types.js";
 import type { ViewportHost } from "./ViewportHost.js";
+import type { ActivityLevel } from "./AnimationConfig.js";
 
 export interface MascotGroupSpawnOptions {
   packs: string[];
@@ -212,6 +213,32 @@ export class MascotGroup {
     for (const engine of this.activeEngines) {
       engine.setScrollSquash(enabled);
     }
+  }
+
+  /**
+   * Set activity level ("calm" | "normal" | "active") across all mascots or a specific pack.
+   */
+  public setActivityLevel(level: ActivityLevel, pack?: string): void {
+    if (pack) {
+      const engine = this.findEngine(pack);
+      engine?.setActivityLevel(level);
+    } else {
+      MascotEngine.setActivityLevel(level);
+      for (const engine of this.activeEngines) {
+        engine.setActivityLevel(level);
+      }
+    }
+  }
+
+  /**
+   * Get effective activity level for all mascots or a specific pack.
+   */
+  public getActivityLevel(pack?: string): ActivityLevel {
+    if (pack) {
+      const engine = this.findEngine(pack);
+      return engine ? engine.getActivityLevel() : MascotEngine.getActivityLevel();
+    }
+    return MascotEngine.getActivityLevel();
   }
 
   /**

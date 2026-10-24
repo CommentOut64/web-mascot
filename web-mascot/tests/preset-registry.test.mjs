@@ -13,11 +13,14 @@ import {
   configure,
 } from "../dist/index.js";
 
-test("PresetRegistry: contains standard lively and classic presets by default", () => {
+test("PresetRegistry: contains standard presets by default", () => {
   const presets = PresetRegistry.list();
+  assert.ok(presets.includes("normal"), "should include normal preset");
+  assert.ok(presets.includes("calm"), "should include calm preset");
+  assert.ok(presets.includes("active"), "should include active preset");
   assert.ok(presets.includes("lively"), "should include lively preset");
   assert.ok(presets.includes("classic"), "should include classic preset");
-  assert.equal(PresetRegistry.getDefaultPresetName(), "lively");
+  assert.equal(PresetRegistry.getDefaultPresetName(), "normal");
 });
 
 test("PresetRegistry: provides accurate definitions for lively vs classic", () => {
@@ -104,9 +107,9 @@ test("AnimationConfig: overrides base preset with defaults and per-mascot option
 
 test("STANDARD_CONFIG_SAMPLE: provides complete, structured sample", () => {
   assert.equal(STANDARD_CONFIG_SAMPLE.version, 1);
-  assert.equal(STANDARD_CONFIG_SAMPLE.preset, "lively");
+  assert.equal(STANDARD_CONFIG_SAMPLE.preset, "normal");
   assert.ok(STANDARD_CONFIG_SAMPLE.defaults);
-  assert.equal(STANDARD_CONFIG_SAMPLE.defaults.forcedSwitchTicks, 300);
+  assert.equal(STANDARD_CONFIG_SAMPLE.defaults.forcedSwitchTicks, 750);
   assert.equal(STANDARD_CONFIG_SAMPLE.defaults.scale, 1.0);
 });
 

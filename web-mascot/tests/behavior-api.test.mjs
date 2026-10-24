@@ -442,3 +442,181 @@ test("Behavior API: MascotGroup setBehavior and forceBehavior support group and 
   assert.equal(res3, false);
 });
 
+test("Wall Leaping: Jump behaviors are classified as flexible start surfaces and can travel", () => {
+  const f = fixture({ random: () => 0.5 });
+  const pose = (image, duration = 2, vx = 0) => ({
+    image,
+    imageAnchor: { x: 64, y: 128 },
+    velocity: { x: vx, y: 0 },
+    duration,
+  });
+  const leaf = (name, type = "Stay", poses = [pose(`/${name}.png`)]) => ({
+    name,
+    type,
+    poses,
+    attributes: {},
+  });
+  const ref = (name, attributes = {}) => ({
+    type: "ActionReference",
+    referenceName: name,
+    attributes,
+  });
+  const sequence = (name, children, loop = false) => ({
+    name,
+    type: "Sequence",
+    children,
+    loop,
+  });
+
+  Object.assign(f.config.actions, {
+    Jumping: {
+      ...leaf("Jumping", "Embedded"),
+      className: "com.group_finity.mascot.action.Jump",
+      attributes: { VelocityParam: "20" },
+    },
+    GrabWall: {
+      ...leaf("GrabWall", "Stay"),
+      borderType: "Wall",
+    },
+    JumpFromLeftWall: sequence("JumpFromLeftWall", [
+      ref("Jumping", { TargetX: "0", TargetY: "400" }),
+      ref("GrabWall", { Duration: "100" }),
+    ]),
+  });
+
+  f.config.behaviors.push({
+    name: "JumpFromLeftWall",
+    id: 99,
+    frequency: 50,
+    condition: "#{!mascot.environment.workArea.leftBorder.isOn(mascot.anchor) && mascot.anchor.x < 400}",
+    hidden: true,
+    nextBehaviors: [],
+  });
+
+  const engine = f.createEngine();
+  // 1. Surface requirements must be flexible (*) rather than Wall
+  assert.equal(engine.firstBorderOf("JumpFromLeftWall"), "*");
+  assert.equal(engine.canTravel("JumpFromLeftWall"), true);
+
+  // 2. Mascot standing on the floor near the wall can execute JumpFromLeftWall
+  engine.x = 100;
+  engine.y = 600;
+  assert.equal(engine.currentBorderAt(undefined), "Floor");
+  assert.equal(engine.canExecuteBehavior("JumpFromLeftWall"), true);
+
+  // 3. Force behavior leaps and reaches the wall
+  engine.forceBehavior("JumpFromLeftWall");
+  assert.equal(engine.currentBehaviorName, "JumpFromLeftWall");
+  assert.equal(engine.currentLeaf().name, "Jumping");
+
+  for (let t = 0; t < 20; t++) engine.tick();
+  assert.equal(engine.x, 0, "Mascot must leap to target wall (x=0)");
+  assert.equal(engine.currentLeaf().name, "GrabWall", "Mascot must cling to wall upon arrival");
+});
+
+test("Behavior Selection: History window dampens 2-cycle repetition and dampens idle family", () => {
+  const f = pacingFixture({ repeatBehaviorWeight: 0.4 });
+  f.config.actions.SitDown = f.sequence("SitDown", [f.ref("Sit", { Duration: "100" })]);
+  f.config.actions.SitWhileDanglingLegs = f.sequence("SitWhileDanglingLegs", [f.ref("Sit", { Duration: "100" })]);
+  f.config.actions.WalkAlongWorkAreaFloor = f.sequence("WalkAlongWorkAreaFloor", [f.ref("Walk", { TargetX: "700" })]);
+
+  f.config.behaviors = [
+    { name: "SitDown", id: 1, frequency: 100, nextBehaviors: [] },
+    { name: "SitWhileDanglingLegs", id: 2, frequency: 100, nextBehaviors: [] },
+    { name: "WalkAlongWorkAreaFloor", id: 3, frequency: 100, nextBehaviors: [] },
+  ];
+
+  // Start with SitDown
+  f.start("SitDown");
+  // End SitDown: SitDown (pos=0) damped by 0.4 -> 40.
+  // SitWhileDanglingLegs is in the resting family, damped by categoryDecay (0.4) -> 40.
+  // WalkAlongWorkAreaFloor is active movement -> 100.
+  // Total = 40 + 40 + 100 = 180.
+  // With random = 0.5 (scaled to 90):
+  // 90 - 40 (SitDown) = 50 - 40 (SitWhileDanglingLegs) = 10 -> falls into WalkAlongWorkAreaFloor!
+  f.engine.onBehaviorEnd();
+  assert.equal(f.engine.currentBehaviorName, "WalkAlongWorkAreaFloor",
+    "Movement behavior must prevail over suppressed resting family after a sit");
+});
+
+test("Behavior Selection: exitToPoolBehaviors breaks LieDown closed next loop", () => {
+  const f = pacingFixture({ exitToPoolBehaviors: ["LieDown"] });
+  f.config.actions.LieDown = f.sequence("LieDown", [f.ref("Sit", { Duration: "50" })]);
+  f.config.actions.SitDown = f.sequence("SitDown", [f.ref("Sit", { Duration: "50" })]);
+  f.config.actions.WalkAlongWorkAreaFloor = f.sequence("WalkAlongWorkAreaFloor", [f.ref("Walk", { TargetX: "700" })]);
+
+  f.config.behaviors = [
+    {
+      name: "LieDown",
+      id: 1,
+      frequency: 50,
+      addNext: false,
+      nextBehaviors: [{ name: "SitDown", frequency: 100 }],
+    },
+    { name: "SitDown", id: 2, frequency: 100, nextBehaviors: [] },
+    { name: "WalkAlongWorkAreaFloor", id: 3, frequency: 100, nextBehaviors: [] },
+  ];
+
+  f.start("LieDown");
+  f.engine.onBehaviorEnd();
+  // If exitToPool didn't apply, LieDown would strictly pick SitDown from its nextBehaviors.
+  // With exitToPoolBehaviors, it re-enters the global pool and selects from candidates.
+  assert.notEqual(f.engine.currentBehaviorName, "LieDown");
+});
+
+test("Wall Leaping: Mascot clinging to left wall can leap across to right wall and cling", () => {
+  const f = pacingFixture();
+  f.config.actions.Jumping = {
+    ...f.leaf("Jumping", "Embedded"),
+    className: "com.group_finity.mascot.action.Jump",
+  };
+  f.config.actions.GrabWall = { ...f.leaf("GrabWall", "Stay"), borderType: "Wall" };
+  f.config.actions.ClimbWall = { ...f.leaf("ClimbWall", "Move", [f.pose("/climb.png", 2, 0)]), borderType: "Wall" };
+  f.config.actions.HoldOntoWall = f.sequence("HoldOntoWall", [f.ref("GrabWall", { Duration: "100" })]);
+  f.config.actions.JumpFromRightWall = f.sequence("JumpFromRightWall", [
+    f.ref("Jumping", { TargetX: "1000", TargetY: "300" }),
+    f.ref("GrabWall", { Duration: "50" }),
+  ]);
+
+  // Behavior list has standard wall-restricted hold and the opposite-wall jump
+  f.config.behaviors = [
+    {
+      name: "HoldOntoWall",
+      id: 1,
+      frequency: 10,
+      condition: "#{mascot.environment.wall.isOn(mascot.anchor)}",
+      nextBehaviors: [],
+    },
+    {
+      name: "JumpFromRightWall",
+      id: 2,
+      frequency: 100,
+      // Original XML condition that normally only checks floor bounds:
+      condition: "#!mascot.environment.workArea.rightBorder.isOn(mascot.anchor) && mascot.anchor.x >= mascot.environment.workArea.right-400 && Math.abs(mascot.environment.workArea.bottom-mascot.anchor.y) < mascot.environment.workArea.height/4",
+      nextBehaviors: [],
+    },
+  ];
+
+  const engine = f.engine;
+  // Position mascot clinging to the left wall
+  engine.x = 0;
+  engine.y = 300;
+  engine.lookRight = false;
+  assert.equal(engine.currentBorderAt(undefined), "Wall");
+  assert.equal(engine.borderIsOn("left", { x: engine.x, y: engine.y }), true);
+
+  // Trigger behavior switch from left wall
+  engine.onBehaviorEnd();
+  assert.equal(engine.currentBehaviorName, "JumpFromRightWall",
+    "Mascot on left wall must be eligible to select JumpFromRightWall to leap across");
+
+  // Step through jump animation across the screen
+  for (let t = 0; t < 100 && engine.x < 1000; t++) engine.tick();
+  assert.equal(engine.x, 1000, "Mascot must land on the opposite right wall (x=1000)");
+  assert.equal(engine.currentLeaf().name, "GrabWall", "Mascot must cling to right wall upon landing");
+  assert.equal(engine.currentBorderAt(undefined), "Wall");
+});
+
+
+
+

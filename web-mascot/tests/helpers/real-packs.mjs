@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { fixture, parseConfig } from "./engine-fixture.mjs";
 
-export function realFixture(random = () => 0.5) {
-  const f = fixture({ random });
+export function realFixture(random = () => 0.5, options = {}) {
+  const f = fixture({ random, ...options });
   const configs = new Map(["Neuron", "Eviling"].map((name) => [name, parseConfig(
     readFileSync(`public/mascot_pack/${name}/actions.xml`, "utf8"),
     readFileSync(`public/mascot_pack/${name}/behaviors.xml`, "utf8"), name)]));

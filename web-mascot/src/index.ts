@@ -69,7 +69,11 @@ export interface MascotConfig {
    *  and the built-in preset stays in effect. */
   animationConfigUrl?: string;
   /**
-   * Base animation preset to inherit from: "lively" (default, web-tuned) or "classic" (Qt desktop parity).
+   * Three-tier activity level: "calm" (Qt parity), "normal" (default, web-tuned), or "active" (high mobility).
+   */
+  activityLevel?: import("./core/AnimationConfig.js").ActivityLevel;
+  /**
+   * Base animation preset to inherit from: "normal" (default, web-tuned), "calm" (Qt desktop parity), or "active" (high mobility).
    */
   preset?: string;
   /**
@@ -114,19 +118,22 @@ let hasConfigured = false;
  */
 export function configure(options: MascotConfig): void {
   hasConfigured = true;
-  if (options.preset) {
+  if (options.activityLevel) {
+    setActivityLevel(options.activityLevel);
+  } else if (options.preset) {
     usePreset(options.preset);
   }
   if (
     options.assets ||
     options.animationConfigUrl ||
     options.ignoreBuiltin !== undefined ||
-    options.preset
+    options.preset ||
+    options.activityLevel
   ) {
     MascotEngine.configure({
       packBaseUrl: options.assets,
       animationConfigUrl: options.animationConfigUrl,
-      preset: options.preset,
+      preset: options.activityLevel ?? options.preset,
       ignoreBuiltin: options.ignoreBuiltin,
     });
   }
@@ -178,6 +185,14 @@ export class Mascot {
 
   public getScrollSquash(): boolean {
     return this.engine.getScrollSquash();
+  }
+
+  public setActivityLevel(level: import("./core/AnimationConfig.js").ActivityLevel): void {
+    this.engine.setActivityLevel(level);
+  }
+
+  public getActivityLevel(): import("./core/AnimationConfig.js").ActivityLevel {
+    return this.engine.getActivityLevel();
   }
 
   /** Name of the behavior currently running, or null if none. */
@@ -335,10 +350,14 @@ export { AnimationConfig } from "./core/AnimationConfig.js";
 export type { MascotAnimationOptions, AnimationConfigFile, IdleHoldSetting } from "./core/AnimationConfig.js";
 export {
   PresetRegistry,
+  CALM_ANIMATION_PRESET,
+  NORMAL_ANIMATION_PRESET,
+  ACTIVE_ANIMATION_PRESET,
   CLASSIC_ANIMATION_PRESET,
   LIVELY_ANIMATION_PRESET,
   STANDARD_CONFIG_SAMPLE,
 } from "./core/animationPreset.js";
+export type { ActivityLevel } from "./core/AnimationConfig.js";
 
 /**
  * Get an independent, mutable clone of a registered animation preset.
@@ -356,11 +375,29 @@ export function registerPreset(name: string, config: import("./core/AnimationCon
 }
 
 /**
- * Switch the active base animation preset (e.g. "classic", "lively", or a custom one).
+ * Switch the active base animation preset (e.g. "normal", "calm", "active", "classic", "lively").
  */
 export function usePreset(name: string): void {
   PresetRegistry.setDefaultPresetName(name);
   MascotEngine.setPreset(name);
+}
+
+/**
+ * Switch the global activity level:
+ * - "calm": Qt desktop parity, long idle holds, natural composure
+ * - "normal": web-tuned balanced timing (default)
+ * - "active": high mobility, compressed pauses
+ */
+export function setActivityLevel(level: import("./core/AnimationConfig.js").ActivityLevel): void {
+  PresetRegistry.setDefaultPresetName(level);
+  MascotEngine.setActivityLevel(level);
+}
+
+/**
+ * Get current global activity level ("calm" | "normal" | "active").
+ */
+export function getActivityLevel(): import("./core/AnimationConfig.js").ActivityLevel {
+  return MascotEngine.getActivityLevel();
 }
 
 export { BroadcastManager } from "./core/Broadcast.js";
