@@ -1,15 +1,17 @@
 # 动画自定义配置与预设体系（Animation Configuration & Presets）
 
-`web-mascot` 采用**平等的预设表 + 注册中心机制（`PresetRegistry`）**管理宠物的行为与动画。系统内置两套标准预设，并允许宿主自由克隆、修改、注册与切换：
+`web-mascot` 采用**平等的预设表 + 注册中心机制（`PresetRegistry`）**管理宠物的行为与动画。系统内置三档标准活跃度预设与经典预设，并允许宿主自由克隆、修改、注册与切换：
 
-1. **`"lively"`（活跃预设，默认启用）**：专为**网页环境**调优。温和缩短已知保持段，静止 12 秒后请求在完整行为／循环结束处换位；保留完整表演，轻度降低连续重复抽选。
-2. **`"classic"`（原版 Qt 预设）**：沿用原版 Shimeji / NeurolingsCE-Qt 的素材时长与合法候选权重。不设节奏催促（`forcedSwitchTicks: 0`），允许宠物依据原生 XML 静坐或躺卧 20~60 秒，完全遵循素材包原生权重。
-3. **自定义预设（Custom Presets）**：宿主可通过 `getPreset("lively")` 拿已有配置微调，然后 `registerPreset("my-style", cfg)` 注册并切换。
+1. **`"normal"`（正常预设，默认启用）**：专为**网页环境**平衡微调。静止 30 秒（750 ticks）后温和换位，适度站立与静止发呆；位移动作到达目标点（target-x）后提供 1.0~1.6s 的自适应站立驻留缓冲，兼顾自然灵动与从容。
+2. **`"calm"`（偏安静预设）**：还原 Qt / Shimeji-ee 桌面原版从容节奏。关闭换位催促（`forcedSwitchTicks: 0`），允许宠物依据原生 XML 静坐或躺卧发呆 20~60 秒，位移到达后保持 1.6~2.4s 站立驻留。
+3. **`"active"`（偏活跃预设）**：高频游走，停顿极短（位移驻留 0~0.4s），10 秒静止即快速换位，动作节奏充满活力。
+4. **`"classic"`（纯净 Qt 预设）**与 **`"lively"`（早期兼容预设）**：完整向下兼容保留。
+5. **自定义预设（Custom Presets）**：宿主可通过 `getPreset("normal")` 拿已有配置微调，然后 `registerPreset("my-style", cfg)` 注册并切换。
 
 生效的配置按标准的优先级叠加，后写的覆盖先写的（**逐字段**，对象型字段按 key 合并）：
 
 ```
-基础预设 (PresetRegistry: lively / classic / 自定义)
+基础预设 (PresetRegistry: normal / calm / active / classic / lively / 自定义)
    └── 文件 / 运行时配置中的 defaults
           └── 系统偏好 reducedMotion (当操作系统开启减少动效时)
                  └── mascots.<宠物名> (单宠个性化覆写)
@@ -21,12 +23,14 @@
 
 ## 一、 快速切换与用法
 
-| 想要的效果 | 推荐写法 | 兼容写法（旧版） |
+| 想要的效果 | 推荐写法 | 说明 |
 |---|---|---|
-| **默认活跃档（Web 优化）** | 什么都不用配置 | `{}` |
-| **纯正 Qt / 原版桌宠档** | `configure({ preset: "classic" })` 或配置 JSON 中写 `"preset": "classic"` | `configure({ ignoreBuiltin: true })` |
-| **在基础预设上微调** | 配置文件只写要修改的字段，例如 `{"defaults":{"forcedSwitchTicks":400}}` | — |
-| **自定义注册新预设** | `const cfg = getPreset("lively"); cfg.forcedSwitchTicks = 300; registerPreset("my-preset", cfg); usePreset("my-preset");` | — |
+| **默认正常档（网页平衡）** | 什么都不用配置，或 `setActivityLevel("normal")` | 30s换位，1.0~1.6s位移驻留，默认启用 |
+| **偏安静档（Qt 原版发呆）** | `setActivityLevel("calm")` 或 `configure({ activityLevel: "calm" })` | 关闭催促，恢复原版长发呆，位移后从容驻留 |
+| **偏活跃档（快节奏游走）** | `setActivityLevel("active")` 或 `configure({ activityLevel: "active" })` | 10s换位，停顿极短，几乎无缝游走 |
+| **纯正 Qt / 原版桌宠档** | `configure({ preset: "classic" })` 或配置 JSON 中写 `"preset": "classic"` | 零覆盖纯 XML 模式（兼兼容 `ignoreBuiltin: true`） |
+| **在基础预设上微调** | 配置文件只写要修改的字段，例如 `{"defaults":{"travelDwellTicks":[20,30]}}` | — |
+| **自定义注册新预设** | `const cfg = getPreset("normal"); cfg.forcedSwitchTicks = 500; registerPreset("my-preset", cfg); usePreset("my-preset");` | — |
 
 ---
 
@@ -47,22 +51,24 @@
 
 ### 全参数规格与约束
 
-| 字段 | 类型 | 单位 | 有效区间 | Classic (Qt) | Lively (活跃) | 功能说明与约束边界 |
-|---|---|---|---|---|---|---|
-| `preset` | `string` | 字符串 | 已注册预设名 | `"classic"` | `"lively"` | **基底预设**：决定底层继承哪套行为策略。 |
-| `forcedSwitchTicks` | `number` | ticks (40ms) | `0 ~ 1,000,000` | `0` | `300` (12s) | 静止换位请求：有限行为结束后执行，无限循环完成一整轮后退出。 |
-| `maxBehaviorTicks` | `number` | ticks (40ms) | `0 ~ 1,000,000` | `0` | `1100` (44s) | 行为年龄预算：在完成点回全局池，不清空正在执行的有限序列。 |
-| `pacerExemptBehaviors` | `string[]` | 数组 | 行为名 | `[]` | `["SitWhileDanglingLegs"]` | 不受静止换位请求影响；有限表演原本就不会被调度计时器截断。 |
-| `exitToPoolBehaviors` | `string[]` | 数组 | 行为名 | `[]` | `["SitWhileDanglingLegs"]` | **闭环打破名单**：原版 XML 中部分行为（如坐下）使用 `Add="false"` 形成死循环；列入此名单的行为执行完强制回全局池抽签。 |
-| `behaviorWeights` | `Record<string, number>` | 字典 | `0 ~ 100,000` | `{}` (原生) | `{ SitWhileDanglingLegs: 150, SitAndFaceMouse: 8 }` | **行为选择权重覆盖**：覆盖 XML 中的 `Frequency`。`0` = 禁用；正数提高抽取概率。 |
-| `actionDurations` | `Record<string, number \| [min,max]>` | ticks (40ms) | `1 ~ 1,000,000` | `{}` (原生) | `{}` | **动作停留时长固定/范围覆盖**：覆盖 XML 中 Stay 类动作的 `Duration`。 |
-| `actionHoldLimits` | 动作名 → `{ticks, waitPoses}` | ticks / 帧下标 | 见下文 | 无 | 见下表 | 仅调整明确标注的静止等待帧，保留完整帧顺序及其余帧时长。 |
-| `repeatBehaviorWeight` | `number` | 权重倍率 | 0～1 | 1 | 0.65 | 有其他可执行候选时，温和降低全局池立即重复抽选的权重。 |
-| `durationScale` | `number` | 浮点数 | `0.05 ~ 20.0` | `1.0` (原速) | `1.0` | **全局时长缩放倍率**：按比例缩放 XML 自带的所有 Stay 动作持续时间。 |
-| `scale` | `number` | 浮点数 | `0.2 ~ 4.0` | `1.0` (原尺寸) | `1.0` | **宠物视口渲染尺寸缩放**：1.0 = 原生 128px 贴图大小。引擎内部保持 1:1 虚拟坐标计算。 |
-| `maxTravelPx` | `number` | px | `10 ~ 100,000` | `0` (不限制) | `0` (不限制) | **水平漫游最大距离**：限制随机游走步长，防止横穿全屏破坏排版。爬墙等边界目标不受此限。 |
-| `interactionCooldownTicks` | `number` | ticks (40ms) | `0 ~ 100,000` | `0` | `500` | **互动冷却时间**：完成一次互动（如拥抱）后的冷却期，防止两只宠物贴身无限连续拥抱。 |
-| `scanDistancePx` | `number` | px | `16 ~ 4,096` | `256` | `256` | **伙伴搜索半径**：扫描附近可互动伙伴的有效直线距离。 |
+| 字段 | 类型 | 单位 | 有效区间 | Classic (Qt) | Normal (默认) | Active (偏活跃) | 功能说明与约束边界 |
+|---|---|---|---|---|---|---|---|
+| `activityLevel` | `string` | 枚举 | `"calm"` / `"normal"` / `"active"` | `"calm"` | `"normal"` | `"active"` | **三档活跃度等级**：高层控制旋钮，快速切换节奏。 |
+| `preset` | `string` | 字符串 | 已注册预设名 | `"classic"` | `"normal"` | `"active"` | **基底预设**：决定底层继承哪套行为策略。 |
+| `travelDwellTicks` | `number \| [min,max]` | ticks (40ms) | `0 ~ 1,000,000` | `[50, 75]` (2.0~3.0s) | `[30, 50]` (1.2~2.0s) | `[0, 10]` (0~0.4s) | **位移到站驻留缓冲**：任何移动动作（地表奔跑行走、爬墙、爬天花板、走向同伴等）结束时，自适应插入对应表面的站立/抓壁定格停顿。 |
+| `forcedSwitchTicks` | `number` | ticks (40ms) | `0 ~ 1,000,000` | `0` | `750` (30s) | `250` (10s) | 静止换位请求：有限行为结束后执行，无限循环完成一整轮后退出。`0` 关闭。 |
+| `maxBehaviorTicks` | `number` | ticks (40ms) | `0 ~ 1,000,000` | `0` | `1500` (60s) | `800` (32s) | 行为年龄预算：在完成点回全局池，不清空正在执行的有限序列。 |
+| `pacerExemptBehaviors` | `string[]` | 数组 | 行为名 | `[]` | `["SitWhileDanglingLegs"]` | `["SitWhileDanglingLegs"]` | 不受静止换位请求影响；有限表演原本就不会被调度计时器截断。 |
+| `exitToPoolBehaviors` | `string[]` | 数组 | 行为名 | `[]` | `["SitWhileDanglingLegs", "LieDown"]` | `["SitWhileDanglingLegs", "LieDown"]` | **闭环打破名单**：原版 XML 中部分行为（如坐下、躺下）使用 `Add="false"` 形成死循环；列入此名单的行为执行完强制回全局池抽签。 |
+| `behaviorWeights` | `Record<string, number>` | 字典 | `0 ~ 100,000` | `{ SitAndFaceMouse: 8, HugEvil: 50, AskForHugs: 50, NoticeFallingTutel: 100, HurlEvil: 20 }` | `{ SitAndFaceMouse: 8, HugEvil: 120, AskForHugs: 120, NoticeFallingTutel: 200, HurlEvil: 50 }` | `{ SitAndFaceMouse: 8 }` | **行为选择权重覆盖**：覆盖 XML 中的 `Frequency`。在平静与正常模式下大幅降低拥抱/飞掷互动欲望，防止互动风暴吞没静止发呆。 |
+| `actionDurations` | `Record<string, number \| [min,max]>` | ticks (40ms) | `1 ~ 1,000,000` | `{}` (原生) | `{}` | `{}` | **动作停留时长固定/范围覆盖**：覆盖 XML 中 Stay 类动作的 `Duration`。 |
+| `actionHoldLimits` | 动作名 → `{ticks, waitPoses}` | ticks / 帧下标 | 见下文 | 无 (原生 20~60s) | 适度预算 (见下文) | 紧凑预算 (见下文) | 仅调整明确标注的静止等待帧，保留完整帧顺序及其余帧时长。Calm 模式不设上限。 |
+| `repeatBehaviorWeight` | `number` | 权重倍率 | 0～1 | 0.6 | 0.4 | 0.35 | 结合滑动历史记忆窗口与静坐语义大类协同抑制，降低连续与多周期动作重复。Calm 模式提供适度抑制（0.6）防止死循环。 |
+| `durationScale` | `number` | 浮点数 | `0.05 ~ 20.0` | `1.0` (原速) | `1.0` | `1.0` | **全局时长缩放倍率**：按比例缩放 XML 自带的所有 Stay 动作持续时间。 |
+| `scale` | `number` | 浮点数 | `0.2 ~ 4.0` | `1.0` (原尺寸) | `1.0` | `1.0` | **宠物视口渲染尺寸缩放**：1.0 = 原生 128px 贴图大小。引擎内部保持 1:1 虚拟坐标计算。 |
+| `maxTravelPx` | `number` | px | `10 ~ 100,000` | `0` (不限制) | `0` (不限制) | `0` (不限制) | **水平漫游最大距离**：限制随机游走步长，防止横穿全屏破坏排版。爬墙等边界目标不受此限。 |
+| `interactionCooldownTicks` | `number` | ticks (40ms) | `0 ~ 100,000` | `1500` (60s) | `750` (30s) | `150` (6s) | **互动冷却时间**：完成一次互动（如拥抱）后的冷却期，防止两只宠物贴身无限连续拥抱。 |
+| `scanDistancePx` | `number` | px | `16 ~ 4,096` | `256` | `256` | `256` | **伙伴搜索半径**：扫描附近可互动伙伴的有效直线距离。 |
 | `partnerWeights` | `{alone, withPartner, reachable}` | 对象 | `0 ~ 100,000` | `{}` | `{}`（使用 XML 权重） | **伙伴互动场景权重**：根据“单只独处”、“同场有伴”、“同高度且在搜索半径内”三档动态调节互动欲望。 |
 | `allowBehaviors` | `string[]` | 数组 | 行为名 | `[]` (全允许) | `[]` (全允许) | **行为白名单**：只允许出现列表内的行为。 |
 | `denyBehaviors` | `string[]` | 数组 | 行为名 | `[]` (无禁用) | `[]` (无禁用) | **行为黑名单**：永不出现列表内的行为，优先级高于白名单。 |
@@ -94,7 +100,7 @@
 
 行为总时长还包含容器推进和其他子动作，不能与单个保持叶节点时长混为一谈。`forcedSwitchTicks: 300` 表示在完成点检查是否已经静止 12 秒；`maxBehaviorTicks: 1100` 表示在完成点检查行为是否已执行 44 秒。二者都没有硬截止时刻，也不会在阈值 tick 单独发出请求事件。
 
-`repeatBehaviorWeight: 0.65` 温和降低立即重复当前行为的全局抽选权重；不干预 `Add=false` 的专用下一行为链。`exitToPoolBehaviors` 让指定行为完整结束后回全局池，避免封闭坐姿链。
+`repeatBehaviorWeight`（默认 normal 为 0.4）结合滑动历史记忆窗口（Recent History Window）与静坐语义大类协同抑制：刚结束某行为时，该行为自身获得最强去重抑制（`repeat`）；历史窗口中的 2 周期及 3 周期前序行为获得距离衰减惩罚（`(1+repeat)/2`、`(3+repeat)/4`）；若刚结束的行为属于静坐/发呆大类（`SitDown`、`SitWhileDanglingLegs`、`LieDown`、`Walk...Sit` 等），同类其他发呆行为会被联动抑制，使移动、爬墙、飞跃等动作获得 60%~70% 的抽选优势，彻底消除“上一轮静坐，走一步下一轮又静坐”的死循环。`exitToPoolBehaviors` 包含 `["SitWhileDanglingLegs", "LieDown"]`，让指定行为完整结束后强制回全局池抽签，打破原版 XML 坐卧闭环。
 
 `actionDurations` 仍可显式指定叶节点时长。对 Sequence/Select 容器，它只为重复设置预算，有限容器保留全部子动作。调节普通保持应优先使用 `actionHoldLimits`。
 
@@ -110,7 +116,7 @@
 
 1. 扫描行为必须存在相同 Affordance 的可用广播，来自另一只宠物，满足近距连接或远端地面接近规则，双方交接动作均存在且未被白/黑名单禁用。SayItBack 在两套内置素材中没有提供方，因此不会自动空扫。
 2. 广告行为必须有另一只已加载宠物具备相容的扫描行为；双方角色不匹配时不进入自动候选。
-3. 到正常选择边界时，若最终合法候选池内有可连接机会，优先在这些候选中按现有权重抽取，并当场认领广播；前置动作照常执行，进入 ScanMove 后接续使用这条连接。有限动作不为此中断，必需的 Add=false 下一行为链、禁用项及冷却继续生效。
+3. 到正常选择边界时，若最终合法候选池内有可连接机会（opportunities），系统不再独占式排他清空常规动作，而是保留全局池并对机会赋予显著加权（高优先级提升），使同伴互动能够高概率响应（约 75%~85%），同时允许常规位移走动或从容站立公平并存（约 15%~25%）。一旦抽中互动动作则当场认领广播并执行相应接近动作；有限动作不为此中断，必需的 Add=false 下一行为链、禁用项及冷却继续生效。静坐发呆类行为（包括求抱抱广播 Offer 如 AskForHugs）完结后，联动静坐语义大类衰减，为位移与站立提供充分展现机会。
 4. 近距资格查询和连接共用 BroadcastManager.findAvailable；远端查询和预留共用 findReachable，排除自身、已认领及已结束的广告。正常选中后已认领的广告会等待伙伴；显式换行为、关闭宠物或等待超时仍可撤销连接。
 
 `partnerWeights` 只覆盖有资格候选的权重，不提供广播或越过资格检查。内置 lively 未配置此字段，沿用 XML 权重；完整示例中的三档值仅作显式自定义示例。`behaviorWeights` 同样不能重新启用当前不可执行的扫描或绕过冷却。
@@ -203,7 +209,7 @@
     "pacerExemptBehaviors": ["SitWhileDanglingLegs"],
 
     // [exitToPoolBehaviors] 行为结束后强制返回全局抽签池（打破XML坐姿死循环）
-    "exitToPoolBehaviors": ["SitWhileDanglingLegs"],
+    "exitToPoolBehaviors": ["SitWhileDanglingLegs", "LieDown"],
 
     // [maxTravelPx] 横向漫游最大距离，防止横穿全屏破坏网页正文排版 (px, 0=不限制)
     "maxTravelPx": 240,
@@ -216,7 +222,7 @@
       "GrabWall": { "ticks": [200,300], "waitPoses": [0,2,4] },
       "GrabCeiling": { "ticks": [200,300], "waitPoses": [0,2,4] }
     },
-    "repeatBehaviorWeight": 0.65,
+    "repeatBehaviorWeight": 0.4,
 
     // ---------------- 2. 行为选择与动作时长 ----------------
     // [behaviorWeights] 覆盖 XML 中的 <Behavior Frequency="..."> (0=禁用, >0提高概率)
@@ -328,7 +334,7 @@
 
 > 本节及其旧版探针结果仅作历史对照。当前 lively 已改为完成点调度，默认阈值 300 tick；请以前文配置表和源码为准。
 
-内置预设（`src/core/animationPreset.ts`，并原样出现在 `dist/animation.config.json`）是按
+内置预设（`src/core/animationPreset.ts`；`dist/animation.config.json` 只写 `preset` 名，不复制各档字段，避免文件层锁死切换）是按
 「**网页宠物**，不是桌面宠物」定的 —— 不显得呆，但也不把 pack 本来设计好的长动画掐断：
 
 | 取值 | 为什么 |

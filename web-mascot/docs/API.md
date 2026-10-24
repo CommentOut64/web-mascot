@@ -126,7 +126,7 @@ npm run build:lib     # 等价于 vue-tsc && vite build && tsc -p tsconfig.lib.j
 | `dist/devtools.js` | 开发工具入口（含记录器） |
 | `dist/chunks/MascotEngine-*.js` | 两个入口共享的引擎实现 |
 | `dist/types/**/*.d.ts` | 类型声明（由 `tsc` 直接产出） |
-| `dist/animation.config.json` | 内置默认档的副本（构建时由 `src/core/animationPreset.ts` 生成），可经 `web-mascot/animation.config.json` 导入 |
+| `dist/animation.config.json` | 预设配置文件模板：顶层 `preset` 选择档位，`defaults` 默认留空（只放宿主自己的覆盖项），可经 `web-mascot/animation.config.json` 导入 |
 | `dist/mascot_pack/**` | 精灵资源（由 Vite 从 `public/` 拷入）。每个 pack 还带自己的 `LICENSE` 与 `LICENSE-CC-BY-NC-SA-4.0.txt` |
 | `src/**` | 库源码，随包提供：既是 GPL 要求的对应源码，也让 sourcemap 能解析到真实文件 |
 
@@ -368,54 +368,59 @@ window.addEventListener("keydown", (e) => {
 
 #### 3.6.1 预设注册与切换
 
-引擎内置了预设注册中心 `PresetRegistry`，内置两个平等预设：
-- `"lively"`（默认）：针对网页端优化的活跃预设，包含防发呆推动机制与闭环打破。
-- `"classic"`：纯净对齐 Qt / Shimeji-ee 桌面原版的基线预设（`{}`），不注入任何覆盖。
+引擎内置了预设注册中心 `PresetRegistry` 与三档活跃度调控体系：
+- `"normal"`（默认）：专为网页端调优的平衡档。30秒换位催促，位移到站后提供 1.0~1.6s 的自适应站立驻留缓冲。
+- `"calm"`（偏安静）：还原 Qt / Shimeji-ee 桌面原版从容节奏，关闭换位催促，恢复长时发呆，位移后从容驻留 1.6~2.4s。
+- `"active"`（偏活跃）：高频游走，停顿压缩至极短（0~0.4s），10秒静止即快速换位。
+- `"classic"` 与 `"lively"`：向下兼容保留。
 
 ```ts
-import { registerPreset, usePreset, getPreset, PresetRegistry } from "web-mascot";
+import { setActivityLevel, getActivityLevel, registerPreset, usePreset, getPreset } from "web-mascot";
 
-// 1. 获取已有预设进行派生微调
-const custom = getPreset("lively")!;
-custom.forcedSwitchTicks = 300; // 静止 12 秒后请求在完整结束点换位
+// 1. 三档活跃度快速切换（推荐）
+setActivityLevel("calm"); // "calm" | "normal" | "active"
+console.log(getActivityLevel()); // "calm"
 
-// 2. 注册自定义预设
+// 也可在单个宠物或宠物组上切换
+mascot.setActivityLevel("active");
+group.setActivityLevel("normal");
+
+// 2. 自定义预设派生与注册
+const custom = getPreset("normal")!;
+custom.forcedSwitchTicks = 500;
 registerPreset("my-chill-pet", custom);
-
-// 3. 激活预设（全局切换）
 usePreset("my-chill-pet");
-
-// 也可在单个宠物实例引擎上独立切换
-mascot.engine.setPreset("classic");
 ```
 
-生效优先级：`PresetRegistry 预设（如 lively / classic） → 静态 JSON defaults → reducedMotion → mascots.<名字>`（逐字段合并，对象型字段按 key 叠加）。
+生效优先级：`PresetRegistry 预设（如 normal / calm / active） → 静态 JSON defaults → reducedMotion → mascots.<名字>`（逐字段合并，对象型字段按 key 叠加）。
 
 #### 3.6.2 核心行为控制字段
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
+| `activityLevel` | `"calm" \| "normal" \| "active"` | 三档活跃度等级，默认 `"normal"` |
+| `travelDwellTicks` | `number \| [number, number]` | 纯位移动作到达目标点（target-x/y）后，若接续为位移动作，插入自适应站立驻留 tick 数 |
 | `forcedSwitchTicks` | `number` | 静止达到阈值后请求移动；有限行为完整结束，无限循环完成一整轮后退出。`0` 关闭 |
 | `pacerExemptBehaviors` | `string[]` | 不受静止换位请求影响的行为；所有有限表演均不会被计时器截断 |
 | `maxBehaviorTicks` | `number` | 行为年龄预算，到达后在完成点回全局池。不会截断有限序列、飞行、拖拽或有效互动 |
 | `actionHoldLimits` | 动作名 → `{ ticks: number 或 [min,max], waitPoses: number[] }` | 仅分配标注的静止等待帧时长；其余帧时长和完整顺序保持，短过渡沿用 XML；不作用于条件动画、互动或移动 |
-| `repeatBehaviorWeight` | `number` | 全局候选中立即重复当前行为的权重倍率，范围 0～1，默认 1；lively 为 0.65。无其他可用行为时不降权 |
-| `exitToPoolBehaviors` | `string[]` | 列出的行为结束时强制回到**全局抽签池**，而不是走 pack 的 `<NextBehaviorList>` |
+| `repeatBehaviorWeight` | `number` | 结合滑动历史记忆窗口与静坐语义大类协同抑制，降低重复抽选权重，范围 0～1，默认 0.4（normal）。无其他可用行为时不降权 |
+| `exitToPoolBehaviors` | `string[]` | 列出的行为结束时强制回到**全局抽签池**，而不是走 pack 的 `<NextBehaviorList>`，默认 `["SitWhileDanglingLegs", "LieDown"]` |
 | `behaviorWeights` | `Record<string, number>` | 覆盖 pack 的 `Frequency`（0 = 禁用；给 `Frequency="0"` 的行为赋正值可打开它） |
 | `interactionCooldownTicks` | `number` | 互动结束后，需要伙伴的行为移出候选池这么多 tick |
 | `maxTravelPx` | `number` | 水平游走目标的最大距离（px）。0/缺省 = 不限 |
 | `durationScale` | `number` | 全局时长倍率（0.05–20），只作用于 XML 自带的 `Duration` |
 | `actionDurations` | `Record<string, number | [number, number]>` | 按动作名覆盖持续 tick 数，可写单值或 `[min,max]` |
 
-**为什么需要 pacer 与出池破环**：pack 用 `<NextBehaviorList Add="false">` 串接相关行为，部分链条是**自闭环**（如 `SitAndFaceMouse` $\leftrightarrow$ `SitWhileDanglingLegs`）。如果不配置出池破环，网页宠物坐下后可能永远无法站起走动。预设系统将这一逻辑标准化解耦：
+**为什么需要 pacer 与出池破环**：pack 用 `<NextBehaviorList Add="false">` 串接相关行为，部分链条是**自闭环**（如 `SitAndFaceMouse` $\leftrightarrow$ `SitWhileDanglingLegs`，以及 `LieDown` 强制 50% 跳回 `SitDown`）。如果不配置出池破环，网页宠物坐下后可能永远无法站起走动。预设系统将这一逻辑标准化解耦：
 
 ```json
 {
   "defaults": {
-    "forcedSwitchTicks": 300,
+    "forcedSwitchTicks": 750,
     "pacerExemptBehaviors": ["SitWhileDanglingLegs"],
-    "exitToPoolBehaviors": ["SitWhileDanglingLegs"],
-    "maxBehaviorTicks": 1100
+    "exitToPoolBehaviors": ["SitWhileDanglingLegs", "LieDown"],
+    "maxBehaviorTicks": 1500
   }
 }
 ```
@@ -707,7 +712,7 @@ const mascot = await createMascot({ container: document.querySelector("#pet-root
 
 ## 8. 发布状态与许可
 
-`version` 为 `0.1.2`。接口尚未承诺语义化版本稳定性：0.x 允许破坏性变更，其中 `MascotEngine` / `AnimationConfig` / `BroadcastManager` 属于**明确不稳定**的高级用法（见 3.4）。
+`version` 为 `0.1.3`。接口尚未承诺语义化版本稳定性：0.x 允许破坏性变更，其中 `MascotEngine` / `AnimationConfig` / `BroadcastManager` 属于**明确不稳定**的高级用法（见 3.4）。
 
 许可拆成两部分，不要混：
 
