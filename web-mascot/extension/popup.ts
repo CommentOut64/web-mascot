@@ -8,6 +8,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const scrollSquashToggle = document.getElementById("scroll-squash-toggle") as HTMLInputElement | null;
   const autohideScrollbarToggle = document.getElementById("autohide-scrollbar-toggle") as HTMLInputElement | null;
   const modeRadios = document.querySelectorAll<HTMLInputElement>('input[name="mode"]');
+  const activityRadios = document.querySelectorAll<HTMLInputElement>('input[name="activityLevel"]');
   const btnRestart = document.getElementById("btn-restart") as HTMLButtonElement | null;
   const btnResetPos = document.getElementById("btn-reset-pos") as HTMLButtonElement | null;
 
@@ -84,6 +85,7 @@ document.addEventListener("DOMContentLoaded", () => {
     {
       enabled: true,
       mascotMode: "both",
+      activityLevel: "normal",
       clickThrough: false,
       debugLog: false,
       scrollInteraction: false,
@@ -107,6 +109,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
       modeRadios.forEach((radio) => {
         radio.checked = radio.value === items.mascotMode;
+      });
+
+      const currentActivity = typeof items.activityLevel === "string" ? items.activityLevel : "normal";
+      activityRadios.forEach((radio) => {
+        radio.checked = radio.value === currentActivity;
       });
 
       updateBlacklistButton();
@@ -166,6 +173,15 @@ document.addEventListener("DOMContentLoaded", () => {
     radio.addEventListener("change", () => {
       if (radio.checked) {
         chrome.storage.local.set({ mascotMode: radio.value });
+      }
+    });
+  });
+
+  // Handle activity level selection
+  activityRadios.forEach((radio) => {
+    radio.addEventListener("change", () => {
+      if (radio.checked) {
+        chrome.storage.local.set({ activityLevel: radio.value });
       }
     });
   });

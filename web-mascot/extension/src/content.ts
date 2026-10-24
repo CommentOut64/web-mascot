@@ -10,7 +10,6 @@ import {
 } from "../../src/index.js";
 import {
   checkAndApplyScrollbar,
-  cleanupScrollbar,
 } from "./features/autohideScrollbar.js";
 
 /** Avoid duplicate injection within the same document context */
@@ -48,6 +47,7 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
   // Runtime settings
   let isEnabled = true;
   let mascotMode = "both"; // "Neuron" | "Eviling" | "both"
+  let currentActivityLevel: "calm" | "normal" | "active" = "normal";
   let isClickThrough = false;
   let isDebugLog = false;
   let isScrollInteraction = false;
@@ -99,7 +99,8 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
       debounceSpawnTimer = null;
     }
 
-    cleanupScrollbar();
+    // 注意：扩展热重载或失效自毁时，保留纯 CSS 滚动条隐藏样式，防止页面突兀跳出原生滚动条。
+    // 用户刷新页面或新 content script 注入时会自动无缝继承。
     group.destroy();
     activeMascots = [];
     host.destroy();
@@ -582,6 +583,7 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
         {
           enabled: true,
           mascotMode: "both",
+          activityLevel: "normal",
           clickThrough: false,
           debugLog: false,
           scrollInteraction: false,
@@ -597,6 +599,11 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
           isEnabled = Boolean(items.enabled);
           mascotMode =
             typeof items.mascotMode === "string" ? items.mascotMode : "both";
+          if (items.activityLevel === "calm" || items.activityLevel === "normal" || items.activityLevel === "active") {
+            currentActivityLevel = items.activityLevel;
+          }
+          MascotEngine.setActivityLevel(currentActivityLevel);
+          group.setActivityLevel(currentActivityLevel);
           isClickThrough = Boolean(items.clickThrough);
           isDebugLog = Boolean(items.debugLog);
           isScrollInteraction = Boolean(items.scrollInteraction);
@@ -636,6 +643,17 @@ if ((window as unknown as Record<string, boolean>)[EXTENSION_KEY]) {
       return;
     }
     if (areaName !== "local") return;
+
+    if (changes.activityLevel !== undefined) {
+      const nextLevel = changes.activityLevel.newValue;
+      if (nextLevel === "calm" || nextLevel === "normal" || nextLevel === "active") {
+        currentActivityLevel = nextLevel;
+        MascotEngine.setActivityLevel(currentActivityLevel);
+        group.setActivityLevel(currentActivityLevel);
+        const nameMap: Record<string, string> = { calm: "偏安静", normal: "正常", active: "偏活跃" };
+        log(`桌宠活跃度已热切换为: 【${nameMap[currentActivityLevel]}】`);
+      }
+    }
 
     if (changes.debugLog !== undefined) {
       isDebugLog = Boolean(changes.debugLog.newValue);

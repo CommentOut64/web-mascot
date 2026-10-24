@@ -302,6 +302,51 @@ input:checked + .slider:before {
   grid-column: span 2;
 }
 
+.activity-selector {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.activity-option {
+  cursor: pointer;
+}
+
+.activity-option input {
+  display: none;
+}
+
+.activity-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 6px 4px;
+  background: var(--card-bg);
+  border: 1.5px solid var(--card-border);
+  border-radius: 8px;
+  transition: all 0.15s ease;
+  min-height: 52px;
+  justify-content: center;
+}
+
+.activity-name {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.activity-desc {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 3px;
+  line-height: 1.2;
+}
+
+.activity-option input:checked + .activity-card {
+  border-color: var(--primary);
+  background-color: rgba(99, 102, 241, 0.08);
+}
+
 .btn-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

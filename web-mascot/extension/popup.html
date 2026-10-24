@@ -127,6 +127,34 @@
         </div>
       </section>
 
+      <!-- 活跃度调节 (支持热切换) -->
+      <section class="section">
+        <h2 class="section-title">活跃度 (动作节奏)</h2>
+        <div class="activity-selector">
+          <label class="activity-option" id="activity-calm">
+            <input type="radio" name="activityLevel" value="calm">
+            <div class="activity-card">
+              <span class="activity-name">偏安静</span>
+              <span class="activity-desc">Qt原版发呆，从容停顿</span>
+            </div>
+          </label>
+          <label class="activity-option" id="activity-normal">
+            <input type="radio" name="activityLevel" value="normal" checked>
+            <div class="activity-card">
+              <span class="activity-name">正常 (推荐)</span>
+              <span class="activity-desc">网页平衡，适度活动</span>
+            </div>
+          </label>
+          <label class="activity-option" id="activity-active">
+            <input type="radio" name="activityLevel" value="active">
+            <div class="activity-card">
+              <span class="activity-name">偏活跃</span>
+              <span class="activity-desc">高频换位，极短停顿</span>
+            </div>
+          </label>
+        </div>
+      </section>
+
       <!-- 快捷操作按钮组 -->
       <section class="section btn-grid">
         <button id="btn-restart" class="btn btn-secondary">
