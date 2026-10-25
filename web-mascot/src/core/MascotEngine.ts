@@ -489,7 +489,11 @@ export class MascotEngine {
    *  ended right after its target move still has this equal to targetArrivalFrame. */
   private lastPoppedFrame: ActionFrame | null = null;
   /** Pending travel behavior waiting for adaptive Stand dwell to finish. */
-  private pendingTravelAfterDwell: { name: string; id?: number } | null = null;
+  private pendingTravelAfterDwell: { name: string; id?: number; reason?: string } | null = null;
+  /** True when a physical touchdown onto a floor occurred during the current behavior lifecycle. */
+  private landingOccurred = false;
+  /** True when the behavior that just ended was a landing action (Fall/Thrown/Jump) or landing dwell. */
+  private landingJustCompleted = false;
   /** Sliding history of recently executed behaviors (newest at end) for anti-repeat and category diversity. */
   private recentBehaviors: string[] = [];
   /** Tick until which partner behaviours stay out of the pool (see the config's
@@ -3579,6 +3583,9 @@ export class MascotEngine {
       // the pose index from a longer variant survives into a shorter one and
       // `poses[index]` is undefined — the packs do have such variants (the `Pinched`
       // drag action is 1,1,1,2,1,1,1 poses), so the pose clock has to restart.
+      if (frame.animation !== undefined) {
+        frame.poseDurations = undefined;
+      }
       frame.animation = animation;
       frame.poseIndex = 0;
       frame.poseTick = 0;
@@ -3587,6 +3594,26 @@ export class MascotEngine {
     if (!poses.length) {
       this.popActionStack();
       return;
+    }
+    if (frame.poseDurations === undefined && poses.length > 0 && node.type !== "Stay") {
+      const tailDwell = MascotEngine.animationConfig.sampleActionTailDwellTicks(
+        this.mascotName,
+        node.name,
+        this.currentBehavior?.name,
+      );
+      if (tailDwell !== null) {
+        frame.poseDurations = poses.map((pose) => Math.max(1, pose.duration));
+        frame.poseDurations[poses.length - 1] = tailDwell;
+        frame.finishCycle = true;
+        this.emit({
+          kind: "milestone",
+          name: "action-tail-dwell",
+          detail: `action=${node.name ?? this.currentBehavior?.name ?? "unknown"} dwellTicks=${tailDwell}`,
+          x: this.x,
+          y: this.y,
+          leaf: this.leafLabel(),
+        });
+      }
     }
     // A Stay action reached without going through an <ActionReference> still gets
     // libshijima's default hold time instead of looping for ever, and any action
@@ -4273,6 +4300,12 @@ export class MascotEngine {
    * and performance timing. Unknown actions and short transitions keep XML timing. */
   private holdDuration(frame: ActionFrame): number {
     const original = this.scaledTicks(this.varNumber(frame, "Duration") ?? runtime.stayDurationTicks);
+    // Align in-behavior landing stand durations (Fall / Thrown) with the active landingDwellTicks preset
+    if ((this.currentBehavior?.name === "Fall" || this.currentBehavior?.name === "Thrown") &&
+        frame.node.name === "Stand") {
+      const landingTicks = MascotEngine.animationConfig.sampleLandingDwellTicks(this.mascotName);
+      if (landingTicks > 0) return landingTicks;
+    }
     const limit = MascotEngine.animationConfig.holdLimitTicks(this.mascotName, frame.node.name);
     if (limit === null || limit >= original || this.interactionVisualActive || this.interaction.ongoing ||
         this.hasTarget(frame) || this.isInteract(frame.node) ||
@@ -4319,14 +4352,19 @@ export class MascotEngine {
     const leaf = this.currentLeaf();
     if (!leaf) return;
     if (leaf.borderType && !this.borderTypeSatisfied(leaf.borderType)) {
-      this.emit({
-        kind: "milestone",
-        name: "border-lost",
-        detail: `BorderType=${leaf.borderType} not satisfied`,
-        x: this.x,
-        y: this.y,
-        leaf: this.leafLabel(),
-      });
+      const isIntentionalDetach =
+        this.currentBehavior?.name === "FallFromWall" ||
+        this.currentBehavior?.name === "FallFromCeiling";
+      if (!isIntentionalDetach) {
+        this.emit({
+          kind: "milestone",
+          name: "border-lost",
+          detail: `BorderType=${leaf.borderType} not satisfied`,
+          x: this.x,
+          y: this.y,
+          leaf: this.leafLabel(),
+        });
+      }
       // libshijima animation::check_border_type() queues "Fall" here. That is right
       // when the mascot really left its surface, but it strands one that simply
       // moved onto a *different* border: the ceiling fallback in the packs is
@@ -4339,7 +4377,7 @@ export class MascotEngine {
         this.onBehaviorEnd(`border-change:${leaf.borderType}->${here}`);
         return;
       }
-      this.setBehavior("Fall", `border-lost:${leaf.borderType}`);
+      this.setBehavior("Fall", isIntentionalDetach ? "surface-detach" : `border-lost:${leaf.borderType}`);
       return;
     }
     const frame = this.actionStack[this.actionStack.length - 1];
@@ -4737,6 +4775,7 @@ export class MascotEngine {
     // a hug.
     if (this.scrollFallRoot === this.actionStack[0]) this.graceAfterScrollLanding();
     this.settleAfterLanding();
+    this.landingOccurred = true;
     const root = this.actionStack[0];
     // IAmHurled contains two consecutive Fall actions. After an impact, a
     // supported Fall is complete too; StandUp would erase Bounce/Sprawl. Unwind
@@ -4760,8 +4799,10 @@ export class MascotEngine {
     if (!this.config) return;
     if (this.pendingTravelAfterDwell) {
       const next = this.pendingTravelAfterDwell;
+      const wasLandingDwell = next.reason === "landing-dwell-end";
       this.pendingTravelAfterDwell = null;
-      this.setBehavior(next.name, "travel-dwell-end", next.id);
+      if (wasLandingDwell) this.landingJustCompleted = true;
+      this.setBehavior(next.name, next.reason ?? "travel-dwell-end", next.id);
       return;
     }
     const animation = MascotEngine.animationConfig;
@@ -4777,7 +4818,13 @@ export class MascotEngine {
     // pool. The shipped packs chain related behaviours, and some of those chains are
     // closed: SitAndFaceMouse lists only itself and SitWhileDanglingLegs with
     // Add="false", so a mascot that sits down can never leave that pair by itself.
-    const forcePool = scheduled !== null || animation.exitsToPool(mascot, this.currentBehavior?.name);
+    const fromBehavior = this.currentBehavior?.name;
+    const justExitedRest = this.isRestingBehavior(fromBehavior);
+    const activeLevel = this.getActivityLevel();
+    // In normal and active modes, breaking out of resting loops (SitDown <-> LieDown) forces global pool selection
+    const forcePool = scheduled !== null ||
+      animation.exitsToPool(mascot, fromBehavior) ||
+      (justExitedRest && activeLevel !== "calm");
     for (const reference of forcePool ? [] : next) {
       if (!this.evaluateCondition(reference.condition)) continue;
       if (!animation.allows(mascot, reference.name)) continue;
@@ -4919,6 +4966,40 @@ export class MascotEngine {
 
         return factor < 1.0 ? { ...candidate, frequency: candidate.frequency * factor } : candidate;
       });
+
+      const isPostLanding = this.landingOccurred || this.landingJustCompleted ||
+        reason === "landing-dwell-end" || fromBehavior === "Fall" || fromBehavior === "Thrown";
+      this.landingJustCompleted = false;
+
+      // Apply landing and post-rest behavioral guardrails across activity levels
+      if (hasNonResting) {
+        if (isPostLanding) {
+          if (activeLevel === "active") {
+            // Active: 100% forbid landing straight into sit/lie down, force travel or wall leap
+            pool = pool.filter((candidate) => !this.isRestingBehavior(candidate.name));
+          } else if (activeLevel === "normal") {
+            // Normal: Heavily dampen sit/lie down after landing (75% decay) to promote lively exploration
+            pool = pool.map((candidate) =>
+              this.isRestingBehavior(candidate.name)
+                ? { ...candidate, frequency: candidate.frequency * 0.25 }
+                : candidate,
+            );
+          }
+        } else if (justExitedRest && activeLevel !== "calm") {
+          // Post-rest: Prevent immediate re-resting loops (SitDown -> LieDown -> SitDown)
+          if (activeLevel === "active") {
+            pool = pool.filter((candidate) => !this.isRestingBehavior(candidate.name));
+            this.wantMovement = true;
+          } else {
+            // Normal: Dampen consecutive rest by 85% so standing up or traveling strongly dominates
+            pool = pool.map((candidate) =>
+              this.isRestingBehavior(candidate.name)
+                ? { ...candidate, frequency: candidate.frequency * 0.15 }
+                : candidate,
+            );
+          }
+        }
+      }
     }
     const total = pool.reduce(
       (sum, candidate) => sum + Math.max(0, candidate.frequency),
@@ -4949,19 +5030,32 @@ export class MascotEngine {
         this.targetArrivalFrame !== null &&
         this.lastPoppedFrame === this.targetArrivalFrame);
     const endedFromMovement = !this.isDragging && (wasTargetArrival || Boolean(lastLeafIsMove));
+    const isLandingBehavior = Boolean(fromBehavior && (
+      fromBehavior === "Fall" ||
+      fromBehavior === "Thrown" ||
+      fromBehavior.includes("Jump") ||
+      fromBehavior.includes("AndJump") ||
+      fromBehavior.startsWith("DashIe")
+    ));
+    // Any landing contact on floor without an internal prolonged stand deserves Landing Dwell
+    const endedFromLanding = !this.isDragging && this.landingOccurred && isLandingBehavior &&
+      fromBehavior !== "Stand" && reason !== "travel-dwell-end" && reason !== "landing-dwell-end";
     this.targetArrivalFrame = null;
     this.lastPoppedFrame = null;
-    // Any movement completion (target arrival, wall climb finish, or scan move)
-    // deserves an adaptive resting dwell on its current surface. Restricting
-    // this to simple target arrivals left ~90% of movement transitions unbuffered.
-    if (endedFromMovement) {
-      const dwellTicks = MascotEngine.animationConfig.sampleTravelDwellTicks(this.mascotName);
+    this.landingOccurred = false;
+
+    // Any movement or landing completion deserves an adaptive resting dwell on its current surface.
+    if (endedFromLanding || endedFromMovement) {
+      const dwellTicks = endedFromLanding
+        ? MascotEngine.animationConfig.sampleLandingDwellTicks(this.mascotName)
+        : MascotEngine.animationConfig.sampleTravelDwellTicks(this.mascotName);
       if (dwellTicks > 0) {
         const border = this.currentBorderAt(undefined) ?? "Floor";
         const stayAction = border === "Wall" ? "GrabWall" : border === "Ceiling" ? "GrabCeiling" : "Stand";
         if (this.config.actions[stayAction]) {
-          this.pendingTravelAfterDwell = { name: chosen.name, id: chosen.id };
-          this.setBehavior(stayAction, "travel-dwell");
+          const dwellReason = endedFromLanding ? "landing-dwell" : "travel-dwell";
+          this.pendingTravelAfterDwell = { name: chosen.name, id: chosen.id, reason: `${dwellReason}-end` };
+          this.setBehavior(stayAction, dwellReason);
           const dwellFrame = this.actionStack[this.actionStack.length - 1];
           if (dwellFrame) {
             dwellFrame.durationLimit = dwellTicks;
@@ -4969,7 +5063,7 @@ export class MascotEngine {
           }
           this.emit({
             kind: "milestone",
-            name: "travel-dwell",
+            name: dwellReason,
             detail: `action=${stayAction} ticks=${dwellTicks} next=${chosen.name}`,
             x: this.x,
             y: this.y,

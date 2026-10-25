@@ -19,6 +19,7 @@ export function cloneOptions(options: MascotAnimationOptions): MascotAnimationOp
     ...options,
     activityLevel: options.activityLevel,
     travelDwellTicks: Array.isArray(options.travelDwellTicks) ? [...options.travelDwellTicks] : options.travelDwellTicks,
+    landingDwellTicks: Array.isArray(options.landingDwellTicks) ? [...options.landingDwellTicks] : options.landingDwellTicks,
     allowBehaviors: options.allowBehaviors ? [...options.allowBehaviors] : undefined,
     denyBehaviors: options.denyBehaviors ? [...options.denyBehaviors] : undefined,
     pacerExemptBehaviors: options.pacerExemptBehaviors ? [...options.pacerExemptBehaviors] : undefined,
@@ -37,6 +38,14 @@ export function cloneOptions(options: MascotAnimationOptions): MascotAnimationOp
           key, { ticks: Array.isArray(value?.ticks) ? [...value.ticks] : value?.ticks,
             waitPoses: Array.isArray(value?.waitPoses) ? [...value.waitPoses] : value?.waitPoses },
         ]))
+      : undefined,
+    actionTailDwellTicks: options.actionTailDwellTicks
+      ? Object.fromEntries(
+          Object.entries(options.actionTailDwellTicks).map(([key, value]) => [
+            key,
+            Array.isArray(value) ? [...value] : value,
+          ]),
+        )
       : undefined,
     partnerWeights: options.partnerWeights ? { ...options.partnerWeights } : undefined,
     zone: options.zone ? { ...options.zone } : undefined,
@@ -58,6 +67,7 @@ export const CLASSIC_ANIMATION_PRESET: Readonly<MascotAnimationOptions> = Object
  * - forcedSwitchTicks: 0 (no forced movement pacing, full native idle durations).
  * - No hold limits: Stand, Sit, Sprawl etc. retain native XML timings (20~60s).
  * - travelDwellTicks: [50, 75] (2.0~3.0s of calm standing after movement).
+ * - landingDwellTicks: [75, 125] (3.0~5.0s of calm standing after landing).
  * - repeatBehaviorWeight: 0.6 (moderate repeat dampening to prevent behavioral loops while preserving calm dwell).
  * - interactionCooldownTicks: 1500 (60s cooldown to prevent interaction storm in dual-mascot mode).
  * - Suppressed partner weights: HugEvil, AskForHugs, NoticeFallingTutel, HurlEvil scaled down so idle dominates.
@@ -68,6 +78,13 @@ export const CALM_ANIMATION_PRESET: Readonly<MascotAnimationOptions> = Object.fr
   forcedSwitchTicks: 0,
   maxBehaviorTicks: 0,
   travelDwellTicks: [50, 75],
+  landingDwellTicks: [75, 125],
+  actionTailDwellTicks: {
+    HeartHeartHeartAction: [60, 90],
+    FrickYouAction: [60, 90],
+    HeartHeartHeart: [60, 90],
+    FrickYou: [60, 90],
+  },
   repeatBehaviorWeight: 0.6,
   interactionCooldownTicks: 1500,
   pacerExemptBehaviors: ["SitWhileDanglingLegs"],
@@ -86,6 +103,7 @@ export const CALM_ANIMATION_PRESET: Readonly<MascotAnimationOptions> = Object.fr
  * - forcedSwitchTicks: 750 (30s: generous sitting/lying down time, keeps page natural without freezing).
  * - actionHoldLimits: Stand (12~20s), Sit & Sprawl (14~24s), Wall/Ceiling grabs (10~16s).
  * - travelDwellTicks: [30, 50] (1.2~2.0s of natural standing dwell after reaching target-x, before the next action).
+ * - landingDwellTicks: [40, 60] (1.6~2.4s of natural standing dwell after landing, before the next action).
  * - repeatBehaviorWeight: 0.4.
  * - interactionCooldownTicks: 750 (30s cooldown between dual-mascot interactions).
  */
@@ -112,6 +130,13 @@ export const NORMAL_ANIMATION_PRESET: Readonly<MascotAnimationOptions> = Object.
     GrabCeiling: { ticks: [250, 400], waitPoses: [0, 2, 4] },
   },
   travelDwellTicks: [30, 50],
+  landingDwellTicks: [40, 60],
+  actionTailDwellTicks: {
+    HeartHeartHeartAction: [40, 60],
+    FrickYouAction: [40, 60],
+    HeartHeartHeart: [40, 60],
+    FrickYou: [40, 60],
+  },
   repeatBehaviorWeight: 0.4,
 });
 
@@ -120,6 +145,7 @@ export const NORMAL_ANIMATION_PRESET: Readonly<MascotAnimationOptions> = Object.
  * - forcedSwitchTicks: 250 (10s: prompt travel quickly).
  * - actionHoldLimits: Stand (3.2~6s), Sit & Sprawl (4~7.2s).
  * - travelDwellTicks: [0, 10] (0~0.4s: fast transitions, near-zero dwell).
+ * - landingDwellTicks: [15, 25] (0.6~1.0s: fast impact recovery before jumping/running).
  * - repeatBehaviorWeight: 0.35.
  * - interactionCooldownTicks: 150 (6s cooldown for frequent partner interplay).
  */
@@ -139,6 +165,13 @@ export const ACTIVE_ANIMATION_PRESET: Readonly<MascotAnimationOptions> = Object.
     GrabCeiling: { ticks: [80, 150], waitPoses: [0, 2, 4] },
   },
   travelDwellTicks: [0, 10],
+  landingDwellTicks: [15, 25],
+  actionTailDwellTicks: {
+    HeartHeartHeartAction: [20, 30],
+    FrickYouAction: [20, 30],
+    HeartHeartHeart: [20, 30],
+    FrickYou: [20, 30],
+  },
   repeatBehaviorWeight: 0.35,
   behaviorWeights: {
     SitAndFaceMouse: 8,
@@ -164,6 +197,13 @@ export const LIVELY_ANIMATION_PRESET: Readonly<MascotAnimationOptions> = Object.
     GrabCeiling: { ticks: [200, 300], waitPoses: [0, 2, 4] },
   },
   travelDwellTicks: [10, 25],
+  landingDwellTicks: [20, 35],
+  actionTailDwellTicks: {
+    HeartHeartHeartAction: [20, 30],
+    FrickYouAction: [20, 30],
+    HeartHeartHeart: [20, 30],
+    FrickYou: [20, 30],
+  },
   repeatBehaviorWeight: 0.65,
   interactionCooldownTicks: 500,
   behaviorWeights: {

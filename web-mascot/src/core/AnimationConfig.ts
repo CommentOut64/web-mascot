@@ -91,6 +91,12 @@ export interface MascotAnimationOptions {
   travelDwellTicks?: DurationSetting;
 
   /**
+   * [landingDwellTicks] Natural standing dwell ticks after landing on a floor before starting the next action.
+   * Single number or `[min, max]` range.
+   */
+  landingDwellTicks?: DurationSetting;
+
+  /**
    * [allowBehaviors] Whitelist: only these behaviours may appear. Empty/absent means "all allowed".
    * Names correspond to <Behavior Name="..."> in behaviors.xml.
    */
@@ -119,6 +125,12 @@ export interface MascotAnimationOptions {
   /** Idle cycle budget and explicit zero-based waiting poses. Only these poses
    * may change duration; all other poses retain their XML duration and order. */
   actionHoldLimits?: Record<string, IdleHoldSetting>;
+
+  /**
+   * [actionTailDwellTicks] Dwell ticks for the final pose of specified actions (e.g. holding heart or gesture poses).
+   * Maps action or behavior name to single number or `[min, max]` range in ticks.
+   */
+  actionTailDwellTicks?: Record<string, DurationSetting>;
 
   /** Multiplier for immediately repeating a behavior in the global pool (0 ~ 1).
    * Applied only when another runnable behavior exists. Default 1. */
@@ -379,6 +391,8 @@ function normalizeOptions(value: unknown): MascotAnimationOptions {
   if (weightMap) options.behaviorWeights = weightMap;
   const durationMap = durations(value.actionDurations);
   if (durationMap) options.actionDurations = durationMap;
+  const tailDwellMap = durations(value.actionTailDwellTicks);
+  if (tailDwellMap) options.actionTailDwellTicks = tailDwellMap;
   if (isRecord(value.actionHoldLimits)) {
     const holds: Record<string, IdleHoldSetting> = {};
     for (const [name, raw] of Object.entries(value.actionHoldLimits)) {
@@ -409,6 +423,10 @@ function normalizeOptions(value: unknown): MascotAnimationOptions {
     const dwellMap = durations({ dwell: value.travelDwellTicks }, 0);
     if (dwellMap?.dwell !== undefined) options.travelDwellTicks = dwellMap.dwell;
   }
+  if (value.landingDwellTicks !== undefined) {
+    const dwellMap = durations({ dwell: value.landingDwellTicks }, 0);
+    if (dwellMap?.dwell !== undefined) options.landingDwellTicks = dwellMap.dwell;
+  }
   if (value.activityLevel === "calm" || value.activityLevel === "normal" || value.activityLevel === "active") {
     options.activityLevel = value.activityLevel;
   }
@@ -429,10 +447,16 @@ function mergeOptions(base: MascotAnimationOptions, override: MascotAnimationOpt
   return {
     activityLevel: override.activityLevel ?? base.activityLevel,
     travelDwellTicks: override.travelDwellTicks ?? base.travelDwellTicks,
+    landingDwellTicks: override.landingDwellTicks ?? base.landingDwellTicks,
     allowBehaviors: override.allowBehaviors ?? base.allowBehaviors,
     denyBehaviors: override.denyBehaviors ?? base.denyBehaviors,
     behaviorWeights: { ...base.behaviorWeights, ...override.behaviorWeights },
     actionDurations: { ...base.actionDurations, ...override.actionDurations },
+    actionTailDwellTicks:
+      override.actionTailDwellTicks !== undefined &&
+      Object.keys(override.actionTailDwellTicks).length === 0
+        ? {}
+        : { ...base.actionTailDwellTicks, ...override.actionTailDwellTicks },
     // An explicitly empty map means "no hold cap". Calm has no
     // actionHoldLimits of its own; without this sentinel the previous preset's
     // limits would shine through even after switching back to calm.
@@ -461,10 +485,12 @@ function hasContent(options: MascotAnimationOptions): boolean {
   return (
     options.activityLevel !== undefined ||
     options.travelDwellTicks !== undefined ||
+    options.landingDwellTicks !== undefined ||
     options.allowBehaviors !== undefined ||
     options.denyBehaviors !== undefined ||
     (options.behaviorWeights !== undefined && Object.keys(options.behaviorWeights).length > 0) ||
     (options.actionDurations !== undefined && Object.keys(options.actionDurations).length > 0) ||
+    (options.actionTailDwellTicks !== undefined && Object.keys(options.actionTailDwellTicks).length > 0) ||
     (options.actionHoldLimits !== undefined && Object.keys(options.actionHoldLimits).length > 0) ||
     options.repeatBehaviorWeight !== undefined ||
     options.durationScale !== undefined ||
@@ -587,6 +613,11 @@ export class AnimationConfig {
         ? [presetOptions.travelDwellTicks[0], presetOptions.travelDwellTicks[1]]
         : presetOptions.travelDwellTicks;
     }
+    if (presetOptions.landingDwellTicks !== undefined) {
+      next.landingDwellTicks = Array.isArray(presetOptions.landingDwellTicks)
+        ? [presetOptions.landingDwellTicks[0], presetOptions.landingDwellTicks[1]]
+        : presetOptions.landingDwellTicks;
+    }
     if (presetOptions.forcedSwitchTicks !== undefined) next.forcedSwitchTicks = presetOptions.forcedSwitchTicks;
     if (presetOptions.maxBehaviorTicks !== undefined) next.maxBehaviorTicks = presetOptions.maxBehaviorTicks;
     if (presetOptions.repeatBehaviorWeight !== undefined) next.repeatBehaviorWeight = presetOptions.repeatBehaviorWeight;
@@ -607,6 +638,18 @@ export class AnimationConfig {
       };
     }
     next.actionHoldLimits = holds;
+
+    if (presetOptions.actionTailDwellTicks !== undefined) {
+      next.actionTailDwellTicks = Object.fromEntries(
+        Object.entries(presetOptions.actionTailDwellTicks).map(([key, val]) => [
+          key,
+          Array.isArray(val) ? [val[0], val[1]] : val,
+        ]),
+      );
+    } else {
+      delete next.actionTailDwellTicks;
+    }
+
     next.activityLevel = level;
     this.perMascot.set(mascot, next);
     this.resolved.delete(mascot);
@@ -769,6 +812,37 @@ export class AnimationConfig {
     return this.sampleDuration(setting) ?? 0;
   }
 
+  public landingDwellTicks(mascot: string): DurationSetting | undefined {
+    return this.optionsFor(mascot).landingDwellTicks;
+  }
+
+  public sampleLandingDwellTicks(mascot: string): number {
+    const setting = this.optionsFor(mascot).landingDwellTicks ?? this.optionsFor(mascot).travelDwellTicks;
+    if (setting === undefined) return 0;
+    return this.sampleDuration(setting) ?? 0;
+  }
+
+  public actionTailDwellTicks(mascot: string): Record<string, DurationSetting> | undefined {
+    return this.optionsFor(mascot).actionTailDwellTicks;
+  }
+
+  public sampleActionTailDwellTicks(mascot: string, ...actionNames: (string | undefined)[]): number | null {
+    const options = this.optionsFor(mascot);
+    const map = options.actionTailDwellTicks;
+    if (!map) return null;
+    for (const name of actionNames) {
+      if (!name) continue;
+      const setting = map[name];
+      if (setting !== undefined) {
+        const ticks = this.sampleDuration(setting);
+        if (ticks !== null && ticks > 0) {
+          return Math.max(1, Math.round(ticks * this.scale(mascot)));
+        }
+      }
+    }
+    return null;
+  }
+
   private sampleDuration(setting: DurationSetting | undefined): number | null {
     if (setting === undefined) return null;
     if (typeof setting === "number") return setting;
@@ -853,6 +927,9 @@ export class AnimationConfig {
     }
     if (options.actionHoldLimits && Object.keys(options.actionHoldLimits).length > 0) {
       lines.push(`actionHoldLimits: ${JSON.stringify(options.actionHoldLimits)} (idle waits only; complete pose order)`);
+    }
+    if (options.actionTailDwellTicks && Object.keys(options.actionTailDwellTicks).length > 0) {
+      lines.push(`actionTailDwellTicks: ${JSON.stringify(options.actionTailDwellTicks)} (tail dwell on gesture poses)`);
     }
     if (options.repeatBehaviorWeight !== undefined) lines.push(`repeatBehaviorWeight: ${options.repeatBehaviorWeight}`);
     if (options.durationScale !== undefined) lines.push(`durationScale: ${options.durationScale}`);
