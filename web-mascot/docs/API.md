@@ -400,6 +400,8 @@ usePreset("my-chill-pet");
 | --- | --- | --- |
 | `activityLevel` | `"calm" \| "normal" \| "active"` | 三档活跃度等级，默认 `"normal"` |
 | `travelDwellTicks` | `number \| [number, number]` | 纯位移动作到达目标点（target-x/y）后，若接续为位移动作，插入自适应站立驻留 tick 数 |
+| `landingDwellTicks` | `number \| [number, number]` | 落地与跳落动作接触地面完成反弹后，插入自适应站立待机缓冲 tick 数，并激活后继防落地即蹲守卫 |
+| `actionTailDwellTicks` | `Record<string, number \| [number, number]>` | 表演与情绪表达动作（比心 `HeartHeartHeartAction`/嘲讽 `FrickYouAction`）的最后一帧停留定格展示 tick 数 |
 | `forcedSwitchTicks` | `number` | 静止达到阈值后请求移动；有限行为完整结束，无限循环完成一整轮后退出。`0` 关闭 |
 | `pacerExemptBehaviors` | `string[]` | 不受静止换位请求影响的行为；所有有限表演均不会被计时器截断 |
 | `maxBehaviorTicks` | `number` | 行为年龄预算，到达后在完成点回全局池。不会截断有限序列、飞行、拖拽或有效互动 |

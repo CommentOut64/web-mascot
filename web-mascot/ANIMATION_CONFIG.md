@@ -56,6 +56,8 @@
 | `activityLevel` | `string` | 枚举 | `"calm"` / `"normal"` / `"active"` | `"calm"` | `"normal"` | `"active"` | **三档活跃度等级**：高层控制旋钮，快速切换节奏。 |
 | `preset` | `string` | 字符串 | 已注册预设名 | `"classic"` | `"normal"` | `"active"` | **基底预设**：决定底层继承哪套行为策略。 |
 | `travelDwellTicks` | `number \| [min,max]` | ticks (40ms) | `0 ~ 1,000,000` | `[50, 75]` (2.0~3.0s) | `[30, 50]` (1.2~2.0s) | `[0, 10]` (0~0.4s) | **位移到站驻留缓冲**：任何移动动作（地表奔跑行走、爬墙、爬天花板、走向同伴等）结束时，自适应插入对应表面的站立/抓壁定格停顿。 |
+| `landingDwellTicks` | `number \| [min,max]` | ticks (40ms) | `0 ~ 1,000,000` | `[75, 125]` (3.0~5.0s) | `[40, 60]` (1.6~2.4s) | `[15, 25]` (0.6~1.0s) | **着陆待机驻留缓冲**：任何下落与跳落动作接触地面完成反弹后，自适应插入地面微呼吸站立停顿缓冲，消除落地抽搐与生硬感；并触发后继防落地即蹲守卫。 |
+| `actionTailDwellTicks` | `Record<string, number \| [min,max]>` | ticks (40ms) | `0 ~ 1,000,000` | 无 (原生 0.4~0.6s) | `[40, 60]` (1.6~2.4s) | `[20, 30]` (0.8~1.2s) | **表演动作尾帧停留展示**：针对比心（Neuron `HeartHeartHeartAction` / `shime29a`）与嘲讽（Eviling `FrickYouAction` / `shime28`）等情绪表达动作，在最后一帧自动定格展示指定时长，避免一闪而过。Calm 模式为 `[60, 90]` (2.4~3.6s)。 |
 | `forcedSwitchTicks` | `number` | ticks (40ms) | `0 ~ 1,000,000` | `0` | `750` (30s) | `250` (10s) | 静止换位请求：有限行为结束后执行，无限循环完成一整轮后退出。`0` 关闭。 |
 | `maxBehaviorTicks` | `number` | ticks (40ms) | `0 ~ 1,000,000` | `0` | `1500` (60s) | `800` (32s) | 行为年龄预算：在完成点回全局池，不清空正在执行的有限序列。 |
 | `pacerExemptBehaviors` | `string[]` | 数组 | 行为名 | `[]` | `["SitWhileDanglingLegs"]` | `["SitWhileDanglingLegs"]` | 不受静止换位请求影响；有限表演原本就不会被调度计时器截断。 |
@@ -213,6 +215,20 @@
 
     // [maxTravelPx] 横向漫游最大距离，防止横穿全屏破坏网页正文排版 (px, 0=不限制)
     "maxTravelPx": 240,
+
+    // [travelDwellTicks] 移动到达目标点后的站立驻留缓冲 [min, max] (ticks, 1tick=40ms)
+    "travelDwellTicks": [30, 50],
+
+    // [landingDwellTicks] 落地反弹接触地面后的自然站立停顿缓冲 [min, max] (ticks)
+    "landingDwellTicks": [40, 60],
+
+    // [actionTailDwellTicks] 表演动作尾帧停留展示 (比心/竖中指等手势定格) [min, max] (ticks)
+    "actionTailDwellTicks": {
+      "HeartHeartHeartAction": [40, 60],
+      "FrickYouAction": [40, 60],
+      "HeartHeartHeart": [40, 60],
+      "FrickYou": [40, 60]
+    },
 
     // 仅调整已审核的静止等待帧，其余帧时长和完整顺序保持
     "actionHoldLimits": {
